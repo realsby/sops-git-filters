@@ -1,0 +1,18 @@
+# Copy into your repo root as `.sops.yaml`.
+# Every recipient listed can decrypt; add at least one break-glass key
+# that lives OUTSIDE the machines that normally use the repo.
+#
+# Generate an age key:  age-keygen -o key.txt   (public key is printed)
+creation_rules:
+  # Order matters: first matching rule wins.
+  - path_regex: \.env$
+    key_groups:
+      - age:
+          - age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        # Optionally add cloud KMS alongside age:
+        # kms:
+        #   - arn: arn:aws:kms:eu-central-1:111111111111:key/xxxxxxxx-...
+  - path_regex: .*
+    key_groups:
+      - age:
+          - age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq

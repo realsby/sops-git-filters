@@ -1,0 +1,18 @@
+# Hook manifest so this repo can be consumed directly by pre-commit:
+#
+#   repos:
+#     - repo: https://github.com/realsby/sops-git-filters
+#       rev: v1.0.0
+#       hooks:
+#         - id: sops-encryption-guard
+#
+# Note: the guard is the SECOND line of defense. The first (the
+# clean/smudge filters) still needs install.sh run once per clone —
+# see README.md.
+- id: sops-encryption-guard
+  name: Verify SOPS-managed files are staged encrypted
+  entry: encryption-guard.sh
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]

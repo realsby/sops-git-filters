@@ -1,0 +1,8 @@
+# Copy the relevant lines into your repo's .gitattributes.
+# filter=sops → transparent encrypt (git add) / decrypt (checkout)
+# diff=sops   → `git diff` / `git log -p` show decrypted content
+
+.env                    filter=sops diff=sops
+**/.env                 filter=sops diff=sops
+secrets/deploy.key      filter=sops diff=sops
+config/credentials.yaml filter=sops diff=sops
