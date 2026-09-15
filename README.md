@@ -25,6 +25,7 @@ Four small, self-contained bash scripts. No daemon, no gpg, no custom key format
 - [Onboarding a teammate / a new machine](#onboarding-a-teammate--a-new-machine)
 - [The pre-commit guard](#the-pre-commit-guard)
 - [Security model](#security-model)
+- [Repository policy](#repository-policy)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
@@ -230,6 +231,10 @@ What you must still do:
 - **Client-side hooks are opt-in.** A collaborator who never runs `install.sh`/`pre-commit install` has no filter and no guard; if they create a *new* secret file it lands in plaintext. Mitigate with a server-side/CI check (a grep for `ENC[AES256_GCM` on managed paths is enough).
 - **History is forever.** Anything committed in plaintext *before* adoption stays in history — rewrite history or rotate those secrets.
 - **Rotate on suspicion.** Ciphertext in a public/leaked repo is only as strong as your key custody.
+
+## Repository policy
+
+`main` carries GitHub branch protection (no force-push, no deletion, enforced for admins) — this repository is public, so the Free plan allows it. The three private consumer repositories in this estate cannot have server-side protection on GitHub Free ("Upgrade to GitHub Pro or make this repository public"); by decision of 2026-09-15 they stay on Free and rely on client-side `no-commit-to-branch` pre-commit hooks instead. Recorded here so an audit of the tooling does not re-raise it.
 
 ## Limitations
 
