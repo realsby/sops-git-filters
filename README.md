@@ -12,7 +12,7 @@ git commit            →  guarded by a pre-commit hook that blocks
                          plaintext from ever reaching history
 ```
 
-Three small, self-contained bash scripts. No daemon, no gpg, no custom key format — keys are whatever SOPS supports (age, AWS/GCP/Azure KMS, Vault, PGP), so you get multi-recipient and break-glass keys for free.
+Four small, self-contained bash scripts. No daemon, no gpg, no custom key format — keys are whatever SOPS supports (age, AWS/GCP/Azure KMS, Vault, PGP), so you get multi-recipient and break-glass keys for free.
 
 ## Contents
 
@@ -67,6 +67,8 @@ The pre-commit stash dance is also handled: the clean filter compares against th
    - identical → output the **existing** ciphertext (no new IV → no false diff)
    - different → re-encrypt
 
+`harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask — `0644` on a default workstation. `install.sh` runs the script once and installs `post-checkout` and `post-merge` hooks that re-run it, so private keys and kubeconfigs stay `0600` after every checkout, pull and merge. See [Security model](#security-model).
+
 ## Requirements
 
 - `git` ≥ 2.x, `bash` ≥ 3.2 (macOS stock bash is fine)
@@ -88,7 +90,7 @@ Updating later: `git -C utilities/sops-git-filters pull origin main`, then commi
 
 ### B. Vendored copy (no submodule mechanics)
 
-Copy `clean-filter.sh`, `install.sh`, `encryption-guard.sh` into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
+Copy `clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh` into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
 
 ### C. Guard only, via pre-commit remote
 
@@ -160,7 +162,7 @@ pre-commit install
 
 ## Storage formats: json vs dotenv
 
-`.sops-filter.conf` at your repo root selects how ciphertext is stored in git (see [`examples/sops-filter.conf`](examples/sops-filter.conf)):
+`.sops-filter.conf` at your repo root selects how ciphertext is stored in git — and, via `SOPS_FILE_MODE`, the permission mode applied to the decrypted files (see [`examples/sops-filter.conf`](examples/sops-filter.conf) and [Security model](#security-model)):
 
 | | `json` (default) | `dotenv` |
 |---|---|---|
@@ -219,10 +221,12 @@ What you get:
 - **Fail-closed staging.** The clean filter exits non-zero when it can't encrypt (`sops` missing, `.sops.yaml` missing, encryption error) and `filter.sops.required=true` turns that into an aborted `git add` — the failure mode is a loud error, never a plaintext commit.
 - **Defense in depth.** The guard re-checks every staged blob at commit time with no dependency on the filter machinery.
 - **No plaintext at rest in git.** Remote, object store, and stash hold ciphertext only. Multi-recipient keys and break-glass access come from SOPS key groups.
+- **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600`; `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf`, or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`.
 
 What you must still do:
 
-- **Protect working trees.** Checked-out secrets are plaintext on disk — that's the point. Full-disk encryption and access control are on you.
+- **Protect working trees.** Checked-out secrets are plaintext on disk — that's the point. `0600` keeps other local accounts out; full-disk encryption and access control against everything else are on you.
+- **Re-run the tightening where hooks don't reach.** The hooks live in `.git/hooks`, which is not cloned, so a clone that never runs `install.sh` gets neither the filters nor the permissions. Anything that materialises secrets outside git (`sops decrypt > file`, a deploy script, an editor's temp copy) sets its own mode — run `harden-permissions.sh` afterwards or set the mode yourself.
 - **Client-side hooks are opt-in.** A collaborator who never runs `install.sh`/`pre-commit install` has no filter and no guard; if they create a *new* secret file it lands in plaintext. Mitigate with a server-side/CI check (a grep for `ENC[AES256_GCM` on managed paths is enough).
 - **History is forever.** Anything committed in plaintext *before* adoption stays in history — rewrite history or rotate those secrets.
 - **Rotate on suspicion.** Ciphertext in a public/leaked repo is only as strong as your key custody.
