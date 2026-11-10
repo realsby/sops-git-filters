@@ -121,6 +121,13 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
 	fi
 done
 
+# A selection that runs nothing must not look like a success: a typo in
+# the filter, or a test that was renamed, would pass unnoticed.
+if [[ $((passed + failed + skipped)) -eq 0 ]]; then
+	echo "tests/run.sh: no test matches '${filter}'" >&2
+	exit 1
+fi
+
 echo
 if [[ "${skipped}" -gt 0 ]]; then
 	echo "${passed} passed, ${failed} failed, ${skipped} skipped"
