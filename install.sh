@@ -43,17 +43,40 @@
 # ║  hooks are installed so later checkouts and merges do the same.  ║
 # ║  Set SOPS_FILTER_INSTALL_HOOKS=0 to skip the hook install.       ║
 # ║                                                                  ║
+# ║  It also looks at what git already holds: a SOPS-managed file    ║
+# ║  whose blob in the index or in HEAD is not an encrypted SOPS     ║
+# ║  document was committed in plaintext (before the filter          ║
+# ║  existed, or from a clone without it). Those are listed, with    ║
+# ║  the command that encrypts them.                                 ║
+# ║                                                                  ║
+# ║  Exit status:                                                    ║
+# ║    0  filters and hooks are in place, nothing left to do         ║
+# ║    1  nothing was installed (not a repo, sops missing or too     ║
+# ║       old, bad .sops-filter.conf, conflicting git config)        ║
+# ║    3  filters and hooks are in place, but files need attention:  ║
+# ║       they are tracked in plaintext (see the list printed)       ║
+# ║                                                                  ║
 # ║  Requires:                                                       ║
-# ║    - sops on PATH                                                ║
+# ║    - sops >= 3.11.0 on PATH                                      ║
 # ║    - .sops.yaml in the target repo root (creation rules / keys)  ║
 # ║    - .gitattributes with `filter=sops diff=sops` on target files ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
 
+# Byte-wise pattern matching, whatever the caller's locale is.
+export LC_ALL=C
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILTER_SCRIPT="${SCRIPT_DIR}/clean-filter.sh"
 HARDEN_SCRIPT="${SCRIPT_DIR}/harden-permissions.sh"
+
+if [[ ! -r "${SCRIPT_DIR}/lib.sh" ]]; then
+	echo "Error: lib.sh is missing next to install.sh (${SCRIPT_DIR}). Update or re-copy sops-git-filters." >&2
+	exit 1
+fi
+# shellcheck source=lib.sh
+. "${SCRIPT_DIR}/lib.sh"
 
 # ── Resolve the repository to configure ────
 # The target is the repo the caller is standing in. If the caller is
@@ -101,24 +124,28 @@ if ! command -v sops >/dev/null 2>&1; then
 	exit 1
 fi
 
-# ── Storage format (must match clean-filter.sh) ────
-STORE_FORMAT="json"
-if [[ -f "${TARGET_ROOT}/.sops-filter.conf" ]]; then
-	# `|| true`: the file may hold no SOPS_STORE_FORMAT line at all (only
-	# SOPS_FILE_MODE, say). grep then exits 1, and under `set -euo pipefail`
-	# that would end this script without a word.
-	conf_value=$({ grep -E '^SOPS_STORE_FORMAT=' "${TARGET_ROOT}/.sops-filter.conf" || true; } |
-		tail -1 | cut -d= -f2 | tr -d '[:space:]')
-	[[ -n "${conf_value}" ]] && STORE_FORMAT="${conf_value}"
+# ── Minimum sops version ────
+# Older releases can store a file in clear inside a SOPS envelope (see
+# SGF_MIN_SOPS_VERSION in lib.sh). clean-filter.sh would refuse such a
+# result, so nothing leaks — but every `git add` would fail. Say so now.
+SOPS_VERSION="$(sgf_sops_version)"
+if [[ -z "${SOPS_VERSION}" ]]; then
+	echo "Error: could not read the version of $(command -v sops) ('sops --version')." >&2
+	exit 1
 fi
+if ! sgf_version_ge "${SOPS_VERSION}" "${SGF_MIN_SOPS_VERSION}"; then
+	echo "Error: sops ${SOPS_VERSION} is too old; sops-git-filters needs ${SGF_MIN_SOPS_VERSION} or newer." >&2
+	echo "Up to 3.10.2, sops can leave a whole file unencrypted when the matching" >&2
+	echo ".sops.yaml rule uses encrypted_regex, unencrypted_regex or a suffix option." >&2
+	exit 1
+fi
+
+# ── Storage format (the same reader clean-filter.sh uses) ────
+STORE_FORMAT="$(sgf_store_format "${TARGET_ROOT}")" || exit 1
 
 case "${STORE_FORMAT}" in
 json) DECRYPT_ARGS="--input-type json --output-type binary" ;;
 dotenv) DECRYPT_ARGS="--input-type dotenv --output-type dotenv" ;;
-*)
-	echo "Error: invalid SOPS_STORE_FORMAT '${STORE_FORMAT}' in .sops-filter.conf (expected: json or dotenv)" >&2
-	exit 1
-	;;
 esac
 
 # ── Compose the filter commands ────
@@ -208,15 +235,44 @@ fi
 # them in place — but ONLY when the working copy is byte-identical to
 # the blob in the index (proof the smudge never ran and there are no
 # local edits to lose).
+#
+# The same walk answers a second question: is the version git holds
+# encrypted at all? A blob that is not a SOPS document was committed in
+# plaintext, before the filter existed or from a clone without it.
+# Decrypting cannot work on those; they are collected and reported at
+# the end instead.
 FOUND_ANY=0
+PLAINTEXT_IN_GIT=""
 while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
 	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
 	FOUND_ANY=1
 	f="${TARGET_ROOT}/${path}"
-	[[ -f "${f}" ]] || continue
 
-	index_sha=$(git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk '{print $2}')
+	# "<mode> <object id>" of the index entry. GIT_LITERAL_PATHSPECS: the
+	# path is a file name here, not a pattern.
+	index_entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}')
+	index_mode="${index_entry%% *}"
+	index_sha="${index_entry#* }"
 	[[ -n "${index_sha}" ]] || continue
+	# A symlink or a submodule: git never runs a filter on these.
+	[[ "${index_mode}" != "120000" && "${index_mode}" != "160000" ]] || continue
+
+	# ── Is the tracked version an encrypted SOPS document? ────
+	where=""
+	sgf_blob_is_sops_doc "${STORE_FORMAT}" "${index_sha}" "${TARGET_ROOT}" || where="index"
+	head_sha="$(git -C "${TARGET_ROOT}" rev-parse -q --verify "HEAD:${path}" 2>/dev/null || true)"
+	if [[ -n "${head_sha}" && "${head_sha}" == "${index_sha}" ]]; then
+		[[ -z "${where}" ]] || where="index and HEAD"
+	elif [[ -n "${head_sha}" ]]; then
+		sgf_blob_is_sops_doc "${STORE_FORMAT}" "${head_sha}" "${TARGET_ROOT}" || where="${where:+${where} and }HEAD"
+	fi
+	if [[ -n "${where}" ]]; then
+		PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (${where})"$'\n'
+		# Nothing to decrypt when the index version is not ciphertext.
+		[[ "${where}" == "HEAD" ]] || continue
+	fi
+
+	[[ -f "${f}" ]] || continue
 	worktree_sha=$(git hash-object --no-filters -- "${f}")
 	[[ "${worktree_sha}" == "${index_sha}" ]] || continue
 
@@ -325,4 +381,31 @@ EOF
 		chmod +x "${hook_path}"
 		echo "Installed ${hook_name} hook (re-applies 0600 after checkout/merge)."
 	done
+fi
+
+# ── Report files that git holds in plaintext ────
+# Last, so it is the final thing on screen, and with its own exit status
+# so a setup script notices: the filters are installed, but these secrets
+# are readable by anyone who can read the repository.
+if [[ -n "${PLAINTEXT_IN_GIT}" ]]; then
+	{
+		echo ""
+		echo "========================================================"
+		echo " NOT ENCRYPTED IN GIT"
+		echo "========================================================"
+		echo ""
+		echo " These files have filter=sops in .gitattributes, but the version"
+		echo " git holds is not an encrypted SOPS document (format: ${STORE_FORMAT})."
+		echo " They were committed before the filter existed, or from a clone"
+		echo " that never ran install.sh:"
+		echo ""
+		printf '%s' "${PLAINTEXT_IN_GIT}"
+		echo ""
+		echo " To fix:"
+		echo "   1. Encrypt them:  git add --renormalize -- <file>   then commit."
+		echo "   2. Rotate those secrets. The plaintext stays in the history of"
+		echo "      every clone and of the remote."
+		echo "========================================================"
+	} >&2
+	exit 3
 fi
