@@ -95,3 +95,48 @@ test_install_accepts_conf_without_store_format() {
 	assert_ne "$(git config --local --get filter.sops.clean || true)" "" "filter.sops.clean"
 	assert_eq "$(cat .env)" "A=1" "working copy after install.sh"
 }
+
+# Up to 3.10.2 sops can store a whole file in clear (see lib.sh).
+test_install_refuses_old_sops() {
+	new_repo repo
+	stub ../fakebin sops <<'STUB'
+case " $* " in
+*" --version "*) echo "sops 3.10.2"; exit 0 ;;
+esac
+exec "${REAL}" "$@"
+STUB
+	run env PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status"
+	assert_contains "${OUT}" "3.10.2 is too old" "install.sh message"
+	assert_contains "${OUT}" "3.11.0" "install.sh message"
+}
+
+# A secret that was committed before the filter existed stays plaintext
+# in git. install.sh must say so, not blame the keys.
+test_install_reports_plaintext_tracked_before_adoption() {
+	git init -q repo
+	cd repo || exit 1
+	printf 'P=legacy\n' >.env
+	git add .env
+	git commit -q -m "plaintext secret, before the filter"
+	vendor_tool
+	write_sops_yaml
+	printf '.env filter=sops diff=sops\n' >.gitattributes
+	git add -A
+	git commit -q -m "adopt sops-git-filters"
+
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status"
+	assert_contains "${OUT}" "NOT ENCRYPTED IN GIT" "install.sh report"
+	assert_contains "${OUT}" ".env  (index and HEAD)" "install.sh report"
+	assert_not_contains "${OUT}" "Could not decrypt .env" "the misleading key warning"
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filters are installed all the same"
+
+	# The fix the report prints.
+	git add --renormalize -- .env
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "blob after --renormalize"
+	assert_not_contains "$(stored .env)" 'legacy' "blob after --renormalize"
+	git commit -q -m "encrypt .env"
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status once the file is encrypted"
+}
