@@ -12,7 +12,7 @@ git commit            →  guarded by a pre-commit hook that blocks
                          plaintext from ever reaching history
 ```
 
-Four small, self-contained bash scripts. No daemon, no gpg, no custom key format — keys are whatever SOPS supports (age, AWS/GCP/Azure KMS, Vault, PGP), so you get multi-recipient and break-glass keys for free.
+A handful of small bash scripts. No daemon, no gpg, no custom key format — keys are whatever SOPS supports (age, AWS/GCP/Azure KMS, Vault, PGP), so you get multi-recipient and break-glass keys for free.
 
 ## Contents
 
@@ -58,7 +58,8 @@ The pre-commit stash dance is also handled: the clean filter compares against th
                  (plaintext diffs)          (routes diffs through smudge)
 
                  git commit ──▶ encryption-guard.sh (pre-commit)
-                                rejects staged blobs without ENC[AES256_GCM markers
+                                rejects any tracked secret that is not an
+                                encrypted SOPS document
 ```
 
 `clean-filter.sh` decision tree on every `git add`:
@@ -68,13 +69,14 @@ The pre-commit stash dance is also handled: the clean filter compares against th
 3. File exists? → decrypt the stored blob, compare plaintexts:
    - identical → output the **existing** ciphertext (no new IV → no false diff)
    - different → re-encrypt
+4. Whatever `sops` returned is checked before git gets it: it must be a SOPS document with every value encrypted. If it is not, **exit non-zero**. (A creation rule with `encrypted_regex` and the like, or an old `sops`, can leave content in clear inside a valid-looking envelope.)
 
 `harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask — `0644` on a default workstation. `install.sh` runs the script once and installs `post-checkout` and `post-merge` hooks that re-run it, so private keys and kubeconfigs stay `0600` after every checkout, pull and merge. See [Security model](#security-model).
 
 ## Requirements
 
-- `git` ≥ 2.x, `bash` ≥ 3.2 (macOS stock bash is fine)
-- [`sops`](https://github.com/getsops/sops) ≥ 3.9 on PATH
+- `git` ≥ 2.18, `bash` ≥ 3.2 (macOS stock bash is fine)
+- [`sops`](https://github.com/getsops/sops) ≥ 3.11.0 on PATH. `install.sh` refuses older versions: up to 3.10.2, `sops` stores the whole file in clear when the matching `.sops.yaml` rule uses `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`.
 - A SOPS key backend: [age](https://github.com/FiloSottile/age) (simplest), or any KMS SOPS supports
 
 ## Installation
@@ -92,7 +94,7 @@ Updating later: `git -C utilities/sops-git-filters pull origin main`, then commi
 
 ### B. Vendored copy (no submodule mechanics)
 
-Copy `clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh` into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
+Copy every `*.sh` file (`clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh` and `lib.sh`, which the others load) into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
 
 ### C. Guard only, via pre-commit remote
 
@@ -169,15 +171,25 @@ pre-commit install
 | | `json` (default) | `dotenv` |
 |---|---|---|
 | Works for | any text file (keys, PEM, YAML, .env) | `KEY=value` files only |
-| Stored as | one SOPS JSON document, whole body encrypted | keys + comments readable, values `ENC[...]` |
+| Stored as | one SOPS JSON document, whole body encrypted | key names readable, values and comments `ENC[...]` |
 | Readable diffs in git hosting UI | no (use local `git diff`) | partially (key names visible) |
 | Deploy-time native decryption by file extension (e.g. doco-cd for `.env`) | no | yes |
 | Blank lines in the file | fine | **not representable** — use lone `#` lines as separators, or the unchanged-content check breaks and re-encrypts on every add |
+| Values that span several lines | fine | **refused** — see below |
+| `.sops.yaml` rules that encrypt only some keys | ignored by `sops` (the whole file is one value) | **refused** — every value must be encrypted |
 
 ```
 # .sops-filter.conf
 SOPS_STORE_FORMAT=dotenv
 ```
+
+**What the dotenv format refuses.** `sops` reads a dotenv file line by line and stores everything left of the first `=` as a key, in clear. The clean filter therefore checks the file before `sops` sees it and refuses (naming the line number, never the content):
+
+- a line that is neither `# comment` nor `KEY=VALUE` (`#` must be the first character of a comment line);
+- a key with characters outside `A-Z a-z 0-9 _ . -` (a leading `export ` is fine);
+- a value that opens a quote it does not close on the same line, i.e. a multi-line value. Its continuation lines would become plaintext keys. Use `\n` inside one line, or the json format.
+
+It also refuses the result if any value came back unencrypted: a creation rule with `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`, or a key ending in `_unencrypted` (the `sops` default suffix).
 
 Pick the format **before the first encrypted commit**. Migrating later means: change `.sops-filter.conf`, re-run `install.sh` (it updates the smudge/textconv commands), then force re-encryption of every managed file (`touch` them, `git add`) — old clones must re-run `install.sh` too.
 
@@ -194,11 +206,17 @@ If step 3 warns `Could not decrypt ... keys unavailable` — your key isn't set 
 
 ## The pre-commit guard
 
-`encryption-guard.sh` is the independent second line of defense: even if the filters are missing, misconfigured, or bypassed, plaintext cannot reach history.
+`encryption-guard.sh` is the independent second line of defense, for the cases where the filter is missing, misconfigured or bypassed.
 
-- Finds staged files whose git attribute is `filter=sops` (via `git check-attr`, so nested `.gitattributes` work).
-- Blocks the commit if `.sops.yaml` is missing.
-- Blocks the commit if a staged blob lacks the `ENC[AES256_GCM` ciphertext marker. Every SOPS-encrypted blob contains it in every output format (both values and the MAC are ENC-wrapped) — while merely *mentioning* "sops" in a plaintext file doesn't trip it, and a plaintext secret can't fake it accidentally.
+- Looks at **every** file in the index whose git attribute is `filter=sops` (via `git check-attr`, so nested `.gitattributes` work), not only at the files staged for this commit. A secret that was committed in plaintext earlier blocks every commit until it is fixed.
+- Reads each blob by object id and checks its structure. In the json format it must be `{"data": "<one ENC[...] value>", "sops": {...}}` and nothing else. In the dotenv format every value and every comment must be `ENC[...]`, and the `sops_` metadata must be there. A search for the string `ENC[AES256_GCM` is not enough: a plaintext file can mention it, and a SOPS envelope can carry plaintext while its MAC is `ENC[...]`.
+- Skips symlinks and submodules (git never filters them).
+- Blocks the commit if `.sops.yaml` is missing while SOPS-managed files are tracked.
+- Fails closed: if it cannot list the index, read the attributes or read a blob, the commit is blocked.
+
+It does not stop a commit made with `--no-verify`, and git runs no pre-commit hook for a merge that needs no manual step. Run the same script in CI to cover those (it needs only a checkout, no keys).
+
+To fix a file it reports: run `install.sh`, then `git add --renormalize -- <file>`, and rotate the secret if it was ever pushed.
 
 With the [pre-commit framework](https://pre-commit.com), using the submodule path:
 
@@ -222,7 +240,7 @@ What you get:
 
 - **Fail-closed staging.** The clean filter exits non-zero when it can't encrypt (`sops` missing, `.sops.yaml` missing, encryption error) and `filter.sops.required=true` turns that into an aborted `git add` — the failure mode is a loud error, never a plaintext commit. `install.sh` writes that flag on every run, first, and stops if a `filter.sops.process` setting would override the filter.
 - **`.sops.yaml` alone decides the recipients.** `sops` lets `SOPS_AGE_RECIPIENTS`, `SOPS_KMS_ARN`, `SOPS_GCP_KMS_IDS`, `SOPS_AZURE_KEYVAULT_URLS`, `SOPS_VAULT_URIS`, `SOPS_PGP_FP` and `SOPS_HUAWEICLOUD_KMS_IDS` replace the keys of a creation rule. The clean filter drops them (with a one-line note), so a variable left over in your shell cannot encrypt a secret for the wrong keys.
-- **Defense in depth.** The guard re-checks every staged blob at commit time with no dependency on the filter machinery.
+- **The output is checked, twice.** The clean filter refuses what `sops` returns unless it is a completely encrypted SOPS document. The guard then re-checks every tracked SOPS-managed blob at commit time, with no dependency on the filter machinery.
 - **No plaintext at rest in git.** Remote, object store, and stash hold ciphertext only. Multi-recipient keys and break-glass access come from SOPS key groups.
 - **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600`; `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf`, or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`.
 
@@ -269,7 +287,19 @@ With this version, they don't — the clean path in `.git/config` is repo-relati
 The filter compares against the index specifically to keep stash blobs identical. If you hit a conflict anyway you're likely on an older clean filter — re-run `install.sh` on a current checkout.
 
 **Guard blocks a commit but `git show :file` looks encrypted**
-The stored blob must contain `ENC[AES256_GCM`. If it doesn't but looks "sops-ish", the file may hold only SOPS *metadata* (corrupt or hand-edited). Re-add the file to rebuild the blob.
+The guard wants a *completely* encrypted SOPS document in the format set in `.sops-filter.conf`: one `ENC[...]` value under `"data"` (json), or every value and comment as `ENC[...]` (dotenv). A blob with one value in clear, with extra keys, or in the other format is refused. Rebuild it with `git add --renormalize -- <file>`. The guard also names files you did not touch in this commit: it checks everything that is tracked.
+
+**`install.sh` ends with "NOT ENCRYPTED IN GIT" (exit status 3)**
+The filters and hooks are installed, but the listed files are tracked in plaintext: they were committed before the filter existed, or from a clone that never ran `install.sh`. Run `git add --renormalize -- <file>`, commit, and rotate those secrets — the plaintext stays in history.
+
+**`git add` fails with "sops did not encrypt … completely"**
+`sops` returned a document with content in clear, and the clean filter refused it. The matching `.sops.yaml` rule has `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix` (give the SOPS-managed paths a rule of their own without those), a dotenv key ends in `_unencrypted`, or `sops` is older than 3.11.0.
+
+**`git add` fails with "cannot be stored in the dotenv format"**
+The file has a line the dotenv format would store in clear or not at all; the message names the line number. See [what the dotenv format refuses](#storage-formats-json-vs-dotenv).
+
+**`install.sh` stops with "sops X.Y.Z is too old"**
+Install `sops` 3.11.0 or newer. Older versions can store a whole file unencrypted (see [Requirements](#requirements)).
 
 **`git diff` errors with "unable to read files" on encrypted paths**
 Diffing managed files requires decryption (git routes the blobs through the smudge filter); without keys it fails loudly (list changed files with `git diff --stat` or `--no-textconv` instead). Re-run `install.sh` after key setup.
