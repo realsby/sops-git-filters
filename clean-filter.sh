@@ -142,7 +142,7 @@ encrypt_input() {
 	# It must be a SOPS document with every value encrypted, and for a
 	# non-empty file in json mode the "data" value must be ciphertext.
 	if ! sgf_is_sops_doc "${STORE_FORMAT}" "${encrypted}" ||
-		[[ "${STORE_FORMAT}" == "json" && -n "${INPUT}" && -z "${SGF_DATA_TOKEN}" ]]; then
+		[[ "${STORE_FORMAT}" == "json" && -n "${INPUT}" && "${SGF_DATA_KIND}" != "enc" ]]; then
 		echo "ERROR: sops did not encrypt ${FILENAME} completely — refusing to stage it." >&2
 		echo "       Likely cause: the matching .sops.yaml rule has encrypted_regex, unencrypted_regex," >&2
 		echo "       encrypted_suffix or unencrypted_suffix (this filter needs the whole file encrypted)," >&2

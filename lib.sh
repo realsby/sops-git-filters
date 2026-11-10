@@ -65,54 +65,95 @@ sgf_other_format() {
 }
 
 # ── One encrypted value ───────────────────────────────────────────
-# sgf_is_enc_token <string>
-# True when the string is exactly one SOPS ciphertext value:
+# An awk function shared by the two document checks below. True when
+# the string is exactly one SOPS ciphertext value:
 #   ENC[AES256_GCM,data:<base64>,iv:<base64>,tag:<base64>,type:<word>]
 # and holds no character outside that alphabet.
-sgf_is_enc_token() {
-	local token="$1"
-	case "${token}" in
-	'ENC[AES256_GCM,data:'*',iv:'*',tag:'*',type:'*']') ;;
-	*) return 1 ;;
-	esac
-	case "${token}" in
-	*[!]A-Za-z0-9+/=,:_[]*) return 1 ;;
-	*) ;;
-	esac
-	return 0
+#
+# The checks are written in awk, not in bash, for speed: bash pattern
+# matching on a whole document takes time quadratic in its length (a
+# few hundred kilobytes took minutes), awk reads it once.
+SGF_AWK_IS_TOKEN='
+function is_token(s) {
+	if (substr(s, 1, 20) != "ENC[AES256_GCM,data:") return 0
+	if (substr(s, length(s), 1) != "]") return 0
+	if (index(s, ",iv:") == 0 || index(s, ",tag:") == 0 || index(s, ",type:") == 0) return 0
+	return match(s, "[^]A-Za-z0-9+/=,:_[]") == 0
 }
+function ltrim(s) {
+	sub(/^[ \t\r\n]+/, "", s)
+	return s
+}
+'
 
 # ── json store ────────────────────────────────────────────────────
-# sgf_is_sops_json <document>
-# True for the document the clean filter stores in json mode and for
-# nothing else:
+# sgf_json_envelope_kind   (document on stdin)
+# Succeeds for the document the clean filter stores in json mode and
+# for nothing else:
 #
 #   { "data": "<one ENC[...] value, or empty>", "sops": { ... } }
 #
 # "data" must be the first key and "sops" the second and last one.
-# An empty "data" is what sops writes for an empty file. The value
-# found is left in SGF_DATA_TOKEN for callers that need to tell the
-# two cases apart.
-SGF_DATA_TOKEN=""
-sgf_is_sops_json() {
-	local doc="$1" rest after
-	local head_re='^[[:space:]]*\{[[:space:]]*"data":[[:space:]]*"'
-	local sops_re='^[[:space:]]*,[[:space:]]*"sops":[[:space:]]*\{'
-	local tail_re='\}[[:space:]]*\}[[:space:]]*$'
-
-	SGF_DATA_TOKEN=""
-	[[ "${doc}" =~ ${head_re} ]] || return 1
-
-	rest="${doc#*\"data\":*\"}"       # after the opening quote of the value
-	SGF_DATA_TOKEN="${rest%%\"*}"     # up to the next quote
-	after="${rest#*\"}"               # after the closing quote
-
-	if [[ -n "${SGF_DATA_TOKEN}" ]]; then
-		sgf_is_enc_token "${SGF_DATA_TOKEN}" || return 1
-	fi
-	[[ "${after}" =~ ${sops_re} ]] || return 1
-	[[ "${after}" =~ ${tail_re} ]] || return 1
-	return 0
+# Prints "enc" when "data" holds ciphertext and "empty" when it is the
+# empty string, which is what sops writes for an empty file.
+#
+# The whole input is read even when the answer is known after the
+# first line, so the writer never gets a broken pipe.
+sgf_json_envelope_kind() {
+	awk "${SGF_AWK_IS_TOKEN}"'
+	function reject() { failed = 1 }
+	failed { next }
+	state == 0 {
+		# Before and at the start of the document: "{", then "data".
+		# sops prints them on two lines; a minified document has one.
+		if (head == "" && $0 ~ /^[ \t\r]*$/) next
+		head = head $0 "\n"
+		lines++
+		h = ltrim(head)
+		if (substr(h, 1, 1) != "{") { reject(); next }
+		h = ltrim(substr(h, 2))
+		if (h == "") {
+			if (lines > 2) reject()
+			next
+		}
+		if (substr(h, 1, 6) != "\"data\"") { reject(); next }
+		h = ltrim(substr(h, 7))
+		if (substr(h, 1, 1) != ":") { reject(); next }
+		h = ltrim(substr(h, 2))
+		if (substr(h, 1, 1) != "\"") { reject(); next }
+		h = substr(h, 2)
+		# A JSON string cannot hold a raw newline or an unescaped quote:
+		# the value ends at the next quote, on this line.
+		closing = index(h, "\"")
+		if (closing == 0) { reject(); next }
+		token = substr(h, 1, closing - 1)
+		if (token != "" && !is_token(token)) { reject(); next }
+		kind = (token == "") ? "empty" : "enc"
+		rest = substr(h, closing + 1)
+		head = ""
+		state = 1
+		next
+	}
+	{
+		# After the value: the metadata. A sops document has a few dozen
+		# lines here; refuse anything that goes on and on.
+		if (++tail_lines > 5000) { reject(); next }
+		rest = rest $0 "\n"
+	}
+	END {
+		if (failed || state != 1) exit 1
+		r = ltrim(rest)
+		if (substr(r, 1, 1) != ",") exit 1
+		r = ltrim(substr(r, 2))
+		if (substr(r, 1, 6) != "\"sops\"") exit 1
+		r = ltrim(substr(r, 7))
+		if (substr(r, 1, 1) != ":") exit 1
+		r = ltrim(substr(r, 2))
+		if (substr(r, 1, 1) != "{") exit 1
+		if (r !~ /}[ \t\r\n]*}[ \t\r\n]*$/) exit 1
+		print kind
+	}
+	'
 }
 
 # ── dotenv store ──────────────────────────────────────────────────
@@ -124,18 +165,7 @@ sgf_is_sops_json() {
 # and the metadata carries sops_mac and sops_version. A value or a
 # comment left in clear makes it false.
 sgf_is_sops_dotenv() {
-	awk '
-	function is_token(s,   t) {
-		if (substr(s, 1, 20) != "ENC[AES256_GCM,data:") return 0
-		if (substr(s, length(s), 1) != "]") return 0
-		if (index(s, ",iv:") == 0 || index(s, ",tag:") == 0 || index(s, ",type:") == 0) return 0
-		t = s
-		gsub(/[A-Za-z0-9+=,:_]/, "", t)
-		gsub("/", "", t)
-		gsub("\\[", "", t)
-		gsub("\\]", "", t)
-		return t == ""
-	}
+	awk "${SGF_AWK_IS_TOKEN}"'
 	{
 		sub(/\r$/, "")
 		if ($0 == "" || $0 == "#") next
@@ -202,23 +232,29 @@ sgf_dotenv_input_problem() {
 
 # ── Either store ──────────────────────────────────────────────────
 # sgf_is_sops_doc <format> <document>
+# For the json format the kind of the "data" value ("enc" or "empty")
+# is left in SGF_DATA_KIND.
+SGF_DATA_KIND=""
 sgf_is_sops_doc() {
+	SGF_DATA_KIND=""
 	case "$1" in
-	json) sgf_is_sops_json "$2" ;;
+	json) SGF_DATA_KIND="$(printf '%s' "$2" | sgf_json_envelope_kind)" ;;
 	dotenv) printf '%s' "$2" | sgf_is_sops_dotenv ;;
 	*) return 1 ;;
 	esac
 }
 
 # sgf_blob_is_sops_doc <format> <object id> [git -C dir]
-# Reads a blob from the object store and checks it. Returns 2 when the
-# blob cannot be read, 1 when it is not a SOPS document.
+# Checks a blob straight from the object store. Returns 2 when the blob
+# cannot be read, 1 when it is not a SOPS document.
 sgf_blob_is_sops_doc() {
-	local format="$1" oid="$2" dir="${3:-.}" content
-	# The trailing x keeps the final newlines that $(...) would strip.
-	# 2>/dev/null: bash >= 4.4 warns about NUL bytes in a binary blob.
-	{ content="$(git -C "${dir}" cat-file blob "${oid}" && printf x)"; } 2>/dev/null || return 2
-	sgf_is_sops_doc "${format}" "${content%x}"
+	local format="$1" oid="$2" dir="${3:-.}"
+	git -C "${dir}" cat-file -e "${oid}" 2>/dev/null || return 2
+	case "${format}" in
+	json) git -C "${dir}" cat-file blob "${oid}" | sgf_json_envelope_kind >/dev/null ;;
+	dotenv) git -C "${dir}" cat-file blob "${oid}" | sgf_is_sops_dotenv ;;
+	*) return 1 ;;
+	esac
 }
 
 # ── sops version ──────────────────────────────────────────────────

@@ -14,39 +14,62 @@ load_lib() {
 is() { "$@" || fail "expected true: $*"; }
 is_not() { if "$@"; then fail "expected false: $*"; fi; }
 
+# envelope <value of "data"> : a json-format document around that value
+envelope() {
+	printf '{\n\t"data": "%s",\n\t"sops": {\n\t\t"mac": "%s",\n\t\t"version": "3.13.3"\n\t}\n}\n' "$1" "${ENC}"
+}
+
 test_lib_enc_token() {
 	load_lib
-	is sgf_is_enc_token "${ENC}"
-	is sgf_is_enc_token "${ENC_COMMENT}"
-	is_not sgf_is_enc_token "${ENC} trailing text"
-	is_not sgf_is_enc_token 'ENC[AES256_GCM,data:a b,iv:AAAA,tag:BBBB,type:str]'
-	is_not sgf_is_enc_token 'ENC[AES256_GCM,data:a\nb,iv:AAAA,tag:BBBB,type:str]'
-	is_not sgf_is_enc_token 'ENC[AES256_GCM,data:abc]'
-	is_not sgf_is_enc_token 'hunter2'
-	is_not sgf_is_enc_token ''
+	is sgf_is_sops_doc json "$(envelope "${ENC}")"
+	is sgf_is_sops_doc json "$(envelope "${ENC_COMMENT}")"
+	is_not sgf_is_sops_doc json "$(envelope "${ENC} trailing text")"
+	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:a b,iv:AAAA,tag:BBBB,type:str]')"
+	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:a\nb,iv:AAAA,tag:BBBB,type:str]')"
+	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:abc]')"
+	is_not sgf_is_sops_doc json "$(envelope 'hunter2')"
 }
 
 test_lib_json_document() {
 	load_lib
 	local meta=$'"sops": {\n\t\t"mac": "'"${ENC}"$'",\n\t\t"version": "3.13.3"\n\t}\n}\n'
 
-	is sgf_is_sops_json $'{\n\t"data": "'"${ENC}"$'",\n\t'"${meta}"
-	assert_eq "${SGF_DATA_TOKEN}" "${ENC}" "SGF_DATA_TOKEN"
-	is sgf_is_sops_json $'{\n\t"data": "",\n\t'"${meta}"
-	assert_eq "${SGF_DATA_TOKEN}" "" "SGF_DATA_TOKEN for an empty file"
-	is sgf_is_sops_json '{"data":"'"${ENC}"'","sops":{"version":"3.13.3"}}'
-	is sgf_is_sops_json $'{\n  "data": "'"${ENC}"$'",\n  "sops": {\n    "version": "3.13.3"\n  }\n}'
+	is sgf_is_sops_doc json $'{\n\t"data": "'"${ENC}"$'",\n\t'"${meta}"
+	assert_eq "${SGF_DATA_KIND}" "enc" "SGF_DATA_KIND"
+	is sgf_is_sops_doc json $'{\n\t"data": "",\n\t'"${meta}"
+	assert_eq "${SGF_DATA_KIND}" "empty" "SGF_DATA_KIND for an empty file"
+	is sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{"version":"3.13.3"}}'
+	is sgf_is_sops_doc json $'{\n  "data": "'"${ENC}"$'",\n  "sops": {\n    "version": "3.13.3"\n  }\n}'
+	is sgf_is_sops_doc json $'\n\n{\r\n\t"data": "'"${ENC}"$'",\r\n\t"sops": {\r\n\t}\r\n}\r\n'
 
 	# content in clear inside a real envelope
-	is_not sgf_is_sops_json $'{\n\t"data": "TOP-SECRET\\n",\n\t'"${meta}"
-	is_not sgf_is_sops_json $'{\n\t"data": "say \\"hi\\"",\n\t'"${meta}"
+	is_not sgf_is_sops_doc json $'{\n\t"data": "TOP-SECRET\\n",\n\t'"${meta}"
+	is_not sgf_is_sops_doc json $'{\n\t"data": "say \\"hi\\"",\n\t'"${meta}"
 	# another key next to data, before or after the metadata
-	is_not sgf_is_sops_json $'{\n\t"data": "'"${ENC}"$'",\n\t"note": "plain",\n\t'"${meta}"
-	is_not sgf_is_sops_json $'{\n\t"data": "'"${ENC}"$'",\n\t"sops": {},\n\t"note": "plain"\n}\n'
+	is_not sgf_is_sops_doc json $'{\n\t"data": "'"${ENC}"$'",\n\t"note": "plain",\n\t'"${meta}"
+	is_not sgf_is_sops_doc json $'{\n\t"data": "'"${ENC}"$'",\n\t"sops": {},\n\t"note": "plain"\n}\n'
+	is_not sgf_is_sops_doc json $'{\n\t"note": "plain",\n\t"data": "'"${ENC}"$'",\n\t'"${meta}"
 	# not an envelope at all
-	is_not sgf_is_sops_json $'PW=hunter2\n# old value was ENC[AES256_GCM,data:xxxx]\n'
-	is_not sgf_is_sops_json "A=${ENC}"
-	is_not sgf_is_sops_json ''
+	is_not sgf_is_sops_doc json $'PW=hunter2\n# old value was ENC[AES256_GCM,data:xxxx]\n'
+	is_not sgf_is_sops_doc json "A=${ENC}"
+	is_not sgf_is_sops_doc json '{'
+	is_not sgf_is_sops_doc json ''
+}
+
+# The check must stay fast on a large file: bash pattern matching on a
+# whole document is quadratic, and half a megabyte took minutes.
+test_lib_json_document_check_is_linear() {
+	load_lib
+	local big doc
+	big="$(awk 'BEGIN { for (i = 0; i < 40000; i++) printf "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2" }')"
+	doc="$(envelope "ENC[AES256_GCM,data:${big},iv:AAAA,tag:BBBB,type:str]")"
+	assert_eq "$((${#doc} > 2000000))" "1" "the test document is over 2 MB"
+
+	SECONDS=0
+	is sgf_is_sops_doc json "${doc}"
+	is_not sgf_is_sops_doc dotenv "${doc}"
+	is_not sgf_is_sops_doc json "${big}"
+	[[ "${SECONDS}" -lt 30 ]] || fail "checking a 2 MB document took ${SECONDS}s"
 }
 
 test_lib_dotenv_document() {
