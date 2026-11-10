@@ -29,6 +29,7 @@ Four small, self-contained bash scripts. No daemon, no gpg, no custom key format
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
+- [Tests](#tests)
 
 ## Why this exists
 
@@ -283,6 +284,15 @@ Not a bug. Git materializes textconv temp files *through the smudge filter*, so 
 **Can I mix formats per file?** Not currently — one `SOPS_STORE_FORMAT` per repo.
 
 **Does this work with worktrees/submodules as the *secret* repo?** Yes — everything resolves paths via `git rev-parse`, and `install.sh` targets whatever repo you run it from (it refuses to configure its own checkout and picks the superproject instead).
+
+## Tests
+
+```sh
+tests/run.sh            # everything
+tests/run.sh guard      # only the tests whose name contains "guard"
+```
+
+Needs `git`, `sops` and `age-keygen` on PATH. Every test builds a throwaway repository with a throwaway age key. The runner restarts itself in an empty environment, so it reads nothing from your own git, sops or AWS configuration, and it never touches the network. `SGF_TOOL_DIR=<other checkout> tests/run.sh` runs the same tests against the scripts of another checkout, which is how a fix is shown to fail before and pass after.
 
 ## License
 
