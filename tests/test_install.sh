@@ -22,6 +22,45 @@ test_install_restores_required_flag() {
 	assert_not_contains "$(stored .env)" 'PLAINTEXT' "index blob"
 }
 
+# The same repair when install.sh cannot finish. Here sops is not on PATH
+# (setup run outside the dev shell): install.sh stops, and the clean
+# filter fails for the same reason.
+test_install_restores_required_flag_when_it_stops_early() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+
+	git config --local --unset filter.sops.required
+	no_sops="$(path_with_only ../nosops git bash dirname)"
+	run env PATH="${no_sops}" "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status without sops"
+	assert_contains "${OUT}" "sops not found" "install.sh message"
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filter.sops.required after a failed install"
+
+	printf 'A=PLAINTEXT\n' >.env
+	run env PATH="${no_sops}" git add .env
+	assert_ne "${RC}" "0" "git add exit status"
+	assert_not_contains "$(stored .env)" 'PLAINTEXT' "index blob"
+}
+
+# ... but only there. required=true without the two commands makes git
+# fail on every SOPS-managed file, so a clone that never had the filters
+# gets no setting at all from an install that stops.
+test_install_that_stops_early_leaves_a_new_clone_unconfigured() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env PATH="$(path_with_only ../nosops git bash dirname)" "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status without sops"
+	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after a failed first install"
+	assert_eq "$(git status --porcelain)" "" "git status still works"
+}
+
 # filter.<driver>.process takes precedence over clean/smudge.
 test_install_removes_local_process_filter() {
 	new_repo repo
