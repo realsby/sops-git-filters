@@ -54,8 +54,9 @@
 # ║    1  nothing was installed (not a repo, sops missing or too     ║
 # ║       old, bad .sops-filter.conf, conflicting git config)        ║
 # ║    3  filters and hooks are in place, but files need attention:  ║
-# ║       tracked in plaintext, or still stored in the other         ║
-# ║       storage format (see the lists printed)                     ║
+# ║       tracked in plaintext, still stored in the other storage    ║
+# ║       format, or not decrypted because sops could not (keys or   ║
+# ║       credentials missing). See the lists printed at the end.    ║
 # ║                                                                  ║
 # ║  Requires:                                                       ║
 # ║    - sops >= 3.11.0 on PATH                                      ║
@@ -248,6 +249,7 @@ fi
 FOUND_ANY=0
 PLAINTEXT_IN_GIT=""
 OTHER_FORMAT_IN_GIT=""
+STILL_ENCRYPTED=""
 while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
 	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
 	FOUND_ANY=1
@@ -288,9 +290,13 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 	[[ "${worktree_sha}" == "${index_sha}" ]] || continue
 
 	# Working copy == stored ciphertext → smudge never ran. Decrypt it.
+	# sops' own error is shown for the first file that fails (it says why:
+	# no key, expired session, ...); the files after it are only listed.
+	decrypt_stderr=/dev/stderr
+	[[ -z "${STILL_ENCRYPTED}" ]] || decrypt_stderr=/dev/null
 	# shellcheck disable=SC2086  # DECRYPT_ARGS is a flag list
-	if plaintext=$( (git -C "${TARGET_ROOT}" cat-file -p ":${path}" |
-		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" /dev/stdin 2>/dev/null) && printf x); then
+	if plaintext=$( (git -C "${TARGET_ROOT}" cat-file blob "${index_sha}" |
+		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" /dev/stdin 2>"${decrypt_stderr}") && printf x); then
 		printf '%s' "${plaintext%x}" >"${f}"
 		# The write above bypassed git, so the index's cached stat still
 		# describes the ciphertext checkout — and git flags size deltas
@@ -301,8 +307,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 			echo "⚠  Could not refresh index stat for ${path}; run: git add ${path}" >&2
 		echo "Re-smudged ${path} (was raw ciphertext from a pre-setup checkout)."
 	else
-		echo "⚠  Could not decrypt ${path} — working tree still holds ciphertext." >&2
-		echo "   Configure your keys (age/KMS) and re-run this script." >&2
+		STILL_ENCRYPTED="${STILL_ENCRYPTED}   - ${path}"$'\n'
 	fi
 done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
 
@@ -412,8 +417,8 @@ if [[ -n "${OTHER_FORMAT_IN_GIT}" ]]; then
 		echo ""
 		printf '%s' "${OTHER_FORMAT_IN_GIT}"
 		echo ""
-		echo " To finish the format change, re-encrypt each of them and commit:"
-		echo "   touch <file> && git add <file>"
+		echo " To finish the format change, re-encrypt them and commit:"
+		echo "   SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- <files>"
 		echo "========================================================"
 	} >&2
 	ATTENTION=1
@@ -438,6 +443,29 @@ if [[ -n "${PLAINTEXT_IN_GIT}" ]]; then
 		echo "   1. Encrypt them:  git add --renormalize -- <file>   then commit."
 		echo "   2. Rotate those secrets. The plaintext stays in the history of"
 		echo "      every clone and of the remote."
+		echo "========================================================"
+	} >&2
+	ATTENTION=1
+fi
+
+# The working copy of these files is still ciphertext.
+if [[ -n "${STILL_ENCRYPTED}" ]]; then
+	{
+		echo ""
+		echo "========================================================"
+		echo " STILL ENCRYPTED IN THE WORKING TREE"
+		echo "========================================================"
+		echo ""
+		echo " The filters and hooks are installed, but sops could not decrypt"
+		echo " these files (its message for the first one is above), so their"
+		echo " working copy still holds ciphertext:"
+		echo ""
+		printf '%s' "${STILL_ENCRYPTED}"
+		echo ""
+		echo " Make your keys or cloud credentials available (AWS SSO:"
+		echo " aws sso login; age: SOPS_AGE_KEY_FILE) and re-run this script."
+		echo " Until then git sees those files as unchanged, and nothing is"
+		echo " encrypted a second time."
 		echo "========================================================"
 	} >&2
 	ATTENTION=1
