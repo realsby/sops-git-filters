@@ -180,3 +180,44 @@ test_install_reports_unfinished_format_change() {
 	assert_contains "${OUT}" "STORED IN THE OTHER FORMAT" "install.sh report"
 	assert_not_contains "${OUT}" "NOT ENCRYPTED IN GIT" "install.sh report"
 }
+
+# No key, no decryption: the caller must be able to tell from the exit status.
+test_install_exits_3_when_it_cannot_decrypt() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status without the key"
+	assert_contains "${OUT}" "STILL ENCRYPTED IN THE WORKING TREE" "install.sh report"
+	assert_contains "${OUT}" "- .env" "install.sh report"
+	assert_contains "${OUT}" "data key" "sops' own error is shown"
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filters are installed all the same"
+	assert_eq "$(git status --porcelain)" "" "git status with ciphertext in the working copy"
+
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status with the key"
+	assert_eq "$(cat .env)" "A=1" "working copy"
+}
+
+# dotenv, several files: while one is decrypted git re-checks the others,
+# which still hold ciphertext. That must not fail.
+test_install_decrypts_several_dotenv_files() {
+	new_repo origin dotenv
+	printf 'A=1\n' >.env
+	printf 'B=2\n' >b.secret
+	printf 'C=3\n' >c.secret
+	git add .env b.secret c.secret
+	git commit -q -m "three secrets"
+	cd ..
+
+	fresh_clone origin clone
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_not_contains "${OUT}" "Could not refresh index stat" "install.sh output"
+	assert_eq "$(git status --porcelain)" "" "git status"
+	assert_eq "$(cat .env b.secret c.secret)" "$(printf 'A=1\nB=2\nC=3')" "working copies"
+}
