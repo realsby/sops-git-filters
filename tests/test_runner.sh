@@ -27,3 +27,17 @@ MINI
 	run env SGF_TEST_INNER=0 SGF_TOOL_DIR=no-such-dir bash tests/run.sh
 	assert_eq "${RC}" "2" "runner exit status when SGF_TOOL_DIR does not exist"
 }
+
+# A filter that matches nothing ran nothing. That is not a pass.
+test_runner_fails_when_no_test_is_selected() {
+	mini_runner mini <<'MINI'
+test_mini_passes() { :; }
+MINI
+	run env SGF_TEST_INNER=0 bash mini/tests/run.sh no_such_test
+	assert_ne "${RC}" "0" "runner exit status when the selection is empty"
+	assert_contains "${OUT}" "no test matches 'no_such_test'" "runner message"
+
+	run env SGF_TEST_INNER=0 bash mini/tests/run.sh mini_passes
+	assert_eq "${RC}" "0" "runner exit status when the selection matches"
+	assert_contains "${OUT}" "1 passed, 0 failed" "runner summary"
+}
