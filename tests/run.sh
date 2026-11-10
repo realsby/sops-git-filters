@@ -76,6 +76,7 @@ done
 filter="${1:-}"
 passed=0
 failed=0
+skipped=0
 failed_names=""
 
 echo "sops $(sops --disable-version-check --version 2>/dev/null | head -1 | awk '{print $2}'), $(git --version), bash ${BASH_VERSION}"
@@ -101,6 +102,9 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
 	if [[ "${status}" -eq 0 ]]; then
 		passed=$((passed + 1))
 		echo "ok   - ${name}"
+	elif [[ "${status}" -eq 77 ]]; then
+		skipped=$((skipped + 1))
+		echo "skip - ${name} ($(tail -1 "${dir}.log"))"
 	else
 		failed=$((failed + 1))
 		failed_names="${failed_names} ${name}"
@@ -110,7 +114,11 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
 done
 
 echo
-echo "${passed} passed, ${failed} failed"
+if [[ "${skipped}" -gt 0 ]]; then
+	echo "${passed} passed, ${failed} failed, ${skipped} skipped"
+else
+	echo "${passed} passed, ${failed} failed"
+fi
 if [[ "${failed}" -ne 0 ]]; then
 	echo "failed:${failed_names}"
 	exit 1

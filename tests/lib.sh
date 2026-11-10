@@ -28,6 +28,12 @@ fail() {
 	exit 1
 }
 
+# skip <reason> : end the test without counting it as passed or failed
+skip() {
+	echo "$*"
+	exit 77
+}
+
 assert_eq() { # <actual> <expected> [what]
 	[[ "$1" == "$2" ]] || fail "${3:-value}: expected [$2], got [$1]"
 }
@@ -134,4 +140,9 @@ stub() {
 		cat
 	} >"$1/$2"
 	chmod +x "$1/$2"
+}
+
+# mode_of <file> : permission bits as octal digits (GNU and BSD stat)
+mode_of() {
+	stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
