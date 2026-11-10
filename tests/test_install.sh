@@ -39,3 +39,20 @@ test_install_refuses_inherited_process_filter() {
 	assert_ne "${RC}" "0" "install.sh exit status"
 	assert_contains "${OUT}" "filter.sops.process" "install.sh message"
 }
+
+# A .sops-filter.conf may set SOPS_FILE_MODE only and keep the default format.
+test_install_accepts_conf_without_store_format() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	printf '# widen for a deploy daemon\nSOPS_FILE_MODE=640\n' >.sops-filter.conf
+	git add .sops-filter.conf
+	git commit -q -m "add .env and a conf without SOPS_STORE_FORMAT"
+	cd ..
+
+	fresh_clone origin clone
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_ne "$(git config --local --get filter.sops.clean || true)" "" "filter.sops.clean"
+	assert_eq "$(cat .env)" "A=1" "working copy after install.sh"
+}
