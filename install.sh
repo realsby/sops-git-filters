@@ -15,7 +15,7 @@
 # ║    git add / commit     →  files are encrypted automatically     ║
 # ║    git diff / log -p    →  shows decrypted content               ║
 # ║                                                                  ║
-# ║  Three git mechanisms are used:                                  ║
+# ║  Four git mechanisms are used:                                   ║
 # ║                                                                  ║
 # ║  1. filter.sops.smudge   (checkout → working dir)                ║
 # ║     Decrypts the encrypted blob from git into plaintext.         ║
@@ -29,6 +29,11 @@
 # ║  3. diff.sops.textconv   (git diff / git log -p)                 ║
 # ║     Routes diffs through the smudge filter so they show          ║
 # ║     meaningful plaintext changes instead of ciphertext.          ║
+# ║                                                                  ║
+# ║  4. merge.sops.driver    (merge / rebase / cherry-pick / stash)  ║
+# ║     For paths with merge=sops in .gitattributes: merges the      ║
+# ║     plaintext of the three versions (merge-driver.sh) instead    ║
+# ║     of letting git merge ciphertext, which cannot work.          ║
 # ║                                                                  ║
 # ║  Finally, a re-smudge pass fixes the fresh-clone gap: files      ║
 # ║  checked out BEFORE the filters were configured still hold raw   ║
@@ -165,8 +170,10 @@ esac
 # absolute path in .git/config silently breaks on the next move).
 if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
 	CLEAN_CMD="${SCRIPT_DIR#"${TARGET_ROOT}"/}/clean-filter.sh %f"
+	MERGE_CMD="${SCRIPT_DIR#"${TARGET_ROOT}"/}/merge-driver.sh %O %A %B %L %P"
 else
 	CLEAN_CMD="${FILTER_SCRIPT} %f"
+	MERGE_CMD="${SCRIPT_DIR}/merge-driver.sh %O %A %B %L %P"
 	echo "⚠  sops-git-filters lives outside the target repo — using an absolute" >&2
 	echo "   path in .git/config. It will break if either directory moves." >&2
 	echo "   Consider vendoring or adding it as a submodule inside the repo." >&2
@@ -217,15 +224,24 @@ fi
 CURRENT_CLEAN=$(git_cfg --get filter.sops.clean 2>/dev/null || echo "")
 CURRENT_SMUDGE=$(git_cfg --get filter.sops.smudge 2>/dev/null || echo "")
 CURRENT_TEXTCONV=$(git_cfg --get diff.sops.textconv 2>/dev/null || echo "")
+CURRENT_MERGE=$(git_cfg --get merge.sops.driver 2>/dev/null || echo "")
 
 if [[ "${CURRENT_CLEAN}" == "${CLEAN_CMD}" &&
 	"${CURRENT_SMUDGE}" == "${SMUDGE_CMD}" &&
-	"${CURRENT_TEXTCONV}" == "${TEXTCONV_CMD}" ]]; then
+	"${CURRENT_TEXTCONV}" == "${TEXTCONV_CMD}" &&
+	"${CURRENT_MERGE}" == "${MERGE_CMD}" ]]; then
 	echo "SOPS git filters already configured (format: ${STORE_FORMAT})."
 else
 	git_cfg filter.sops.smudge "${SMUDGE_CMD}"
 	git_cfg filter.sops.clean "${CLEAN_CMD}"
 	git_cfg diff.sops.textconv "${TEXTCONV_CMD}"
+	# The merge driver only acts on paths that carry merge=sops in
+	# .gitattributes. recursive=binary: when git first has to merge two
+	# common ancestors with each other, it takes one of them instead of
+	# calling the driver for that inner merge.
+	git_cfg merge.sops.name "three-way merge of SOPS-managed files on their plaintext"
+	git_cfg merge.sops.driver "${MERGE_CMD}"
+	git_cfg merge.sops.recursive binary
 	echo "SOPS git filters configured (format: ${STORE_FORMAT})."
 fi
 
