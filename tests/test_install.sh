@@ -105,10 +105,35 @@ case " $* " in
 esac
 exec "${REAL}" "$@"
 STUB
+	git config --local --unset filter.sops.required
 	run env PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status"
 	assert_contains "${OUT}" "3.10.2 is too old" "install.sh message"
 	assert_contains "${OUT}" "3.11.0" "install.sh message"
+	# Refused, but an existing setup is fail-closed again.
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filter.sops.required after a refused install"
+}
+
+# An incomplete copy of the tool (lib.sh was not copied along): install.sh
+# stops at once, and the clean filter cannot work either. The flag is
+# restored before that.
+test_install_restores_required_flag_with_an_incomplete_copy() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+
+	git config --local --unset filter.sops.required
+	mv "${TOOL}/lib.sh" "${TOOL}/lib.sh.off"
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status without lib.sh"
+	assert_contains "${OUT}" "lib.sh is missing" "install.sh message"
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filter.sops.required after a failed install"
+
+	printf 'A=PLAINTEXT\n' >.env
+	run git add .env
+	assert_ne "${RC}" "0" "git add exit status"
+	assert_not_contains "$(stored .env)" 'PLAINTEXT' "index blob"
 }
 
 # A secret that was committed before the filter existed stays plaintext
