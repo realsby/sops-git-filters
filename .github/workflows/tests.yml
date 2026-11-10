@@ -1,0 +1,75 @@
+name: tests
+
+# Runs shellcheck and tests/run.sh. The tests use throwaway age keys in
+# throwaway repositories: no secret and no cloud credential is needed,
+# and after the tools are downloaded nothing touches the network.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Naming the shell makes GitHub run steps with `bash -eo pipefail`.
+    shell: bash
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-24.04
+    env:
+      # Pinned: the shellcheck on the runner image changes with the image,
+      # and its findings change with its version.
+      SHELLCHECK_VERSION: "0.11.0"
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download shellcheck (SHA-256 verified)
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${RUNNER_TEMP}/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  ${RUNNER_TEMP}/shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}"
+      - name: shellcheck
+        run: |
+          "${RUNNER_TEMP}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" --version
+          "${RUNNER_TEMP}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" -x ./*.sh tests/*.sh
+
+  tests:
+    name: tests (${{ matrix.os }}, sops ${{ matrix.sops }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        # the oldest sops install.sh accepts, and the newest tested
+        sops: ["3.11.0", "3.13.3"]
+    env:
+      SOPS_VERSION: ${{ matrix.sops }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download sops and age (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "${RUNNER_TEMP}/tools"
+      - name: Run the tests
+        run: |
+          export PATH="${RUNNER_TEMP}/tools:${PATH}"
+          tests/run.sh
+      - name: Run the tests with the stock macOS bash (3.2)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "${RUNNER_TEMP}/bash32"
+          ln -s /bin/bash "${RUNNER_TEMP}/bash32/bash"
+          export PATH="${RUNNER_TEMP}/bash32:${RUNNER_TEMP}/tools:${PATH}"
+          tests/run.sh

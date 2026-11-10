@@ -395,6 +395,7 @@ else
 	# filter does: an absolute path breaks silently when the repo moves.
 	if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
 		HARDEN_REL="${SCRIPT_DIR#"${TARGET_ROOT}"/}/harden-permissions.sh"
+		# shellcheck disable=SC2016  # $root must reach the hook unexpanded
 		HOOK_HARDEN_ASSIGN='HARDEN="$root/'"${HARDEN_REL}"'"'
 		HARDEN_HINT="\"\$(git rev-parse --show-toplevel)/${HARDEN_REL}\""
 	else
