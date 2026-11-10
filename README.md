@@ -400,6 +400,10 @@ tests/run.sh guard      # only the tests whose name contains "guard"
 
 Needs `git`, `sops` and `age-keygen` on PATH. Every test builds a throwaway repository with a throwaway age key. The runner restarts itself in an empty environment, so it reads nothing from your own git, sops or AWS configuration, and it never touches the network. `SGF_TOOL_DIR=<other checkout> tests/run.sh` runs the same tests against the scripts of another checkout, which is how a fix is shown to fail before and pass after.
 
+Two tests drive the [pre-commit](https://pre-commit.com) framework (or `prek`) and are skipped when neither is on PATH.
+
+CI (`.github/workflows/tests.yml`) runs shellcheck and the suite on Linux and macOS, with the oldest `sops` that `install.sh` accepts and with a current one. It downloads `sops`, `age` and shellcheck from their GitHub releases and checks each file against a SHA-256 pinned in the repository (`tests/ci-install-tools.sh`) before using it.
+
 ## License
 
 [MIT](LICENSE)
