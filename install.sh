@@ -76,6 +76,21 @@ if [[ "${TARGET_ROOT}" == "${SCRIPT_DIR}" ]]; then
 	fi
 fi
 
+# ── Keep an existing setup fail-closed ────
+# If git already routes files through the sops filter here, a failing
+# filter must stop git. Make sure of that NOW, before any check below can
+# end this script. What ends it (sops missing from PATH because setup ran
+# outside the dev shell, a bad .sops-filter.conf, a broken copy of this
+# tool) makes the clean filter fail too, and without filter.sops.required
+# git takes a failing filter as no filter and stages the plaintext.
+#
+# Only when a clean or smudge command is set: required=true with no
+# command makes git fail on every SOPS-managed file, and a clone that
+# never had the filters must keep working if this script cannot finish.
+if git -C "${TARGET_ROOT}" config --get-regexp '^filter\.sops\.(clean|smudge)$' >/dev/null 2>&1; then
+	git -C "${TARGET_ROOT}" config --local filter.sops.required true
+fi
+
 if [[ ! -x "${FILTER_SCRIPT}" ]]; then
 	echo "Error: clean filter script not found or not executable: ${FILTER_SCRIPT}" >&2
 	exit 1
@@ -139,7 +154,8 @@ git_effective() { git -C "${TARGET_ROOT}" config "$@" 2>/dev/null || true; }
 # commit plaintext because sops or the script is broken. Written FIRST
 # and on EVERY run, outside the "already configured" test below: with
 # the two commands in place and this flag missing, git treats a failing
-# filter as no filter at all and stages the plaintext.
+# filter as no filter at all and stages the plaintext. (An existing
+# setup already got it further up, before the checks that can exit.)
 git_cfg filter.sops.required true
 
 # filter.<driver>.process (a long-running filter) wins over clean/smudge.
