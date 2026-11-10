@@ -221,3 +221,46 @@ test_install_decrypts_several_dotenv_files() {
 	assert_eq "$(git status --porcelain)" "" "git status"
 	assert_eq "$(cat .env b.secret c.secret)" "$(printf 'A=1\nB=2\nC=3')" "working copies"
 }
+
+# The permission hook chmods a secret right after git wrote it. That
+# changes the file's inode change time, and git took the secret for
+# locally modified: a rebase stopped with "Your local changes to the
+# following files would be overwritten by merge" whenever the chmod
+# landed in a later second than the checkout. Here the hook is slowed
+# down, so that it always does.
+test_install_makes_rebase_survive_the_permission_hook() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "base"
+	git checkout -q -b feature
+	printf 'A=2\n' >.env
+	git add .env
+	git commit -q -m "feature: change the secret"
+	git checkout -q main
+	printf 'x\n' >other.txt
+	git add other.txt
+	git commit -q -m "main: something else"
+	git checkout -q feature
+
+	hook="$(git rev-parse --git-path hooks)/post-checkout"
+	mv "${hook}" "${hook}.real"
+	# shellcheck disable=SC2016  # $0 and $@ belong to the hook
+	printf '#!/bin/sh\nsleep 1\nexec "$0.real" "$@"\n' >"${hook}"
+	chmod +x "${hook}"
+
+	run git rebase main
+	assert_eq "${RC}" "0" "git rebase exit status"
+	assert_eq "$(cat .env)" "A=2" "working copy after the rebase"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
+
+# core.trustctime is written once. A value that is already there stays.
+test_install_sets_trustctime_unless_it_is_set() {
+	new_repo repo
+	assert_eq "$(git config --local --get core.trustctime)" "false" "core.trustctime after install.sh"
+
+	git config --local core.trustctime true
+	"${TOOL}/install.sh"
+	assert_eq "$(git config --local --get core.trustctime)" "true" "a core.trustctime that was set by hand"
+}
