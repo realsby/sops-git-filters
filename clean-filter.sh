@@ -73,7 +73,11 @@ fi
 # The file is parsed, not sourced — no code execution.
 STORE_FORMAT="json"
 if [[ -f "${PROJECT_ROOT}/.sops-filter.conf" ]]; then
-	conf_value=$(grep -E '^SOPS_STORE_FORMAT=' "${PROJECT_ROOT}/.sops-filter.conf" | tail -1 | cut -d= -f2 | tr -d '[:space:]')
+	# `|| true`: the file may hold no SOPS_STORE_FORMAT line at all (only
+	# SOPS_FILE_MODE, say). grep then exits 1, and under `set -euo pipefail`
+	# that would end the filter without a word.
+	conf_value=$({ grep -E '^SOPS_STORE_FORMAT=' "${PROJECT_ROOT}/.sops-filter.conf" || true; } |
+		tail -1 | cut -d= -f2 | tr -d '[:space:]')
 	[[ -n "${conf_value}" ]] && STORE_FORMAT="${conf_value}"
 fi
 
