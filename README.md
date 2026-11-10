@@ -220,7 +220,7 @@ Or as a plain git hook: `ln -s ../../utilities/sops-git-filters/encryption-guard
 
 What you get:
 
-- **Fail-closed staging.** The clean filter exits non-zero when it can't encrypt (`sops` missing, `.sops.yaml` missing, encryption error) and `filter.sops.required=true` turns that into an aborted `git add` — the failure mode is a loud error, never a plaintext commit.
+- **Fail-closed staging.** The clean filter exits non-zero when it can't encrypt (`sops` missing, `.sops.yaml` missing, encryption error) and `filter.sops.required=true` turns that into an aborted `git add` — the failure mode is a loud error, never a plaintext commit. `install.sh` writes that flag on every run, first, and stops if a `filter.sops.process` setting would override the filter.
 - **Defense in depth.** The guard re-checks every staged blob at commit time with no dependency on the filter machinery.
 - **No plaintext at rest in git.** Remote, object store, and stash hold ciphertext only. Multi-recipient keys and break-glass access come from SOPS key groups.
 - **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600`; `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf`, or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`.
@@ -248,6 +248,9 @@ What you must still do:
 
 **`git add` fails with "filter 'sops' failed" / ERROR: .sops.yaml missing**
 Working as designed — encryption isn't possible, so staging is refused. Create `.sops.yaml` (or fix `sops` on PATH) and retry.
+
+**`install.sh` stops with "filter.sops.process is set outside this repository's .git/config"**
+Another tool registered a long-running filter under the same driver name (`sops`), in your global or system git config. Git prefers it over the clean/smudge commands, so `clean-filter.sh` would never run. Remove that setting (`git config --global --unset filter.sops.process`) and re-run `install.sh`. A copy in the repository's own `.git/config` is removed for you.
 
 **Fresh clone: `.env` is full of `ENC[...]` gibberish**
 Filters aren't configured yet on this clone. Run `install.sh` — it configures `.git/config` and decrypts pre-setup checkouts in place. Still ciphertext afterwards? Your key isn't available; check `SOPS_AGE_KEY_FILE` / KMS credentials and re-run.

@@ -126,12 +126,37 @@ SMUDGE_CMD="sops decrypt ${DECRYPT_ARGS} --filename-override %f /dev/stdin"
 TEXTCONV_CMD="cat"
 
 # ── Configure git (local to the target repo only) ────
+git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
+# The value git will really use: a worktree-level or included config can
+# override .git/config.
+git_effective() { git -C "${TARGET_ROOT}" config "$@" 2>/dev/null || true; }
+
+# required=true: fail the operation if the filter fails — never silently
+# commit plaintext because sops or the script is broken. Written FIRST
+# and on EVERY run, outside the "already configured" test below: with
+# the two commands in place and this flag missing, git treats a failing
+# filter as no filter at all and stages the plaintext.
+git_cfg filter.sops.required true
+
+# filter.<driver>.process (a long-running filter) wins over clean/smudge.
+# One left behind by another tool under the same driver name would bypass
+# clean-filter.sh completely.
+if git_cfg --get filter.sops.process >/dev/null 2>&1; then
+	git_cfg --unset-all filter.sops.process
+	echo "Removed filter.sops.process from .git/config (it overrides the clean/smudge filters)."
+fi
+if [[ -n "$(git_effective --get filter.sops.process)" ]]; then
+	echo "Error: filter.sops.process is set outside this repository's .git/config:" >&2
+	git -C "${TARGET_ROOT}" config --show-origin --get-all filter.sops.process >&2 || true
+	echo "Git prefers it over the clean/smudge filters, so clean-filter.sh would never run." >&2
+	echo "Remove that setting and re-run this script." >&2
+	exit 1
+fi
+
 # Idempotency: compare the SMUDGE command, not just the clean path —
 # the clean path is stable across storage-format migrations, so
 # comparing only it would skip smudge/textconv updates on existing
 # clones when the format changes.
-git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
-
 CURRENT_CLEAN=$(git_cfg --get filter.sops.clean 2>/dev/null || echo "")
 CURRENT_SMUDGE=$(git_cfg --get filter.sops.smudge 2>/dev/null || echo "")
 CURRENT_TEXTCONV=$(git_cfg --get diff.sops.textconv 2>/dev/null || echo "")
@@ -143,11 +168,18 @@ if [[ "${CURRENT_CLEAN}" == "${CLEAN_CMD}" &&
 else
 	git_cfg filter.sops.smudge "${SMUDGE_CMD}"
 	git_cfg filter.sops.clean "${CLEAN_CMD}"
-	# required=true: fail the operation if the filter fails — never
-	# silently commit plaintext because sops or the script is broken.
-	git_cfg filter.sops.required true
 	git_cfg diff.sops.textconv "${TEXTCONV_CMD}"
 	echo "SOPS git filters configured (format: ${STORE_FORMAT})."
+fi
+
+# Last check: what was just written must be what git will use.
+if [[ "$(git_effective --bool --get filter.sops.required)" != "true" ||
+	"$(git_effective --get filter.sops.clean)" != "${CLEAN_CMD}" ||
+	"$(git_effective --get filter.sops.smudge)" != "${SMUDGE_CMD}" ]]; then
+	echo "Error: another git config file overrides the filter settings written to .git/config:" >&2
+	git -C "${TARGET_ROOT}" config --show-origin --get-regexp '^filter\.sops\.' >&2 || true
+	echo "Remove the overriding entries and re-run this script." >&2
+	exit 1
 fi
 
 # ── Re-smudge pass: heal files checked out before setup ────
