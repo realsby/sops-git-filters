@@ -72,13 +72,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILTER_SCRIPT="${SCRIPT_DIR}/clean-filter.sh"
 HARDEN_SCRIPT="${SCRIPT_DIR}/harden-permissions.sh"
 
-if [[ ! -r "${SCRIPT_DIR}/lib.sh" ]]; then
-	echo "Error: lib.sh is missing next to install.sh (${SCRIPT_DIR}). Update or re-copy sops-git-filters." >&2
-	exit 1
-fi
-# shellcheck source=lib.sh
-. "${SCRIPT_DIR}/lib.sh"
-
 # ── Resolve the repository to configure ────
 # The target is the repo the caller is standing in. If the caller is
 # standing inside this tool's own checkout (e.g. ran ./install.sh from
@@ -114,6 +107,15 @@ fi
 if git -C "${TARGET_ROOT}" config --get-regexp '^filter\.sops\.(clean|smudge)$' >/dev/null 2>&1; then
 	git -C "${TARGET_ROOT}" config --local filter.sops.required true
 fi
+
+# Only now the checks that can end this script. lib.sh comes after the
+# step above on purpose: without it the clean filter fails as well.
+if [[ ! -r "${SCRIPT_DIR}/lib.sh" ]]; then
+	echo "Error: lib.sh is missing next to install.sh (${SCRIPT_DIR}). Update or re-copy sops-git-filters." >&2
+	exit 1
+fi
+# shellcheck source=lib.sh
+. "${SCRIPT_DIR}/lib.sh"
 
 if [[ ! -x "${FILTER_SCRIPT}" ]]; then
 	echo "Error: clean filter script not found or not executable: ${FILTER_SCRIPT}" >&2
