@@ -29,6 +29,14 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		fi
 	done
 
+	# Absolute: every test runs in a directory of its own, where a relative
+	# SGF_TOOL_DIR (../main) would point somewhere else.
+	tool_dir="${SGF_TOOL_DIR:-$(dirname "${HERE}")}"
+	if ! tool_dir="$(cd "${tool_dir}" 2>/dev/null && pwd)"; then
+		echo "tests/run.sh: SGF_TOOL_DIR is not a directory: ${SGF_TOOL_DIR:-}" >&2
+		exit 2
+	fi
+
 	root="$(mktemp -d "${TMPDIR:-/tmp}/sgf-tests.XXXXXX")"
 	# Physical path: git reports physical paths, and on macOS the temp
 	# directory sits behind a symlink.
@@ -48,7 +56,7 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		AWS_EC2_METADATA_DISABLED=true \
 		SGF_TEST_INNER=1 \
 		SGF_TEST_ROOT="${root}" \
-		SGF_TOOL_DIR="${SGF_TOOL_DIR:-$(dirname "${HERE}")}" \
+		SGF_TOOL_DIR="${tool_dir}" \
 		SGF_KEEP="${SGF_KEEP:-}" \
 		bash "${HERE}/run.sh" "$@"
 fi
