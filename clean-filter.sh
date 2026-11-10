@@ -96,6 +96,19 @@ dotenv)
 	;;
 esac
 
+# ── .sops.yaml alone decides the recipients ────
+# sops lets these variables replace the keys of the matching creation
+# rule. Exported in a shell for some other project, they would encrypt
+# this repository's secrets for the wrong recipients, and nobody listed
+# in .sops.yaml could decrypt the result. Drop them before encrypting.
+for var in SOPS_AGE_RECIPIENTS SOPS_KMS_ARN SOPS_GCP_KMS_IDS SOPS_AZURE_KEYVAULT_URLS \
+	SOPS_VAULT_URIS SOPS_PGP_FP SOPS_HUAWEICLOUD_KMS_IDS; do
+	if [[ -n "${!var:-}" ]]; then
+		echo "sops clean filter: ignoring ${var} from the environment (.sops.yaml decides the recipients)" >&2
+		unset "${var}"
+	fi
+done
+
 encrypt_input() {
 	# --filename-override tells SOPS which .sops.yaml creation rule to
 	# match (stdin has no filename of its own).
