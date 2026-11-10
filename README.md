@@ -287,7 +287,10 @@ With this version, they don't — the clean path in `.git/config` is repo-relati
 The filter compares against the index specifically to keep stash blobs identical. If you hit a conflict anyway you're likely on an older clean filter — re-run `install.sh` on a current checkout.
 
 **Guard blocks a commit but `git show :file` looks encrypted**
-The guard wants a *completely* encrypted SOPS document in the format set in `.sops-filter.conf`: one `ENC[...]` value under `"data"` (json), or every value and comment as `ENC[...]` (dotenv). A blob with one value in clear, with extra keys, or in the other format is refused. Rebuild it with `git add --renormalize -- <file>`. The guard also names files you did not touch in this commit: it checks everything that is tracked.
+The guard wants a *completely* encrypted SOPS document in the format set in `.sops-filter.conf`: one `ENC[...]` value under `"data"` (json), or every value and comment as `ENC[...]` (dotenv). A blob with one value in clear or with extra keys is refused: rebuild it with `git add --renormalize -- <file>`. A blob that is encrypted in the *other* storage format is reported separately ("stored in the other format"): that is a format change that was not finished, see [Storage formats](#storage-formats-json-vs-dotenv). The guard also names files you did not touch in this commit: it checks everything that is tracked.
+
+**`install.sh` ends with "STORED IN THE OTHER FORMAT" (exit status 3)**
+`.sops-filter.conf` names one storage format and git still holds the listed files in the other one. Nothing leaked. Re-encrypt them as described under [Storage formats](#storage-formats-json-vs-dotenv) and commit.
 
 **`install.sh` ends with "NOT ENCRYPTED IN GIT" (exit status 3)**
 The filters and hooks are installed, but the listed files are tracked in plaintext: they were committed before the filter existed, or from a clone that never ran `install.sh`. Run `git add --renormalize -- <file>`, commit, and rotate those secrets — the plaintext stays in history.

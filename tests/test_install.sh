@@ -140,3 +140,18 @@ test_install_reports_plaintext_tracked_before_adoption() {
 	run "${TOOL}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status once the file is encrypted"
 }
+
+# A storage-format change that is not finished: the blobs are encrypted,
+# in the old format. Not plaintext, but still something to do.
+test_install_reports_unfinished_format_change() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env (json)"
+
+	printf 'SOPS_STORE_FORMAT=dotenv\n' >.sops-filter.conf
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status"
+	assert_contains "${OUT}" "STORED IN THE OTHER FORMAT" "install.sh report"
+	assert_not_contains "${OUT}" "NOT ENCRYPTED IN GIT" "install.sh report"
+}
