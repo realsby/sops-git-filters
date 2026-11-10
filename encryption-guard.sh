@@ -59,6 +59,7 @@ fi
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 STORE_FORMAT="$(sgf_store_format "${PROJECT_ROOT}")" || exit 1
+OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
 # ── Check the entries ────────────────────────────────────────────
 # check_entries reads the answer of `git check-attr -z` on stdin:
@@ -69,7 +70,7 @@ STORE_FORMAT="$(sgf_store_format "${PROJECT_ROOT}")" || exit 1
 #   2 the check itself could not be completed
 check_entries() {
 	local i=0 path attr value status managed=0
-	local unencrypted="" unreadable=""
+	local unencrypted="" unreadable="" other_format=""
 
 	while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
 		if [[ "${path}" != "${INDEX_PATHS[i]:-}" ]]; then
@@ -88,7 +89,15 @@ check_entries() {
 				case "${status}" in
 				0) ;;
 				2) unreadable="${unreadable}   - ${path}"$'\n' ;;
-				*) unencrypted="${unencrypted}   - ${path}"$'\n' ;;
+				*)
+					# Encrypted, but in the format .sops-filter.conf does not
+					# name: a storage-format change that is not finished.
+					if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${INDEX_OIDS[i]}"; then
+						other_format="${other_format}   - ${path}"$'\n'
+					else
+						unencrypted="${unencrypted}   - ${path}"$'\n'
+					fi
+					;;
 				esac
 				;;
 			esac
@@ -120,6 +129,20 @@ check_entries() {
 		echo "   2. Re-stage through the filter:  git add --renormalize -- <file>" >&2
 		echo "   3. A file that was already committed like this is in history:" >&2
 		echo "      rotate that secret." >&2
+		echo "========================================================" >&2
+		return 1
+	fi
+
+	if [[ -n "${other_format}" ]]; then
+		blocked "SOPS-managed files are stored in the other format"
+		echo " .sops-filter.conf says ${STORE_FORMAT}, but these files are stored" >&2
+		echo " in git as ${OTHER_FORMAT} (they are encrypted; nothing leaked):" >&2
+		echo "" >&2
+		printf '%s' "${other_format}" >&2
+		echo "" >&2
+		echo " To finish the format change, re-encrypt each of them:" >&2
+		echo "   touch <file> && git add <file>" >&2
+		echo " (after install.sh has been re-run for the new format)." >&2
 		echo "========================================================" >&2
 		return 1
 	fi

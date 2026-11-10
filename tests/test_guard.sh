@@ -144,3 +144,19 @@ test_guard_works_as_a_symlinked_hook() {
 	assert_ne "${RC}" "0" "commit with a plaintext secret"
 	assert_contains "${OUT}" "COMMIT BLOCKED" "guard message"
 }
+
+# After SOPS_STORE_FORMAT changes, the blobs are still encrypted, in the
+# old format. That is not plaintext, and the message must say so.
+test_guard_names_an_unfinished_format_change() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env (json)"
+
+	printf 'SOPS_STORE_FORMAT=dotenv\n' >.sops-filter.conf
+	git add .sops-filter.conf
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "stored in the other format" "guard message"
+	assert_not_contains "${OUT}" "are not encrypted" "guard message"
+}

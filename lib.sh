@@ -56,6 +56,14 @@ sgf_store_format() {
 	esac
 }
 
+# sgf_other_format <format> : the storage format that is NOT <format>
+sgf_other_format() {
+	case "$1" in
+	json) printf 'dotenv\n' ;;
+	*) printf 'json\n' ;;
+	esac
+}
+
 # ── One encrypted value ───────────────────────────────────────────
 # sgf_is_enc_token <string>
 # True when the string is exactly one SOPS ciphertext value:

@@ -54,7 +54,8 @@
 # ║    1  nothing was installed (not a repo, sops missing or too     ║
 # ║       old, bad .sops-filter.conf, conflicting git config)        ║
 # ║    3  filters and hooks are in place, but files need attention:  ║
-# ║       they are tracked in plaintext (see the list printed)       ║
+# ║       tracked in plaintext, or still stored in the other         ║
+# ║       storage format (see the lists printed)                     ║
 # ║                                                                  ║
 # ║  Requires:                                                       ║
 # ║    - sops >= 3.11.0 on PATH                                      ║
@@ -142,6 +143,7 @@ fi
 
 # ── Storage format (the same reader clean-filter.sh uses) ────
 STORE_FORMAT="$(sgf_store_format "${TARGET_ROOT}")" || exit 1
+OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
 case "${STORE_FORMAT}" in
 json) DECRYPT_ARGS="--input-type json --output-type binary" ;;
@@ -243,6 +245,7 @@ fi
 # the end instead.
 FOUND_ANY=0
 PLAINTEXT_IN_GIT=""
+OTHER_FORMAT_IN_GIT=""
 while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
 	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
 	FOUND_ANY=1
@@ -258,12 +261,18 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 	[[ "${index_mode}" != "120000" && "${index_mode}" != "160000" ]] || continue
 
 	# ── Is the tracked version an encrypted SOPS document? ────
+	# Encrypted in the other storage format (a format change that is not
+	# finished) is its own case: nothing leaked, but it needs re-encrypting.
+	if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${index_sha}" "${TARGET_ROOT}"; then
+		OTHER_FORMAT_IN_GIT="${OTHER_FORMAT_IN_GIT}   - ${path}"$'\n'
+		continue
+	fi
 	where=""
 	sgf_blob_is_sops_doc "${STORE_FORMAT}" "${index_sha}" "${TARGET_ROOT}" || where="index"
 	head_sha="$(git -C "${TARGET_ROOT}" rev-parse -q --verify "HEAD:${path}" 2>/dev/null || true)"
 	if [[ -n "${head_sha}" && "${head_sha}" == "${index_sha}" ]]; then
 		[[ -z "${where}" ]] || where="index and HEAD"
-	elif [[ -n "${head_sha}" ]]; then
+	elif [[ -n "${head_sha}" ]] && ! sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${head_sha}" "${TARGET_ROOT}"; then
 		sgf_blob_is_sops_doc "${STORE_FORMAT}" "${head_sha}" "${TARGET_ROOT}" || where="${where:+${where} and }HEAD"
 	fi
 	if [[ -n "${where}" ]]; then
@@ -383,10 +392,32 @@ EOF
 	done
 fi
 
-# ── Report files that git holds in plaintext ────
+# ── Report files that need attention ────
 # Last, so it is the final thing on screen, and with its own exit status
-# so a setup script notices: the filters are installed, but these secrets
-# are readable by anyone who can read the repository.
+# so a setup script notices: the filters are installed, but something is
+# left to do.
+ATTENTION=0
+
+if [[ -n "${OTHER_FORMAT_IN_GIT}" ]]; then
+	{
+		echo ""
+		echo "========================================================"
+		echo " STORED IN THE OTHER FORMAT"
+		echo "========================================================"
+		echo ""
+		echo " .sops-filter.conf says ${STORE_FORMAT}, but git holds these files as"
+		echo " ${OTHER_FORMAT} (they are encrypted; nothing leaked):"
+		echo ""
+		printf '%s' "${OTHER_FORMAT_IN_GIT}"
+		echo ""
+		echo " To finish the format change, re-encrypt each of them and commit:"
+		echo "   touch <file> && git add <file>"
+		echo "========================================================"
+	} >&2
+	ATTENTION=1
+fi
+
+# These secrets are readable by anyone who can read the repository.
 if [[ -n "${PLAINTEXT_IN_GIT}" ]]; then
 	{
 		echo ""
@@ -407,5 +438,7 @@ if [[ -n "${PLAINTEXT_IN_GIT}" ]]; then
 		echo "      every clone and of the remote."
 		echo "========================================================"
 	} >&2
-	exit 3
+	ATTENTION=1
 fi
+
+[[ "${ATTENTION}" -eq 0 ]] || exit 3
