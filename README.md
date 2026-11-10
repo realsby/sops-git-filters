@@ -8,6 +8,7 @@ Files you list in `.gitattributes` are **plaintext in your working tree** and **
 git pull / checkout   →  decrypted automatically   (smudge filter)
 git add / commit      →  encrypted automatically   (clean filter)
 git diff / log -p     →  shows plaintext changes   (textconv)
+git merge / rebase    →  merges the plaintext      (merge driver, opt-in)
 git commit            →  guarded by a pre-commit hook that blocks
                          plaintext from ever reaching history
 ```
@@ -24,6 +25,8 @@ A handful of small bash scripts. No daemon, no gpg, no custom key format — key
 - [Storage formats: json vs dotenv](#storage-formats-json-vs-dotenv)
 - [Onboarding a teammate / a new machine](#onboarding-a-teammate--a-new-machine)
 - [The pre-commit guard](#the-pre-commit-guard)
+- [Merging secrets](#merging-secrets)
+- [Changing recipients (re-key)](#changing-recipients-re-key)
 - [Security model](#security-model)
 - [Repository policy](#repository-policy)
 - [Limitations](#limitations)
@@ -98,7 +101,7 @@ Updating later: `git -C utilities/sops-git-filters pull origin main`, then commi
 
 ### B. Vendored copy (no submodule mechanics)
 
-Copy every `*.sh` file (`clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh` and `lib.sh`, which the others load) into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
+Copy every `*.sh` file (`clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh`, `merge-driver.sh`, `rekey.sh`, and `lib.sh`, which the others load) into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
 
 ### C. Guard only, via pre-commit remote
 
@@ -145,9 +148,11 @@ creation_rules:
 **3. Mark files in `.gitattributes`** (see [`examples/gitattributes`](examples/gitattributes)):
 
 ```
-.env      filter=sops diff=sops
-**/.env   filter=sops diff=sops
+.env      filter=sops diff=sops merge=sops
+**/.env   filter=sops diff=sops merge=sops
 ```
+
+`merge=sops` is optional but you want it as soon as two branches can change the same secret: see [Merging secrets](#merging-secrets).
 
 **4. (Optional) choose a storage format** in `.sops-filter.conf` — see next section. Skip it to store as JSON.
 
@@ -252,6 +257,41 @@ With the [pre-commit framework](https://pre-commit.com), using the submodule pat
 
 Or as a plain git hook: `ln -s ../../utilities/sops-git-filters/encryption-guard.sh .git/hooks/pre-commit`.
 
+## Merging secrets
+
+Git merges what it stores, and for a SOPS-managed file that is ciphertext. Every edit re-encrypts the whole file, so when two branches both changed a secret the two blobs differ on every line. Git then writes conflict markers *into the ciphertext*, the smudge filter cannot decrypt that, and the merge dies half-way: no `MERGE_HEAD`, nothing to abort, the working copy of the file deleted. `git rebase`, `git cherry-pick`, `git stash pop` and `git stash --keep-index` followed by `pop` fail the same way.
+
+`merge-driver.sh` merges the **plaintext** instead. It decrypts the three versions (common ancestor, ours, theirs), runs `git merge-file` on them and encrypts the result with the clean filter. Turn it on per path:
+
+```
+.env   filter=sops diff=sops merge=sops
+```
+
+`install.sh` registers the driver (`merge.sops.driver`), so existing clones must run it once more.
+
+- **Changes to different lines** merge by themselves.
+- **A real conflict, json format:** the working copy gets the usual `<<<<<<<` `=======` `>>>>>>>` markers, in plaintext. Edit the file, `git add` it, continue. Git never sees the marked-up plaintext: what it stores during the conflict is encrypted like everything else.
+- **A real conflict, dotenv format:** marker lines are not `KEY=VALUE` and cannot be stored. Our version is kept and the conflict is reported. Take a side with `git checkout --theirs -- <file>` (or `--ours`), or use `git mergetool`; then `git add`.
+- **No keys, no merge:** the driver has to decrypt. Without a key or cloud session git reports `failed to execute internal merge` and changes nothing; sign in and run the merge again.
+- **Plaintext on disk:** for the length of the merge the three decrypted versions sit in a private directory (mode 0700) under `.git/`, removed on exit. `git merge-file` needs real files.
+- **`git mergetool` leaves a backup:** `<file>.orig` holds your side in plaintext, and `.env.orig` does not match a `.env` pattern in `.gitattributes`, so `git add -A` would commit it unencrypted and the guard would not see it. Set `git config mergetool.keepBackup false`, or ignore `*.orig`.
+
+Without `merge=sops`, the minimum is `merge=binary` on the same paths: git then reports an ordinary conflict and keeps your version, instead of dying.
+
+## Changing recipients (re-key)
+
+After you add or remove a key in `.sops.yaml`, the files already in git are still encrypted for the old recipients. Editing nothing and re-adding them does not help: the clean filter reuses the stored blob whenever the plaintext is unchanged. Re-key the stored blobs instead:
+
+```sh
+./utilities/sops-git-filters/rekey.sh --dry-run   # which files would change
+./utilities/sops-git-filters/rekey.sh             # re-key and stage them
+git diff --cached --stat && git commit
+```
+
+`rekey.sh` copies each SOPS-managed blob from the index into a private directory under `.git/` (ciphertext only), runs `sops updatekeys` on it against your `.sops.yaml`, and stages the result with `git update-index`. The working tree is not touched. It needs decryption access, and it accepts paths to limit the run.
+
+**Removing a recipient is not revocation.** `sops updatekeys` keeps the data key, and history keeps the old blobs: whoever was removed could read everything up to now. Rotate the secret values. Editing a value re-encrypts that file with a fresh data key; to do that for files you did not edit, run `SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize .`
+
 ## Security model
 
 What you get:
@@ -279,7 +319,8 @@ What you must still do:
 
 - **Text files only.** File content passes through shell variables; NUL bytes are not preserved. Fine for `.env`, PEM/OpenSSH keys, YAML, JSON — not for binary blobs.
 - **Trailing-newline normalization.** Content round-trips exactly, except exotic cases like a file whose last line has no terminating newline *and* SOPS dotenv format (which appends one).
-- **`sops updatekeys` workflow.** After changing recipients in `.sops.yaml`, re-encrypt managed files by touching and re-adding them (the stored ciphertext must be rebuilt to include new recipients); `sops updatekeys` on the *stored* blob also works: `git show :.env | sops updatekeys ...`.
+- **Merges need the driver.** Without `merge=sops` (or at least `merge=binary`) on a path, two branches that both changed that secret cannot be merged; see [Merging secrets](#merging-secrets).
+- **Recipients change only through `rekey.sh`.** Touching and re-adding a file does not re-encrypt it; see [Changing recipients](#changing-recipients-re-key).
 - **One filter name.** Everything is registered under the `sops` filter/diff driver; per-path different formats aren't supported (one `SOPS_STORE_FORMAT` per repo).
 
 ## Troubleshooting
@@ -309,7 +350,10 @@ With this version, they don't — the clean path in `.git/config` is repo-relati
 The permission hook chmod-ed the file after git checked it out, and git read the new inode change time as a local change. This happened now and then, when the chmod fell into a later second than the checkout. Re-run `install.sh` (it sets `core.trustctime=false`), then `git rebase --continue`.
 
 **`git stash` / pre-commit stash conflicts on secret files**
-The filter compares against the index specifically to keep stash blobs identical. If you hit a conflict anyway you're likely on an older clean filter — re-run `install.sh` on a current checkout.
+The filter compares against the index specifically to keep stash blobs identical, which is what the [pre-commit](https://pre-commit.com) framework's stash needs. `git stash pop` itself is a three-way merge: if the secret changed on both sides (a newer commit, or `git stash --keep-index` with staged and unstaged edits), it needs `merge=sops` on that path like any other merge. See [Merging secrets](#merging-secrets).
+
+**`git merge`, `rebase`, `cherry-pick` or `stash pop` dies with "smudge filter sops failed"**
+Both sides changed a secret and the path has no `merge=sops`: git merged the ciphertext and wrote conflict markers into it. Get back to a clean state (`git checkout -- <file>` restores the working copy; `git rebase --abort` if a rebase is in progress), add `merge=sops` to the path in `.gitattributes`, re-run `install.sh`, and merge again.
 
 **Guard blocks a commit but `git show :file` looks encrypted**
 The guard wants a *completely* encrypted SOPS document in the format set in `.sops-filter.conf`: one `ENC[...]` value under `"data"` (json), or every value and comment as `ENC[...]` (dotenv). A blob with one value in clear or with extra keys is refused: rebuild it with `git add --renormalize -- <file>`. A blob that is encrypted in the *other* storage format is reported separately ("stored in the other format"): that is a format change that was not finished, see [Storage formats](#storage-formats-json-vs-dotenv). The guard also names files you did not touch in this commit: it checks everything that is tracked.
