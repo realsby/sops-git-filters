@@ -124,3 +124,14 @@ plain_of_stored() {
 blob_id() { # <path> : object id of the index entry
 	git ls-files -s -- "$1" | awk '{print $2}'
 }
+
+# stub <dir> <command> : write an executable stand-in for <command> into
+# <dir>; the script body comes from stdin. REAL holds the real command.
+stub() {
+	mkdir -p "$1"
+	{
+		printf '#!/usr/bin/env bash\nREAL=%q\n' "$(command -v "$2")"
+		cat
+	} >"$1/$2"
+	chmod +x "$1/$2"
+}
