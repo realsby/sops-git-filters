@@ -261,7 +261,7 @@ What you get:
 - **No blind re-encryption.** If the stored version of a secret cannot be decrypted, the clean filter stops with the `sops` error. Input that already is ciphertext is stored unchanged.
 - **The output is checked, twice.** The clean filter refuses what `sops` returns unless it is a completely encrypted SOPS document. The guard then re-checks every tracked SOPS-managed blob at commit time, with no dependency on the filter machinery.
 - **No plaintext at rest in git.** Remote, object store, and stash hold ciphertext only. Multi-recipient keys and break-glass access come from SOPS key groups.
-- **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600`; `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf`, or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`.
+- **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600`; `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf`, or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`. Because a chmod changes a file's inode change time, `install.sh` also sets `core.trustctime=false` in the repository: git would otherwise take a freshly chmod-ed secret for locally modified. A value you set yourself (`git config core.trustctime true`) is left alone.
 
 What you must still do:
 
@@ -304,6 +304,9 @@ Older versions of the clean filter did this when ciphertext sitting in the worki
 
 **Repo directory moved/renamed and filters broke**
 With this version, they don't — the clean path in `.git/config` is repo-relative. If you migrated from an absolute-path setup, run `install.sh` once to rewrite it.
+
+**`git rebase` stops with "Your local changes to the following files would be overwritten by merge" on a secret you did not edit**
+The permission hook chmod-ed the file after git checked it out, and git read the new inode change time as a local change. This happened now and then, when the chmod fell into a later second than the checkout. Re-run `install.sh` (it sets `core.trustctime=false`), then `git rebase --continue`.
 
 **`git stash` / pre-commit stash conflicts on secret files**
 The filter compares against the index specifically to keep stash blobs identical. If you hit a conflict anyway you're likely on an older clean filter — re-run `install.sh` on a current checkout.

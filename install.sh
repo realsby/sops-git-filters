@@ -43,6 +43,11 @@
 # ║  hooks are installed so later checkouts and merges do the same.  ║
 # ║  Set SOPS_FILTER_INSTALL_HOOKS=0 to skip the hook install.       ║
 # ║                                                                  ║
+# ║  core.trustctime is set to false. The chmod changes a file's     ║
+# ║  inode change time, and git would take the secret for locally    ║
+# ║  modified: now and then a rebase stopped because of it. A        ║
+# ║  value already set in .git/config is left alone.                 ║
+# ║                                                                  ║
 # ║  It also looks at what git already holds: a SOPS-managed file    ║
 # ║  whose blob in the index or in HEAD is not an encrypted SOPS     ║
 # ║  document was committed in plaintext (before the filter          ║
@@ -232,6 +237,23 @@ if [[ "$(git_effective --bool --get filter.sops.required)" != "true" ||
 	git -C "${TARGET_ROOT}" config --show-origin --get-regexp '^filter\.sops\.' >&2 || true
 	echo "Remove the overriding entries and re-run this script." >&2
 	exit 1
+fi
+
+# ── Ignore inode change times ────
+# A chmod of a secret changes the file's inode change time (ctime) after
+# git recorded it, and the permission hooks installed below do that after
+# every checkout. Git compares ctime, so the secret then looks modified.
+# `git status` finds out it is not by running the clean filter once more
+# (one decryption per file). A rebase does not: when the chmod lands in a
+# later second than the checkout, it stops with "Your local changes to
+# the following files would be overwritten by merge".
+#
+# core.trustctime=false makes git ignore ctime; it still compares mtime,
+# size and inode. A value already set in .git/config is left alone, so
+# `git config core.trustctime true` keeps git's default.
+if [[ -z "$(git_cfg --get core.trustctime 2>/dev/null || true)" ]]; then
+	git_cfg core.trustctime false
+	echo "Set core.trustctime=false (a chmod of a secret is not a local change)."
 fi
 
 # ── Re-smudge pass: heal files checked out before setup ────
