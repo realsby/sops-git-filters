@@ -140,9 +140,8 @@ check_entries() {
 		echo "" >&2
 		printf '%s' "${other_format}" >&2
 		echo "" >&2
-		echo " To finish the format change, re-encrypt each of them:" >&2
-		echo "   touch <file> && git add <file>" >&2
-		echo " (after install.sh has been re-run for the new format)." >&2
+		echo " To finish the format change, re-run install.sh, then re-encrypt:" >&2
+		echo "   SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- <files>" >&2
 		echo "========================================================" >&2
 		return 1
 	fi

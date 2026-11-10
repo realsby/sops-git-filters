@@ -153,10 +153,13 @@ test_guard_names_an_unfinished_format_change() {
 	git add .env
 	git commit -q -m "add .env (json)"
 
+	# Not staged on purpose: the guard reads the format from the working
+	# tree, and during a format change any git command that re-checks
+	# .env is refused by the clean filter.
 	printf 'SOPS_STORE_FORMAT=dotenv\n' >.sops-filter.conf
-	git add .sops-filter.conf
 	run "${TOOL}/encryption-guard.sh"
 	assert_ne "${RC}" "0" "guard exit status"
 	assert_contains "${OUT}" "stored in the other format" "guard message"
+	assert_contains "${OUT}" "SOPS_FILTER_FORCE_REENCRYPT=1" "guard names the command"
 	assert_not_contains "${OUT}" "are not encrypted" "guard message"
 }

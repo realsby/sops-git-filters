@@ -158,3 +158,117 @@ test_clean_large_file_is_fast() {
 	cmp large.secret ../expected
 	[[ "${SECONDS}" -lt 60 ]] || fail "add, status and checkout of a 1 MB file took ${SECONDS}s"
 }
+
+# install.sh ran while the key was unavailable: the filters are on and the
+# working copy still holds ciphertext. Nothing may encrypt it a second time.
+test_clean_stores_ciphertext_input_unchanged() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+	assert_contains "$(cat .env)" 'ENC[AES256_GCM' "working copy still holds ciphertext"
+	local id
+	id="$(blob_id .env)"
+
+	# The key is back, and the user just keeps working.
+	touch .env
+	assert_eq "$(git status --porcelain)" "" "git status"
+	echo note >note.txt
+	git add -A
+	git commit -q -m "unrelated work"
+	assert_eq "$(blob_id .env)" "${id}" "blob of .env after git add -A"
+	assert_eq "$(plain_of_stored .env)" "A=1" "one layer of encryption"
+
+	# install.sh can still decrypt the working copy afterwards.
+	"${TOOL}/install.sh"
+	assert_eq "$(cat .env)" "A=1" "working copy after install.sh"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
+
+# Plaintext in the working copy, but the stored version cannot be decrypted
+# (key missing). The filter must stop, not re-encrypt an unchanged file.
+test_clean_stops_when_stored_version_cannot_be_decrypted() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	local id
+	id="$(blob_id .env)"
+
+	touch .env
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" git add .env
+	assert_ne "${RC}" "0" "git add without the decryption key"
+	assert_contains "${OUT}" "cannot decrypt the version of .env that git holds" "filter message"
+	assert_contains "${OUT}" "data key" "sops' own error is shown"
+	assert_eq "$(blob_id .env)" "${id}" "index blob"
+
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" git commit -q -am "no real change"
+	assert_ne "${RC}" "0" "git commit -a without the decryption key"
+
+	# With the key the file is simply unchanged.
+	assert_eq "$(git status --porcelain)" "" "git status with the key"
+}
+
+test_clean_force_reencrypt_gives_a_new_blob() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	local id
+	id="$(blob_id .env)"
+
+	SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- .env
+	assert_ne "$(blob_id .env)" "${id}" "blob after a forced re-encryption"
+	assert_eq "$(plain_of_stored .env)" "A=1" "plaintext"
+}
+
+# A storage-format change re-encrypts every file. That needs an explicit step.
+test_clean_format_change_needs_the_override() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env (json)"
+
+	printf 'SOPS_STORE_FORMAT=dotenv\n' >.sops-filter.conf
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status during the change"
+
+	touch .env
+	run git add .env
+	assert_ne "${RC}" "0" "plain git add during the change"
+	assert_contains "${OUT}" "SOPS_FILTER_FORCE_REENCRYPT=1" "filter message"
+
+	SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- .env
+	assert_contains "$(stored .env)" 'A=ENC[AES256_GCM,data:' "blob in the dotenv format"
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status after the change"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard after the change"
+}
+
+test_clean_refuses_ciphertext_in_the_other_format() {
+	new_repo repo
+	printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin >x.secret
+	run git add x.secret
+	assert_ne "${RC}" "0" "git add exit status"
+	assert_contains "${OUT}" "in the dotenv format" "filter message"
+}
+
+# An empty file decrypts to nothing. That is still "unchanged".
+test_clean_empty_file_keeps_its_blob() {
+	new_repo repo
+	: >empty.secret
+	git add empty.secret
+	git commit -q -m "add an empty secret"
+	local id
+	id="$(blob_id empty.secret)"
+
+	touch empty.secret
+	git add empty.secret
+	assert_eq "$(blob_id empty.secret)" "${id}" "blob id after touch + add"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
