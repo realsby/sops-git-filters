@@ -65,11 +65,15 @@ The pre-commit stash dance is also handled: the clean filter compares against th
 `clean-filter.sh` decision tree on every `git add`:
 
 1. No `sops` on PATH, or no `.sops.yaml`? → **exit non-zero, git aborts the add.** Plaintext is never stored.
-2. File is new (not in index or HEAD)? → encrypt, done.
-3. File exists? → decrypt the stored blob, compare plaintexts:
+2. Input already is a SOPS document (the working copy still holds ciphertext)? → store it **unchanged**. Nothing is encrypted twice.
+3. File is new (not in index or HEAD)? → encrypt.
+4. File exists? → decrypt the stored blob, compare plaintexts:
+   - cannot decrypt (no key, expired cloud session) → **exit non-zero** with the `sops` error. No blind re-encryption.
    - identical → output the **existing** ciphertext (no new IV → no false diff)
    - different → re-encrypt
-4. Whatever `sops` returned is checked before git gets it: it must be a SOPS document with every value encrypted. If it is not, **exit non-zero**. (A creation rule with `encrypted_regex` and the like, or an old `sops`, can leave content in clear inside a valid-looking envelope.)
+5. Whatever `sops` returned is checked before git gets it: it must be a SOPS document with every value encrypted. If it is not, **exit non-zero**. (A creation rule with `encrypted_regex` and the like, or an old `sops`, can leave content in clear inside a valid-looking envelope.)
+
+`SOPS_FILTER_FORCE_REENCRYPT=1` skips the comparison in step 4 and always re-encrypts (storage-format change, fresh data keys).
 
 `harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask — `0644` on a default workstation. `install.sh` runs the script once and installs `post-checkout` and `post-merge` hooks that re-run it, so private keys and kubeconfigs stay `0600` after every checkout, pull and merge. See [Security model](#security-model).
 
@@ -118,9 +122,14 @@ From zero to encrypted secrets in five steps. All files go in **your** repo's ro
 **1. Create a key** (age shown; any SOPS backend works):
 
 ```sh
-age-keygen -o ~/.config/sops/age/keys.txt
+# Linux
+mkdir -p ~/.config/sops/age && age-keygen -o ~/.config/sops/age/keys.txt
+# macOS
+mkdir -p "$HOME/Library/Application Support/sops/age" && age-keygen -o "$HOME/Library/Application Support/sops/age/keys.txt"
 # Public key: age1abc... ← goes into .sops.yaml
 ```
+
+`sops` looks for the key in those two places by default. On macOS it does **not** read `~/.config/sops/age/keys.txt` unless `XDG_CONFIG_HOME` is set. A key anywhere else needs `export SOPS_AGE_KEY_FILE=/path/to/keys.txt` in your shell profile. Get this wrong and encryption still works (it needs only the public key in `.sops.yaml`) while every decryption fails.
 
 **2. Create `.sops.yaml`** (see [`examples/sops.yaml`](examples/sops.yaml)):
 
@@ -159,10 +168,12 @@ Verify before your first push: `git show :.env` must print SOPS ciphertext (`ENC
 [tasks.setup]
 run = """
 git submodule update --init utilities/sops-git-filters
-./utilities/sops-git-filters/install.sh
 pre-commit install
+./utilities/sops-git-filters/install.sh
 """
 ```
+
+`install.sh` exits 3 when the filters and hooks are installed but something is left to do: files it could not decrypt (no key, expired cloud session), files tracked in plaintext, or a storage-format change that is not finished. It prints which. A setup task that should carry on in that case can run `./utilities/sops-git-filters/install.sh || [ $? -eq 3 ]`. Exit status 1 means nothing was installed.
 
 ## Storage formats: json vs dotenv
 
@@ -191,16 +202,23 @@ SOPS_STORE_FORMAT=dotenv
 
 It also refuses the result if any value came back unencrypted: a creation rule with `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`, or a key ending in `_unencrypted` (the `sops` default suffix).
 
-Pick the format **before the first encrypted commit**. Migrating later means: change `.sops-filter.conf`, re-run `install.sh` (it updates the smudge/textconv commands), then force re-encryption of every managed file (`touch` them, `git add`) — old clones must re-run `install.sh` too.
+Pick the format **before the first encrypted commit**. Migrating later, on a clone with the files decrypted:
+
+1. Change `SOPS_STORE_FORMAT` in `.sops-filter.conf`.
+2. Re-run `install.sh` (it updates the smudge command; it exits 3 and lists the files still in the old format).
+3. Re-encrypt every managed file: `SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize .`
+4. Commit `.sops-filter.conf` and the files together.
+
+Until step 3 is done, the clean filter and the guard refuse those files and name this command. Other clones must pull and re-run `install.sh`.
 
 ## Onboarding a teammate / a new machine
 
 1. Clone the repo. **The working tree now contains ciphertext** for SOPS-managed files — that's expected; filters live in `.git/config`, which isn't cloned.
-2. Get decryption access: receive the age private key (or have your cloud identity added to the KMS key policy), e.g. `~/.config/sops/age/keys.txt` or `SOPS_AGE_KEY_FILE`.
+2. Get decryption access: receive the age private key (or have your cloud identity added to the KMS key policy) and put it where `sops` looks, see [step 1 of the walkthrough](#setup-walkthrough), or point `SOPS_AGE_KEY_FILE` at it. With a cloud KMS, sign in first (`aws sso login`).
 3. Run the setup task (or directly `./utilities/sops-git-filters/install.sh`). The install re-smudges the ciphertext files into plaintext in place.
 4. Sanity check: `cat .env` shows plaintext, `git status` is clean, `git show :.env` shows ciphertext.
 
-If step 3 warns `Could not decrypt ... keys unavailable` — your key isn't set up yet; fix it and re-run `install.sh`. Until then the file stays ciphertext in your working tree (safe, just unusable).
+If step 3 ends with `STILL ENCRYPTED IN THE WORKING TREE` and exit status 3, `sops` could not decrypt: its own error is printed above that list (no key, expired session). Fix it and re-run `install.sh`. Until then the files stay ciphertext in your working tree. That state is safe: git treats them as unchanged and the clean filter stores them as they are, so nothing is encrypted twice.
 
 **CI / servers that don't need plaintext** (e.g. they only lint or build): do nothing — without the filters configured, checkouts contain raw ciphertext and nothing decrypts. Deploy tooling that *does* need plaintext should use its own SOPS integration (native SOPS support, `sops exec-env`, or run `install.sh` with a deploy key present).
 
@@ -240,6 +258,7 @@ What you get:
 
 - **Fail-closed staging.** The clean filter exits non-zero when it can't encrypt (`sops` missing, `.sops.yaml` missing, encryption error) and `filter.sops.required=true` turns that into an aborted `git add` — the failure mode is a loud error, never a plaintext commit. `install.sh` writes that flag on every run, first, and stops if a `filter.sops.process` setting would override the filter.
 - **`.sops.yaml` alone decides the recipients.** `sops` lets `SOPS_AGE_RECIPIENTS`, `SOPS_KMS_ARN`, `SOPS_GCP_KMS_IDS`, `SOPS_AZURE_KEYVAULT_URLS`, `SOPS_VAULT_URIS`, `SOPS_PGP_FP` and `SOPS_HUAWEICLOUD_KMS_IDS` replace the keys of a creation rule. The clean filter drops them (with a one-line note), so a variable left over in your shell cannot encrypt a secret for the wrong keys.
+- **No blind re-encryption.** If the stored version of a secret cannot be decrypted, the clean filter stops with the `sops` error. Input that already is ciphertext is stored unchanged.
 - **The output is checked, twice.** The clean filter refuses what `sops` returns unless it is a completely encrypted SOPS document. The guard then re-checks every tracked SOPS-managed blob at commit time, with no dependency on the filter machinery.
 - **No plaintext at rest in git.** Remote, object store, and stash hold ciphertext only. Multi-recipient keys and break-glass access come from SOPS key groups.
 - **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600`; `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf`, or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`.
@@ -272,13 +291,16 @@ Working as designed — encryption isn't possible, so staging is refused. Create
 Another tool registered a long-running filter under the same driver name (`sops`), in your global or system git config. Git prefers it over the clean/smudge commands, so `clean-filter.sh` would never run. Remove that setting (`git config --global --unset filter.sops.process`) and re-run `install.sh`. A copy in the repository's own `.git/config` is removed for you.
 
 **Fresh clone: `.env` is full of `ENC[...]` gibberish**
-Filters aren't configured yet on this clone. Run `install.sh` — it configures `.git/config` and decrypts pre-setup checkouts in place. Still ciphertext afterwards? Your key isn't available; check `SOPS_AGE_KEY_FILE` / KMS credentials and re-run.
+Filters aren't configured yet on this clone. Run `install.sh` — it configures `.git/config` and decrypts pre-setup checkouts in place. Still ciphertext afterwards? `install.sh` then ended with `STILL ENCRYPTED IN THE WORKING TREE` and the `sops` error above it: your key or cloud session isn't available. Fix that and re-run.
+
+**`git status`, `git add` or `git commit` fails with "cannot decrypt the version of … that git holds"**
+To know whether a secret changed, the clean filter decrypts the stored version. That failed, and the `sops` message above the error says why: usually an expired cloud session (`aws sso login`) or an age key `sops` cannot find (`SOPS_AGE_KEY_FILE`; on macOS see [step 1 of the walkthrough](#setup-walkthrough)). Git runs the filter for every SOPS-managed file whose timestamp changed, so one touched secret is enough to stop these commands until decryption works again. The filter does not re-encrypt blindly: that would show unchanged secrets as modified and commit them again. `SOPS_FILTER_FORCE_REENCRYPT=1 git add <file>` re-encrypts on purpose.
 
 **Every `git status` shows my secret file as modified**
-You're likely running a naive filter (or an older version of it) that re-encrypts unconditionally. Re-run `install.sh` and re-add the file once. With dotenv format, also check for blank lines (not representable — the round-trip comparison then never matches; use `#` separator lines).
+With dotenv format, check for blank lines (not representable — the round-trip comparison then never matches; use `#` separator lines) and for a missing newline at the end of the file. Otherwise you are likely running an older clean filter: update, re-run `install.sh` and re-add the file once.
 
 **A file got double-encrypted (ciphertext inside ciphertext)**
-Happens if ciphertext sitting in the working tree gets `git add`-ed *after* filters are configured (the filter treats the ciphertext as plaintext to protect). Fix: `git show :file | sops decrypt --input-type <fmt> --output-type <fmt2> --filename-override file /dev/stdin` repeatedly until you see actual plaintext, write that to the working tree, `git add`. Prevention is exactly what the `install.sh` re-smudge pass and its byte-identical check are for.
+Older versions of the clean filter did this when ciphertext sitting in the working tree was `git add`-ed after the filters were configured. The current filter stores input that already is a SOPS document unchanged, so it no longer happens. To repair a blob from before: `git show :file | sops decrypt --input-type <fmt> --output-type <fmt2> --filename-override file /dev/stdin` repeatedly until you see actual plaintext, write that to the working tree, `git add`.
 
 **Repo directory moved/renamed and filters broke**
 With this version, they don't — the clean path in `.git/config` is repo-relative. If you migrated from an absolute-path setup, run `install.sh` once to rewrite it.
