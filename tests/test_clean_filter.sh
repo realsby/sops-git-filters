@@ -139,3 +139,22 @@ ENV
 	assert_eq "$(plain_of_stored .env dotenv)" "$(cat .env)" "round trip"
 	assert_not_contains "$(stored .env)" 'two words' "stored blob"
 }
+
+# A file of a megabyte or more must not take minutes. The checks on the
+# document run in awk for that reason (see lib.sh).
+test_clean_large_file_is_fast() {
+	new_repo repo
+	awk 'BEGIN { for (i = 0; i < 40000; i++) print "line " i " of a large secret file" }' >large.secret
+	assert_eq "$(($(wc -c <large.secret) > 1000000))" "1" "the test file is over 1 MB"
+
+	SECONDS=0
+	git add large.secret
+	git commit -q -m "add a large secret"
+	touch large.secret
+	assert_eq "$(git status --porcelain)" "" "git status"
+	cp large.secret ../expected
+	mv large.secret ../moved
+	git checkout -- large.secret
+	cmp large.secret ../expected
+	[[ "${SECONDS}" -lt 60 ]] || fail "add, status and checkout of a 1 MB file took ${SECONDS}s"
+}
