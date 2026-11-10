@@ -23,6 +23,17 @@
 # ║  index (or HEAD) and compare it to the new content. If it is     ║
 # ║  identical, we reuse the existing ciphertext — no false diff.    ║
 # ║                                                                  ║
+# ║  That comparison needs the stored version to decrypt. When it    ║
+# ║  does not (keys or cloud credentials missing) the filter stops   ║
+# ║  with sops' own error. It does NOT re-encrypt blindly: that      ║
+# ║  showed unchanged secrets as modified and committed them again.  ║
+# ║  SOPS_FILTER_FORCE_REENCRYPT=1 skips the comparison on purpose   ║
+# ║  (storage-format change, fresh data keys).                       ║
+# ║                                                                  ║
+# ║  The filter is also idempotent: input that already is a SOPS     ║
+# ║  document (a working copy that still holds ciphertext) is        ║
+# ║  stored unchanged, never encrypted a second time.                ║
+# ║                                                                  ║
 # ║  Failure policy: this filter FAILS HARD. If sops is missing or   ║
 # ║  .sops.yaml is absent, it exits non-zero and (combined with      ║
 # ║  filter.sops.required=true, set by install.sh) git aborts the    ║
@@ -99,6 +110,25 @@ dotenv)
 	DECRYPT_ARGS=(--input-type dotenv --output-type dotenv)
 	;;
 esac
+OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
+
+# ── Input that already is ciphertext ────
+# The working copy can hold a SOPS document instead of plaintext: a clone
+# made before install.sh ran, or one where install.sh could not decrypt
+# (keys or credentials missing). Encrypting that again would nest
+# ciphertext in ciphertext. Store it unchanged instead: git then sees no
+# change, and install.sh can still decrypt the working copy later.
+if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
+	echo "sops clean filter: ${FILENAME} already is a SOPS document (the working copy holds ciphertext) — storing it unchanged" >&2
+	printf '%s' "${INPUT}"
+	exit 0
+fi
+if sgf_is_sops_doc "${OTHER_FORMAT}" "${INPUT}"; then
+	echo "ERROR: the working copy of ${FILENAME} is a SOPS document in the ${OTHER_FORMAT} format," >&2
+	echo "       but .sops-filter.conf says ${STORE_FORMAT}. Refusing to encrypt ciphertext again." >&2
+	echo "       Decrypt the working copy first, then stage it." >&2
+	exit 1
+fi
 
 # ── dotenv: refuse input the format would store in clear ────
 # sops' dotenv parser is line-based and keeps everything left of the
@@ -162,6 +192,15 @@ if ! git cat-file -e ":${FILENAME}" 2>/dev/null &&
 	exit 0
 fi
 
+# ── Asked to re-encrypt no matter what ────
+# For a storage-format change, or to get fresh data keys:
+#   SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- <files>
+if [[ "${SOPS_FILTER_FORCE_REENCRYPT:-}" == "1" ]]; then
+	echo "sops clean filter: SOPS_FILTER_FORCE_REENCRYPT=1, re-encrypting ${FILENAME}" >&2
+	encrypt_input
+	exit 0
+fi
+
 # ── Existing file: compare before re-encrypting ────────
 
 # Compare against the INDEX version first (`:path`), then fall back to
@@ -177,17 +216,43 @@ EXISTING_ENCRYPTED=$( (git cat-file -p ":${FILENAME}" 2>/dev/null ||
 	true) && printf x)
 EXISTING_ENCRYPTED="${EXISTING_ENCRYPTED%x}"
 
-# Decrypt the stored version so we can compare plaintext-to-plaintext.
-# If decryption fails (corrupted, no keys), fall through to re-encrypt.
-EXISTING_DECRYPTED=$( (printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
+# ── The stored version is not a SOPS document in this format ────
+if ! sgf_is_sops_doc "${STORE_FORMAT}" "${EXISTING_ENCRYPTED}"; then
+	if sgf_is_sops_doc "${OTHER_FORMAT}" "${EXISTING_ENCRYPTED}"; then
+		# Encrypted, in the other storage format. Re-encrypting every file
+		# is a deliberate step, not something to start because a config
+		# line changed.
+		echo "ERROR: git holds ${FILENAME} in the ${OTHER_FORMAT} format, but .sops-filter.conf says ${STORE_FORMAT}." >&2
+		echo "       To finish the format change, re-encrypt the SOPS-managed files:" >&2
+		echo "         SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- <files>" >&2
+		exit 1
+	fi
+	# Plaintext committed before the filter existed (or by a clone
+	# without it). There is nothing to compare with: encrypt.
+	echo "sops clean filter: the stored version of ${FILENAME} is not encrypted, encrypting it now" >&2
+	encrypt_input
+	exit 0
+fi
+
+# ── Decrypt the stored version to compare plaintext with plaintext ────
+# sops' stderr is left alone: if this fails, its message is the reason.
+if ! EXISTING_DECRYPTED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
 	"${DECRYPT_ARGS[@]}" \
 	--filename-override "${FILENAME}" \
-	/dev/stdin 2>/dev/null || true) && printf x)
+	/dev/stdin && printf x); then
+	echo "ERROR: cannot decrypt the version of ${FILENAME} that git holds (sops' message is above)." >&2
+	echo "       Without it this filter cannot tell whether the file changed, and it does not" >&2
+	echo "       re-encrypt blindly. Are your keys or cloud credentials available?" >&2
+	echo "       (AWS SSO: aws sso login. age: SOPS_AGE_KEY_FILE.)" >&2
+	echo "       To re-encrypt regardless: SOPS_FILTER_FORCE_REENCRYPT=1 git add ${FILENAME}" >&2
+	exit 1
+fi
 EXISTING_DECRYPTED="${EXISTING_DECRYPTED%x}"
 
-if [[ -n "${EXISTING_DECRYPTED}" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; then
+if [[ "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; then
 	# Content unchanged — reuse the existing ciphertext verbatim.
-	# Same plaintext → same stored blob → no false diff.
+	# Same plaintext → same stored blob → no false diff. (This holds for
+	# an empty file too: what counts is that the decryption worked.)
 	echo "sops clean filter: content unchanged, reusing existing encrypted blob for ${FILENAME}" >&2
 	printf '%s' "${EXISTING_ENCRYPTED}"
 else
