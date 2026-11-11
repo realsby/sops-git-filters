@@ -69,7 +69,7 @@ OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 #   1 at least one is not (already reported)
 #   2 the check itself could not be completed
 check_entries() {
-	local i=0 path attr value status managed=0
+	local i=0 path attr value status why managed=0
 	local unencrypted="" unreadable="" other_format=""
 
 	while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
@@ -95,7 +95,9 @@ check_entries() {
 					if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}"; then
 						other_format="${other_format}   - ${path}"$'\n'
 					else
-						unencrypted="${unencrypted}   - ${path}"$'\n'
+						# Why not: a line number or a key name, never a value.
+						why="$(sgf_blob_problem "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}")"
+						unencrypted="${unencrypted}   - ${path}${why:+  (${why})}"$'\n'
 					fi
 					;;
 				esac
@@ -129,6 +131,8 @@ check_entries() {
 		echo "   2. Re-stage through the filter:  git add --renormalize -- <file>" >&2
 		echo "   3. A file that was already committed like this is in history:" >&2
 		echo "      rotate that secret." >&2
+		echo " If the reason names a key that sops does not write and your sops is" >&2
+		echo " newer than this tool, update sops-git-filters instead." >&2
 		echo "========================================================" >&2
 		return 1
 	fi

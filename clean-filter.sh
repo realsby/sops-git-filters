@@ -158,7 +158,7 @@ for var in SOPS_AGE_RECIPIENTS SOPS_KMS_ARN SOPS_GCP_KMS_IDS SOPS_AZURE_KEYVAULT
 done
 
 encrypt_input() {
-	local encrypted
+	local encrypted why
 	# --filename-override tells SOPS which .sops.yaml creation rule to
 	# match (stdin has no filename of its own). The result is held back
 	# until it has been checked; the trailing x keeps its final newline.
@@ -174,9 +174,14 @@ encrypt_input() {
 	if ! sgf_is_sops_doc "${STORE_FORMAT}" "${encrypted}" ||
 		[[ "${STORE_FORMAT}" == "json" && -n "${INPUT}" && "${SGF_DATA_KIND}" != "enc" ]]; then
 		echo "ERROR: sops did not encrypt ${FILENAME} completely — refusing to stage it." >&2
+		# What the check found: a line number or a key name, never a value.
+		why="$(printf '%s' "${encrypted}" | sgf_doc_problem "${STORE_FORMAT}")"
+		[[ -z "${why}" ]] || echo "       Found: ${why}." >&2
 		echo "       Likely cause: the matching .sops.yaml rule has encrypted_regex, unencrypted_regex," >&2
 		echo "       encrypted_suffix or unencrypted_suffix (this filter needs the whole file encrypted)," >&2
 		echo "       or sops is older than ${SGF_MIN_SOPS_VERSION}. Keys ending in _unencrypted are refused too." >&2
+		echo "       If a key that sops does not write was found: your sops is newer than this" >&2
+		echo "       tool knows. Update sops-git-filters." >&2
 		return 1
 	fi
 	printf '%s' "${encrypted}"

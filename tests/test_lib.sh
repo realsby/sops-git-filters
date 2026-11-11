@@ -38,9 +38,9 @@ test_lib_json_document() {
 	assert_eq "${SGF_DATA_KIND}" "enc" "SGF_DATA_KIND"
 	is sgf_is_sops_doc json $'{\n\t"data": "",\n\t'"${meta}"
 	assert_eq "${SGF_DATA_KIND}" "empty" "SGF_DATA_KIND for an empty file"
-	is sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{"version":"3.13.3"}}'
-	is sgf_is_sops_doc json $'{\n  "data": "'"${ENC}"$'",\n  "sops": {\n    "version": "3.13.3"\n  }\n}'
-	is sgf_is_sops_doc json $'\n\n{\r\n\t"data": "'"${ENC}"$'",\r\n\t"sops": {\r\n\t}\r\n}\r\n'
+	is sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{"mac":"'"${ENC}"'","version":"3.13.3"}}'
+	is sgf_is_sops_doc json $'{\n  "data": "'"${ENC}"$'",\n  "sops": {\n    "version": "3.13.3",\n    "mac": "'"${ENC}"$'"\n  }\n}'
+	is sgf_is_sops_doc json $'\n\n{\r\n\t"data": "'"${ENC}"$'",\r\n\t"sops": {\r\n\t\t"mac": "'"${ENC}"$'",\r\n\t\t"version": "3.13.3"\r\n\t}\r\n}\r\n'
 
 	# content in clear inside a real envelope
 	is_not sgf_is_sops_doc json $'{\n\t"data": "TOP-SECRET\\n",\n\t'"${meta}"
@@ -54,6 +54,89 @@ test_lib_json_document() {
 	is_not sgf_is_sops_doc json "A=${ENC}"
 	is_not sgf_is_sops_doc json '{'
 	is_not sgf_is_sops_doc json ''
+}
+
+# sops_doc <the inside of "sops"> : a json-format document with that metadata
+sops_doc() {
+	printf '{\n\t"data": "%s",\n\t"sops": {%s}\n}\n' "${ENC}" "$1"
+}
+
+# The whole document counts, not its first lines and its last braces.
+# The first two are the examples from the review of this check.
+test_lib_json_document_is_checked_to_the_end() {
+	load_lib
+	local good='"mac": "'"${ENC}"'", "version": "3.13.3"'
+	is sgf_is_sops_doc json "$(sops_doc "${good}")"
+
+	is_not sgf_is_sops_doc json '{"data":"","sops":{},"credentials":{"password":"hunter2"}}'
+	is_not sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{},"secret":{"password":"plaintext"}}'
+	# a complete document, and then one more key
+	is_not sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{'"${good}"'},"credentials":{"password":"hunter2"}}'
+	is_not sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{'"${good}"'},"note":"hunter2"}'
+	# text after the document, or a second one
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}")PASSWORD=hunter2"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}")$(sops_doc "${good}")"
+
+	# inside "sops": only what sops writes
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "password": "hunter2"')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "credentials": {"password": "hunter2"}')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "lastmodified": {"password": "hunter2"}')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "unencrypted_suffix": ["hunter2"]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "age": "hunter2"')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "age": ["hunter2"]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "age": [{"recipient": "age1x", "enc": "e", "note": "hunter2"}]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "age": [{"recipient": {"password": "hunter2"}}]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "key_groups": [{"passwords": [{"enc": "hunter2"}]}]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "key_groups": [{"age": [{"enc": "e"}], "note": "hunter2"}]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "pgp": [{"fp": "F", "enc": {"password": "hunter2"}}]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "age": [{"recipient": "age1x", "context": {"password": "hunter2"}}]')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "age": [{"recipient": "age1x", "arn": "hunter2"}]')"
+
+	# "mac" must be an encrypted value, "version" must be there, no key twice
+	is_not sgf_is_sops_doc json "$(sops_doc '"mac": "hunter2", "version": "3.13.3"')"
+	is_not sgf_is_sops_doc json "$(sops_doc '"version": "3.13.3"')"
+	is_not sgf_is_sops_doc json "$(sops_doc '"mac": "'"${ENC}"'"')"
+	is_not sgf_is_sops_doc json "$(sops_doc '"mac": "'"${ENC}"'", "version": ""')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"', "mac": "hunter2"')"
+	is_not sgf_is_sops_doc json '{"data":"'"${ENC}"'","data":"hunter2","sops":{'"${good}"'}}'
+
+	# not JSON
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"',')"
+	is_not sgf_is_sops_doc json "$(sops_doc "${good}"' "version" "3.13.3"')"
+	is_not sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{'"${good}"'}'
+	is_not sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{'"${good}"'}}}'
+	is_not sgf_is_sops_doc json '["data","sops"]'
+}
+
+# Metadata as sops really writes it. The shapes are those of 3.9.1 (a
+# null for every key type that is not used) and of 3.13.3, with AWS KMS,
+# an encryption context, age, key groups and a quote inside a string.
+test_lib_json_document_accepts_what_sops_writes() {
+	load_lib
+	local kms='{"arn": "arn:aws:kms:eu-central-1:111111111111:key/0000", "role": "arn:aws:iam::111111111111:role/r", "context": {"Env": "prod", "Team": null}, "created_at": "2026-01-01T00:00:00Z", "enc": "AQICAH==", "aws_profile": ""}'
+	local age='{"recipient": "age1qqqq", "enc": "-----BEGIN AGE ENCRYPTED FILE-----\\nYWdl\\n-----END AGE ENCRYPTED FILE-----\\n"}'
+
+	is sgf_is_sops_doc json "$(sops_doc '"kms": ['"${kms}"'], "gcp_kms": null, "azure_kv": null, "hc_vault": null, "age": ['"${age}"', '"${age}"'], "lastmodified": "2026-01-01T00:00:00Z", "mac": "'"${ENC}"'", "pgp": null, "unencrypted_suffix": "_unencrypted", "version": "3.9.1"')"
+	is sgf_is_sops_doc json "$(sops_doc '"age": ['"${age}"'], "kms": ['"${kms}"'], "lastmodified": "2026-01-01T00:00:00Z", "mac": "'"${ENC}"'", "version": "3.13.3"')"
+	is sgf_is_sops_doc json "$(sops_doc '"key_groups": [{"age": ['"${age}"'], "hc_vault": []}, {"kms": ['"${kms}"'], "hc_vault": null, "age": []}], "lastmodified": "2026-01-01T00:00:00Z", "mac": "'"${ENC}"'", "shamir_threshold": 2, "version": "3.13.3"')"
+	is sgf_is_sops_doc json "$(sops_doc '"encrypted_regex": "^(a|\"b\\\")$", "mac_only_encrypted": true, "mac": "'"${ENC}"'", "version": "3.13.3"')"
+	is sgf_is_sops_doc json "$(sops_doc '"pgp": [{"created_at": "2026-01-01T00:00:00Z", "enc": "-----BEGIN PGP MESSAGE-----\\n\\nhQ==\\n-----END PGP MESSAGE-----", "fp": "ABCDEF"}], "gcp_kms": [{"resource_id": "projects/p/locations/l/keyRings/r/cryptoKeys/k", "created_at": "t", "enc": "e"}], "azure_kv": [{"vault_url": "https://v.vault.azure.net", "name": "n", "version": "v", "created_at": "t", "enc": "e"}], "hc_vault": [{"vault_address": "https://v", "engine_path": "transit", "key_name": "k", "created_at": "t", "enc": "e"}], "hckms": [{"key_id": "k", "created_at": "t", "enc": "e"}], "mac": "'"${ENC}"'", "version": "3.13.3"')"
+}
+
+# The reason for a refusal names a key or a line, never a value.
+test_lib_doc_problem_says_why_without_content() {
+	load_lib
+	local out
+	out="$(sops_doc '"mac": "'"${ENC}"'", "version": "3.14.0", "new_field": "hunter2"' | sgf_doc_problem json)"
+	assert_contains "${out}" "new_field" "reason names the unknown key"
+	assert_not_contains "${out}" "hunter2" "reason"
+	out="$(printf '{"data":"","sops":{},"credentials":{"password":"hunter2"}}' | sgf_doc_problem json)"
+	assert_ne "${out}" "" "a reason is given"
+	assert_not_contains "${out}" "hunter2" "reason"
+	out="$(printf 'A=%s\nsops_password=hunter2\nsops_mac=%s\nsops_version=3.13.3\n' "${ENC}" "${ENC}" | sgf_doc_problem dotenv)"
+	assert_contains "${out}" "line 2" "reason names the line"
+	assert_not_contains "${out}" "hunter2" "reason"
+	assert_eq "$(sops_doc '"mac": "'"${ENC}"'", "version": "3.13.3"' | sgf_doc_problem json)" "" "no reason for a good document"
 }
 
 # The check must stay fast on a large file: bash pattern matching on a
@@ -83,6 +166,21 @@ test_lib_dotenv_document() {
 	is_not sgf_is_sops_doc dotenv "${doc}# a comment in clear"$'\n'
 	is_not sgf_is_sops_doc dotenv "${doc}no equals sign"$'\n'
 	is_not sgf_is_sops_doc dotenv "A=${ENC}"$'\n'            # no sops metadata
+
+	# sops_ does not make a key metadata: only the names sops writes do.
+	# The first two are the examples from the review of this check.
+	is_not sgf_is_sops_doc dotenv "${doc}sops_password=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_API_TOKEN=plaintext"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_age__list_0__map_note=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_age__list_x__map_enc=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_vault__list_0__map_enc=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_age__list_0__map_context__map_pw=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_age__list_0__map_arn=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "${doc}sops_lastmodified_x=hunter2"$'\n'
+	is_not sgf_is_sops_doc dotenv "A=${ENC}"$'\nsops_mac=hunter2\nsops_version=3.13.3\n'
+	is sgf_is_sops_doc dotenv "${doc}sops_API_TOKEN=${ENC}"$'\n'    # encrypted, so nothing leaks
+	# what sops writes for AWS KMS, an encryption context and key groups
+	is sgf_is_sops_doc dotenv "${doc}"$'sops_kms__list_0__map_arn=arn:aws:kms:eu-central-1:111111111111:key/0000\nsops_kms__list_0__map_aws_profile=\nsops_kms__list_0__map_created_at=2026-01-01T00:00:00Z\nsops_kms__list_0__map_enc=AQICAH==\nsops_kms__list_0__map_role=arn:aws:iam::111111111111:role/r\nsops_kms__list_12__map_context__map_Env=prod\nsops_lastmodified=2026-01-01T00:00:00Z\nsops_unencrypted_suffix=_unencrypted\nsops_shamir_threshold=2\nsops_mac_only_encrypted=true\nsops_encrypted_regex=^(A|B)$\nsops_key_groups__list_1__map_age__list_0__map_recipient=age1qqqq\nsops_key_groups__list_1__map_kms__list_0__map_context__map_Team=core\nsops_pgp__list_0__map_fp=ABCDEF\nsops_hc_vault__list_0__map_engine_path=transit\n'
 	is_not sgf_is_sops_doc dotenv $'A=\nB=\n'
 	is_not sgf_is_sops_doc dotenv ''
 	is_not sgf_is_sops_doc json "${doc}"
