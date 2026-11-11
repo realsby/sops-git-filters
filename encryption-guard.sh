@@ -135,8 +135,8 @@ check_entries() {
 
 	if [[ -n "${other_format}" ]]; then
 		blocked "SOPS-managed files are stored in the other format"
-		echo " .sops-filter.conf says ${STORE_FORMAT}, but these files are stored" >&2
-		echo " in git as ${OTHER_FORMAT} (they are encrypted; nothing leaked):" >&2
+		echo " .sops-filter.conf says ${STORE_FORMAT}, but the index holds these files" >&2
+		echo " as ${OTHER_FORMAT} (encrypted, in the other format):" >&2
 		echo "" >&2
 		printf '%s' "${other_format}" >&2
 		echo "" >&2

@@ -166,6 +166,34 @@ test_install_reports_plaintext_tracked_before_adoption() {
 	assert_eq "${RC}" "0" "install.sh exit status once the file is encrypted"
 }
 
+# The commit holds plaintext, the index already holds ciphertext, and
+# then the storage format is changed. The report on the format must not
+# hide that the committed version is readable.
+test_install_reports_a_plaintext_commit_behind_the_other_format() {
+	git init -q repo
+	cd repo || exit 1
+	printf 'P=legacy\n' >.env
+	git add .env
+	git commit -q -m "plaintext secret, before the filter"
+	vendor_tool
+	write_sops_yaml
+	printf '.env filter=sops diff=sops\n' >.gitattributes
+	git add -A
+	git commit -q -m "adopt sops-git-filters"
+	run "${TOOL}/install.sh"
+	git add --renormalize -- .env
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "index blob after --renormalize"
+
+	printf 'SOPS_STORE_FORMAT=dotenv\n' >.sops-filter.conf
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status"
+	assert_contains "${OUT}" "STORED IN THE OTHER FORMAT" "install.sh report"
+	assert_contains "${OUT}" "NOT ENCRYPTED IN GIT" "install.sh report"
+	assert_contains "${OUT}" ".env  (HEAD)" "install.sh report"
+	assert_not_contains "${OUT}" "nothing leaked" "install.sh report"
+	assert_not_contains "${OUT}" "legacy" "install.sh output"
+}
+
 # A storage-format change that is not finished: the blobs are encrypted,
 # in the old format. Not plaintext, but still something to do.
 test_install_reports_unfinished_format_change() {
