@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  Fetch sops and age for the test run                             ║
+# ║  Fetch sops, age and prek for the test run                       ║
 # ║                                                                  ║
 # ║    tests/ci-install-tools.sh <sops version> <destination dir>    ║
 # ║                                                                  ║
-# ║  Downloads the release binaries of sops and age from GitHub and  ║
-# ║  puts sops, age and age-keygen into <destination dir>.           ║
+# ║  Downloads the release binaries of sops, age and prek from       ║
+# ║  GitHub and puts sops, age, age-keygen and prek into             ║
+# ║  <destination dir>. prek runs the pre-commit hooks in the tests  ║
+# ║  of tests/test_precommit.sh.                                     ║
 # ║                                                                  ║
 # ║  Every file is checked against a SHA-256 pinned in this script   ║
 # ║  BEFORE it is made executable or unpacked. A release tag is a    ║
@@ -14,7 +16,8 @@
 # ║                                                                  ║
 # ║  To add a version: add its checksums below. For sops take them   ║
 # ║  from sops-v<version>.checksums.txt in the release; age ships    ║
-# ║  no checksum file, so download each tarball and run sha256sum.   ║
+# ║  no checksum file, so download each tarball and run sha256sum;   ║
+# ║  prek publishes <archive>.sha256 next to each archive.           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -26,12 +29,15 @@ fi
 SOPS_VERSION="$1"
 DEST="$2"
 AGE_VERSION="1.3.2"
+PREK_VERSION="0.5.3"
 
+# PREK_TARGET: the name prek gives the platform in its archive names. On
+# Linux the static (musl) build, which runs on any distribution.
 case "$(uname -s)-$(uname -m)" in
-Linux-x86_64) OS=linux ARCH=amd64 ;;
-Linux-aarch64 | Linux-arm64) OS=linux ARCH=arm64 ;;
-Darwin-arm64) OS=darwin ARCH=arm64 ;;
-Darwin-x86_64) OS=darwin ARCH=amd64 ;;
+Linux-x86_64) OS=linux ARCH=amd64 PREK_TARGET=x86_64-unknown-linux-musl ;;
+Linux-aarch64 | Linux-arm64) OS=linux ARCH=arm64 PREK_TARGET=aarch64-unknown-linux-musl ;;
+Darwin-arm64) OS=darwin ARCH=arm64 PREK_TARGET=aarch64-apple-darwin ;;
+Darwin-x86_64) OS=darwin ARCH=amd64 PREK_TARGET=x86_64-apple-darwin ;;
 *)
 	echo "ci-install-tools: unsupported platform $(uname -s)-$(uname -m)" >&2
 	exit 1
@@ -53,6 +59,10 @@ pinned_sha256() {
 	age-1.3.2-linux-arm64) echo 6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4 ;;
 	age-1.3.2-darwin-arm64) echo e2020b073c44f692685a24d6abc378817eb81ffaaf49fd0531ef8565f767f2f5 ;;
 	age-1.3.2-darwin-amd64) echo 1d1e4bc66e1427edad7739ae7616157de0e79db8b6d2a1497d7d9925fb06a539 ;;
+	prek-0.5.3-linux-amd64) echo d4eae1f31c0817d0a9bfa532d4bb66df60a8b01f121def002021915e826c3d1f ;;
+	prek-0.5.3-linux-arm64) echo ad3fe48802a02ec82286ab842c4a09a4e1db765e402f1fcc016f75b6929ec480 ;;
+	prek-0.5.3-darwin-arm64) echo 6006cc4e69cfc86d55f4e407ca60ba960a521befa54fece94038639b1f4de381 ;;
+	prek-0.5.3-darwin-amd64) echo 874f05d12e7cb672758295b5253dfd05aadad3c2bcaa42ae712b917294629b07 ;;
 	*) return 1 ;;
 	esac
 }
@@ -97,5 +107,11 @@ tar -xzf "${DOWNLOADS}/age.tar.gz" -C "${DOWNLOADS}" age/age age/age-keygen
 install -m 0755 "${DOWNLOADS}/age/age" "${DEST}/age"
 install -m 0755 "${DOWNLOADS}/age/age-keygen" "${DEST}/age-keygen"
 
+fetch "https://github.com/j178/prek/releases/download/v${PREK_VERSION}/prek-${PREK_TARGET}.tar.gz" \
+	"${DOWNLOADS}/prek.tar.gz" "prek-${PREK_VERSION}-${OS}-${ARCH}"
+tar -xzf "${DOWNLOADS}/prek.tar.gz" -C "${DOWNLOADS}" "prek-${PREK_TARGET}/prek"
+install -m 0755 "${DOWNLOADS}/prek-${PREK_TARGET}/prek" "${DEST}/prek"
+
 "${DEST}/sops" --disable-version-check --version | head -1
 "${DEST}/age" --version
+"${DEST}/prek" --version
