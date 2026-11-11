@@ -309,6 +309,18 @@ function open_ended(s,    n, k) {
 }
 
 failed { next }
+# A quick look before a line is cut up: until "data" has been seen, the
+# document can only go on with {, with "data", or with nothing. Plain
+# text and other JSON are turned away here, at their first line, however
+# long that line is.
+depth == 0 && !done && $0 !~ /^[ \t\r]*($|\{[ \t\r]*($|"data"))/ {
+	fail("it does not start with { and \"data\"")
+	next
+}
+depth == 1 && ndoc == 0 && $0 !~ /^[ \t\r]*($|"data")/ {
+	fail("the first key is not \"data\"")
+	next
+}
 {
 	n = split($0, part, "\"")
 	instr = 0
