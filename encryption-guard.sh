@@ -85,14 +85,14 @@ check_entries() {
 			*)
 				managed=$((managed + 1))
 				status=0
-				sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}" || status=$?
+				sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}" || status=$?
 				case "${status}" in
 				0) ;;
 				2) unreadable="${unreadable}   - ${path}"$'\n' ;;
 				*)
 					# Encrypted, but in the format .sops-filter.conf does not
 					# name: a storage-format change that is not finished.
-					if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${INDEX_OIDS[i]}"; then
+					if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}"; then
 						other_format="${other_format}   - ${path}"$'\n'
 					else
 						unencrypted="${unencrypted}   - ${path}"$'\n'
@@ -186,15 +186,19 @@ check_index() {
 	# pipefail: a failing check-attr fails this pipeline even when
 	# check_entries saw nothing wrong in the part it received.
 	printf '%s\0' "${INDEX_PATHS[@]}" |
-		git check-attr --stdin -z filter |
+		git -C "${PROJECT_ROOT}" check-attr --stdin -z filter |
 		check_entries
 }
 
 # `|| status=$?` keeps errexit from ending the script before the
 # message below. With pipefail, a failing `git ls-files` fails the
 # pipeline too.
+#
+# -C: from the top of the working tree. `git ls-files` lists only what is
+# below the current directory, so a guard started in a subdirectory
+# would pass over every secret outside it.
 status=0
-git ls-files -s -z | check_index || status=$?
+git -C "${PROJECT_ROOT}" ls-files -s -z | check_index || status=$?
 
 case "${status}" in
 0) exit 0 ;;

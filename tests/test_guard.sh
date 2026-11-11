@@ -65,6 +65,23 @@ test_guard_blocks_envelope_with_plaintext_data() {
 	assert_ne "${RC}" "0" "guard exit status"
 }
 
+# The guard checks the whole index. Started in a subdirectory (by hand,
+# or by a CI step that changed directory), it must still see a secret
+# that is not below that directory.
+test_guard_checks_the_whole_repository_from_a_subdirectory() {
+	unfiltered_repo
+	mkdir -p docs sub
+	echo text >docs/readme.txt
+	printf 'PW=hunter2\n' >.env
+	printf 'TOKEN=abc\n' >sub/deploy.secret
+	git add docs/readme.txt .env sub/deploy.secret
+	cd docs || exit 1
+	run "../${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status from a subdirectory"
+	assert_contains "${OUT}" "- .env" "guard names the file at the top"
+	assert_contains "${OUT}" "- sub/deploy.secret" "guard names the file in another directory"
+}
+
 # ":2:prod.secret" is git syntax for "index stage 2 of prod.secret".
 test_guard_checks_files_named_like_an_index_stage() {
 	unfiltered_repo
@@ -104,10 +121,12 @@ test_guard_fails_closed_when_check_attr_fails() {
 	printf 'PW=hunter2\n' >.env
 	git add .env
 	stub ../fakebin git <<'STUB'
-if [[ "$1" == "check-attr" ]]; then
+case " $* " in
+*" check-attr "*)
 	echo "fatal: simulated check-attr failure" >&2
 	exit 128
-fi
+	;;
+esac
 exec "${REAL}" "$@"
 STUB
 	run env PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/encryption-guard.sh"
