@@ -189,6 +189,30 @@ test_clean_stores_ciphertext_input_unchanged() {
 	assert_eq "$(git status --porcelain)" "" "git status"
 }
 
+# "Stored unchanged" is only for a document sops wrote. An envelope with a
+# secret in clear added to it is content like any other: it is encrypted.
+# The first input is the example from the review of that shortcut.
+test_clean_encrypts_an_envelope_with_plaintext_added() {
+	new_repo repo
+	printf '{"data":"","sops":{},"credentials":{"password":"hunter2"}}\n' >one.secret
+	git add one.secret
+	assert_not_contains "$(stored one.secret)" "hunter2" "index blob"
+	assert_eq "$(plain_of_stored one.secret)" '{"data":"","sops":{},"credentials":{"password":"hunter2"}}' "decrypted blob"
+
+	# a real ciphertext working copy, edited by hand
+	printf 'A=1\n' >two.secret
+	git add two.secret
+	git commit -q -m "two secrets"
+	local envelope
+	envelope="$(stored two.secret)"
+	printf '%s\n' "${envelope}" | sed '$d' >two.secret
+	printf ',\n\t"credentials": {"password": "hunter2"}\n}\n' >>two.secret
+	assert_contains "$(cat two.secret)" '"data": "ENC[AES256_GCM' "test fixture: a real envelope"
+	git add two.secret
+	assert_not_contains "$(stored two.secret)" "hunter2" "index blob of the edited envelope"
+	assert_contains "$(plain_of_stored two.secret)" '"password": "hunter2"' "decrypted blob of the edited envelope"
+}
+
 # Plaintext in the working copy, but the stored version cannot be decrypted
 # (key missing). The filter must stop, not re-encrypt an unchanged file.
 test_clean_stops_when_stored_version_cannot_be_decrypted() {

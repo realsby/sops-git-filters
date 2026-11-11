@@ -83,7 +83,7 @@ The pre-commit stash dance is also handled: the clean filter compares against th
 ## Requirements
 
 - `git` ≥ 2.18, `bash` ≥ 3.2 (macOS stock bash is fine)
-- [`sops`](https://github.com/getsops/sops) ≥ 3.11.0 on PATH. `install.sh` refuses older versions: up to 3.10.2, `sops` stores the whole file in clear when the matching `.sops.yaml` rule uses `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`.
+- [`sops`](https://github.com/getsops/sops) ≥ 3.11.0 on PATH. `install.sh` refuses older versions: up to 3.10.2, `sops` stores the whole file in clear when the matching `.sops.yaml` rule uses `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`. Tested up to 3.13.3. The checks accept only the metadata fields `sops` writes up to that release: if a later `sops` adds a field, its documents are refused (never let through) and the message names the field. Update this tool then.
 - A SOPS key backend: [age](https://github.com/FiloSottile/age) (simplest), or any KMS SOPS supports
 
 ## Installation
@@ -232,7 +232,7 @@ If step 3 ends with `STILL ENCRYPTED IN THE WORKING TREE` and exit status 3, `so
 `encryption-guard.sh` is the independent second line of defense, for the cases where the filter is missing, misconfigured or bypassed.
 
 - Looks at **every** file in the index whose git attribute is `filter=sops` (via `git check-attr`, so nested `.gitattributes` work), not only at the files staged for this commit. A secret that was committed in plaintext earlier blocks every commit until it is fixed.
-- Reads each blob by object id and checks its structure. In the json format it must be `{"data": "<one ENC[...] value>", "sops": {...}}` and nothing else. In the dotenv format every value and every comment must be `ENC[...]`, and the `sops_` metadata must be there. A search for the string `ENC[AES256_GCM` is not enough: a plaintext file can mention it, and a SOPS envelope can carry plaintext while its MAC is `ENC[...]`.
+- Reads each blob by object id and checks its structure, to the last byte. In the json format it must be `{"data": "<one ENC[...] value>", "sops": {...}}` and nothing else: no third key, and inside `sops` only the fields `sops` writes, with an encrypted `mac` and a `version`. In the dotenv format every value and every comment must be `ENC[...]`, and the `sops_` metadata must be there. Only the `sops_` lines that `sops` writes count as metadata; any other line that starts with `sops_` must be encrypted like a value. A search for the string `ENC[AES256_GCM` is not enough: a plaintext file can mention it, and a SOPS envelope can carry plaintext while its MAC is `ENC[...]`. The values of the metadata fields are not checked; some are free text by design (a KMS encryption context, an `encrypted_regex`).
 - Skips symlinks and submodules (git never filters them).
 - Blocks the commit if `.sops.yaml` is missing while SOPS-managed files are tracked.
 - Fails closed: if it cannot list the index, read the attributes or read a blob, the commit is blocked.
@@ -365,7 +365,7 @@ The guard wants a *completely* encrypted SOPS document in the format set in `.so
 The filters and hooks are installed, but the listed files are tracked in plaintext: they were committed before the filter existed, or from a clone that never ran `install.sh`. Run `git add --renormalize -- <file>`, commit, and rotate those secrets — the plaintext stays in history.
 
 **`git add` fails with "sops did not encrypt … completely"**
-`sops` returned a document with content in clear, and the clean filter refused it. The matching `.sops.yaml` rule has `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix` (give the SOPS-managed paths a rule of their own without those), a dotenv key ends in `_unencrypted`, or `sops` is older than 3.11.0.
+`sops` returned a document with content in clear, and the clean filter refused it. The matching `.sops.yaml` rule has `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix` (give the SOPS-managed paths a rule of their own without those), a dotenv key ends in `_unencrypted`, or `sops` is older than 3.11.0. The line that starts with `Found:` says what the check saw. If it is "a key in the sops metadata that sops does not write", your `sops` is newer than this tool knows: update sops-git-filters. The guard and `install.sh` give the same reason next to each file they list.
 
 **`git add` fails with "cannot be stored in the dotenv format"**
 The file has a line the dotenv format would store in clear or not at all; the message names the line number. See [what the dotenv format refuses](#storage-formats-json-vs-dotenv).

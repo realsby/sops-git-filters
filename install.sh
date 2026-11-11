@@ -319,18 +319,27 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 	# finished) is its own case: it needs re-encrypting.
 	if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${index_sha}" "${TARGET_ROOT}"; then
 		OTHER_FORMAT_IN_GIT="${OTHER_FORMAT_IN_GIT}   - ${path}"$'\n'
-		[[ "${head_plain}" -eq 0 ]] || PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (HEAD)"$'\n'
+		if [[ "${head_plain}" -eq 1 ]]; then
+			why="$(sgf_blob_problem "${STORE_FORMAT}" "${head_sha}" "${TARGET_ROOT}")"
+			PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (HEAD)${why:+  [${why}]}"$'\n'
+		fi
 		continue
 	fi
 	where=""
-	sgf_blob_is_sops_doc "${STORE_FORMAT}" "${index_sha}" "${TARGET_ROOT}" || where="index"
+	why=""
+	if ! sgf_blob_is_sops_doc "${STORE_FORMAT}" "${index_sha}" "${TARGET_ROOT}"; then
+		where="index"
+		why="$(sgf_blob_problem "${STORE_FORMAT}" "${index_sha}" "${TARGET_ROOT}")"
+	fi
 	if [[ -n "${head_sha}" && "${head_sha}" == "${index_sha}" ]]; then
 		[[ -z "${where}" ]] || where="index and HEAD"
 	elif [[ "${head_plain}" -eq 1 ]]; then
+		[[ -n "${where}" ]] || why="$(sgf_blob_problem "${STORE_FORMAT}" "${head_sha}" "${TARGET_ROOT}")"
 		where="${where:+${where} and }HEAD"
 	fi
 	if [[ -n "${where}" ]]; then
-		PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (${where})"$'\n'
+		# In brackets: what the check found (a line or a key, never a value).
+		PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (${where})${why:+  [${why}]}"$'\n'
 		# Nothing to decrypt when the index version is not ciphertext.
 		[[ "${where}" == "HEAD" ]] || continue
 	fi
@@ -489,6 +498,10 @@ if [[ -n "${PLAINTEXT_IN_GIT}" ]]; then
 		echo " that never ran install.sh:"
 		echo ""
 		printf '%s' "${PLAINTEXT_IN_GIT}"
+		echo ""
+		echo " In brackets: what the check found. If that is a key sops does not"
+		echo " write and your sops is newer than this tool, the file is encrypted"
+		echo " and this tool is out of date: update sops-git-filters."
 		echo ""
 		echo " To fix:"
 		echo "   1. Encrypt them:  git add --renormalize -- <file>   then commit."

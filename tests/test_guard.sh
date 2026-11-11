@@ -65,6 +65,37 @@ test_guard_blocks_envelope_with_plaintext_data() {
 	assert_ne "${RC}" "0" "guard exit status"
 }
 
+# A complete SOPS document with a secret in clear next to it: after the
+# metadata, or in a line named like metadata. These are the examples
+# from the review of the document check.
+test_guard_blocks_plaintext_next_to_the_envelope() {
+	unfiltered_repo
+	printf '{"data":"","sops":{},"credentials":{"password":"hunter2"}}\n' >one.secret
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		sed '$d' >two.secret
+	printf ',\n\t"credentials": {"password": "hunter2"}\n}\n' >>two.secret
+	assert_contains "$(cat two.secret)" '"data": "ENC[AES256_GCM' "test fixture: a real envelope"
+	git add one.secret two.secret
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "- one.secret" "guard names the file"
+	assert_contains "${OUT}" "- two.secret" "guard names the file"
+	assert_not_contains "${OUT}" "hunter2" "guard output"
+}
+
+test_guard_blocks_plaintext_in_a_sops_prefixed_line() {
+	unfiltered_repo dotenv
+	{
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'sops_API_TOKEN=hunter2\n'
+	} >.env
+	git add .env
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "- .env" "guard names the file"
+	assert_not_contains "${OUT}" "hunter2" "guard output"
+}
+
 # The guard checks the whole index. Started in a subdirectory (by hand,
 # or by a CI step that changed directory), it must still see a secret
 # that is not below that directory.
