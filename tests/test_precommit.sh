@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # The pre-commit framework (or prek) with the guard as a local hook.
-# These tests are skipped when neither tool is on PATH.
+# These tests are skipped when neither tool is on PATH. SGF_HOOK_RUNNER
+# names the one to use; CI sets it, together with SGF_NO_SKIP=1.
 # shellcheck disable=SC2154  # OUT/RC/TOOL/AGE_* come from tests/lib.sh
 
 hook_runner() {
-	command -v pre-commit 2>/dev/null || command -v prek 2>/dev/null || true
+	if [[ -n "${SGF_HOOK_RUNNER:-}" ]]; then
+		command -v "${SGF_HOOK_RUNNER}" 2>/dev/null || true
+	else
+		command -v pre-commit 2>/dev/null || command -v prek 2>/dev/null || true
+	fi
 }
 
 precommit_repo() {

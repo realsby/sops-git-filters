@@ -56,11 +56,16 @@ jobs:
         sops: ["3.11.0", "3.13.3"]
     env:
       SOPS_VERSION: ${{ matrix.sops }}
+      # A test that skips itself fails the job here: nothing may go
+      # untested without anyone noticing. The two tests that drive a hook
+      # framework use the prek that the next step downloads.
+      SGF_NO_SKIP: "1"
+      SGF_HOOK_RUNNER: prek
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Download sops and age (SHA-256 verified)
+      - name: Download sops, age and prek (SHA-256 verified)
         run: tests/ci-install-tools.sh "${SOPS_VERSION}" "${RUNNER_TEMP}/tools"
       - name: Run the tests
         run: |

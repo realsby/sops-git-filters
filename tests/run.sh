@@ -14,6 +14,10 @@
 # ║                                                                  ║
 # ║    SGF_TOOL_DIR=<dir>   test the scripts of another checkout     ║
 # ║    SGF_KEEP=1           keep the temporary directory             ║
+# ║    SGF_NO_SKIP=1        a test that skips itself fails the run   ║
+# ║                         (CI: nothing may go untested unnoticed)  ║
+# ║    SGF_HOOK_RUNNER=prek the hook framework for the pre-commit    ║
+# ║                         tests (default: pre-commit, then prek)   ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -58,6 +62,8 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		SGF_TEST_ROOT="${root}" \
 		SGF_TOOL_DIR="${tool_dir}" \
 		SGF_KEEP="${SGF_KEEP:-}" \
+		SGF_NO_SKIP="${SGF_NO_SKIP:-}" \
+		SGF_HOOK_RUNNER="${SGF_HOOK_RUNNER:-}" \
 		bash "${HERE}/run.sh" "$@"
 fi
 
@@ -110,9 +116,13 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
 	if [[ "${status}" -eq 0 ]]; then
 		passed=$((passed + 1))
 		echo "ok   - ${name}"
-	elif [[ "${status}" -eq 77 ]]; then
+	elif [[ "${status}" -eq 77 && "${SGF_NO_SKIP:-}" != "1" ]]; then
 		skipped=$((skipped + 1))
 		echo "skip - ${name} ($(tail -1 "${dir}.log"))"
+	elif [[ "${status}" -eq 77 ]]; then
+		failed=$((failed + 1))
+		failed_names="${failed_names} ${name}"
+		echo "FAIL - ${name} (it skipped itself, and SGF_NO_SKIP=1 makes that a failure: $(tail -1 "${dir}.log"))"
 	else
 		failed=$((failed + 1))
 		failed_names="${failed_names} ${name}"

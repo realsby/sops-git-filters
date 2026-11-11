@@ -41,3 +41,18 @@ MINI
 	assert_eq "${RC}" "0" "runner exit status when the selection matches"
 	assert_contains "${OUT}" "1 passed, 0 failed" "runner summary"
 }
+
+# In CI a test that skips itself must not pass unnoticed.
+test_runner_can_turn_a_skip_into_a_failure() {
+	mini_runner mini <<'MINI'
+test_mini_skips() { skip "nothing to test with"; }
+MINI
+	run env SGF_TEST_INNER=0 SGF_NO_SKIP= bash mini/tests/run.sh
+	assert_eq "${RC}" "0" "runner exit status: a skip is no failure by default"
+	assert_contains "${OUT}" "0 passed, 0 failed, 1 skipped" "runner summary"
+
+	run env SGF_TEST_INNER=0 SGF_NO_SKIP=1 bash mini/tests/run.sh
+	assert_ne "${RC}" "0" "runner exit status with SGF_NO_SKIP=1"
+	assert_contains "${OUT}" "FAIL - test_mini_skips" "runner output"
+	assert_contains "${OUT}" "0 passed, 1 failed" "runner summary"
+}
