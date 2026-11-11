@@ -89,17 +89,20 @@ function is_token(s) {
 # stores a working copy that already is a SOPS document unchanged)
 # rely on this check.
 #
-# The names come from stores/stores.go of sops 3.9.0 to 3.13.3 (the
-# same list in every release; hckms and key_id came with 3.12.0) and
-# were compared with real output of 3.9.1, 3.10.2, 3.11.0, 3.12.1 and
-# 3.13.3 for age, AWS KMS, key groups and partial-encryption rules:
+# The names come from stores/stores.go of sops. No release from 3.5.0 to
+# 3.13.3 writes a name that is not listed here, so documents written
+# long ago are accepted too (age came with 3.7, mac_only_encrypted and
+# the comment regexes with 3.9, hckms with 3.12). They were compared
+# with real output of 3.9.1, 3.10.2, 3.11.0, 3.12.1 and 3.13.3 for age,
+# AWS KMS, key groups and partial-encryption rules:
 #
 #   meta_scalar   plain values of the "sops" object
 #   meta_keytype  its lists of key entries, also inside key_groups
 #   meta_entry    the fields of one key entry, per kind of key
 #
-# One field is free-form by design: "context" of a kms entry, the AWS
-# encryption context, is a map of names the user chose.
+# Only names and nesting are checked, not what the fields hold. Some
+# hold free text by design: an encrypted_regex, or "context" of a kms
+# entry (the AWS encryption context, a map of names the user chose).
 #
 # A sops release that adds a metadata name needs that name added here.
 # Until then its documents are refused (never let through), and
