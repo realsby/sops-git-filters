@@ -158,3 +158,32 @@ test_rekey_without_keys_fails_and_stages_nothing() {
 	assert_eq "$(blob_id .env)" "${id}" "nothing staged"
 	assert_eq "$(ls -d .git/sops-rekey.* 2>/dev/null || true)" "" "work directory removed"
 }
+
+# git could not write the index (another git process holds the lock, or
+# the lock file of a crashed one is still there). Then nothing was
+# re-keyed, and rekey.sh must say so and fail.
+test_rekey_fails_when_the_index_cannot_be_written() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	write_sops_yaml "${AGE_PUB_B}"
+	git add .sops.yaml
+	git commit -q -m "add recipient B"
+	local before
+	before="$(blob_id .env)"
+
+	: >.git/index.lock
+	run "${TOOL}/rekey.sh"
+	rm -f .git/index.lock
+	assert_ne "${RC}" "0" "rekey.sh exit status while the index is locked"
+	assert_contains "${OUT}" "FAILED  .env" "rekey.sh output"
+	assert_not_contains "${OUT}" "re-keyed  .env" "rekey.sh output"
+	assert_contains "${OUT}" "0 file(s) re-keyed and staged, 0 already match .sops.yaml, 1 failed" "rekey.sh summary"
+	assert_eq "$(blob_id .env)" "${before}" "index entry after the failed run"
+
+	run "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "0" "rekey.sh exit status without the lock"
+	assert_contains "${OUT}" "re-keyed  .env" "rekey.sh output"
+	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
+}
