@@ -119,6 +119,12 @@ failed=0
 
 # rekey_entries: stdin is the answer of `git check-attr -z filter` for
 # the index entries collected by rekey_index, in the same order.
+#
+# This function runs as the last part of a pipeline whose status is
+# taken with `|| status=$?`, and in that position bash does not stop at
+# a failing command (errexit is off). So every command that writes is
+# checked by hand: a file counts as re-keyed only when git really took
+# the new version.
 rekey_entries() {
 	local i=0 path attr value copy new_oid output
 	while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
@@ -131,17 +137,21 @@ rekey_entries() {
 			120000:* | 160000:*) ;; # symlink or submodule: never filtered
 			*:0)
 				copy="${WORK}/${path}"
-				mkdir -p "$(dirname "${copy}")"
-				git cat-file blob "${INDEX_OIDS[i]}" >"${copy}"
-				if ! sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}"; then
+				if ! mkdir -p "$(dirname "${copy}")" ||
+					! git cat-file blob "${INDEX_OIDS[i]}" >"${copy}"; then
+					echo "FAILED  ${path}: could not copy the stored version (see the message above)" >&2
+					failed=$((failed + 1))
+				elif ! sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}"; then
 					echo "FAILED  ${path}: the stored version is not a SOPS document in the ${STORE_FORMAT} format (run install.sh for details)" >&2
 					failed=$((failed + 1))
 				elif ! output="$(sops --config "${WORK}/.sops.yaml" updatekeys --yes --input-type "${STORE_FORMAT}" "${copy}" 2>&1)"; then
 					echo "FAILED  ${path}: sops updatekeys said:" >&2
 					printf '%s\n' "${output}" | sed 's/^/          /' >&2
 					failed=$((failed + 1))
+				elif ! new_oid="$(git hash-object --no-filters -- "${copy}")"; then
+					echo "FAILED  ${path}: could not read what sops updatekeys wrote (see the message above)" >&2
+					failed=$((failed + 1))
 				else
-					new_oid="$(git hash-object --no-filters -- "${copy}")"
 					if [[ "${new_oid}" == "${INDEX_OIDS[i]}" ]]; then
 						unchanged=$((unchanged + 1))
 					elif ! sgf_is_sops_doc "${STORE_FORMAT}" "$(cat "${copy}")"; then
@@ -150,11 +160,13 @@ rekey_entries() {
 					elif [[ "${DRY_RUN}" -eq 1 ]]; then
 						echo "would re-key  ${path}"
 						rekeyed=$((rekeyed + 1))
-					else
-						git hash-object -w --no-filters -- "${copy}" >/dev/null
-						git update-index --cacheinfo "${INDEX_MODES[i]}" "${new_oid}" "${path}"
+					elif git hash-object -w --no-filters -- "${copy}" >/dev/null &&
+						git update-index --cacheinfo "${INDEX_MODES[i]}" "${new_oid}" "${path}"; then
 						echo "re-keyed  ${path}"
 						rekeyed=$((rekeyed + 1))
+					else
+						echo "FAILED  ${path}: git could not stage the re-keyed version (see the message above); the index still holds the old one" >&2
+						failed=$((failed + 1))
 					fi
 				fi
 				;;
