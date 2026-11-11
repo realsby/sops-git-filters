@@ -175,6 +175,38 @@ test_merge_stash_keep_index_then_pop() {
 	assert_eq "$(cat .env)" $'A=staged\nB=2\nC=unstaged' "working copy after stash pop"
 }
 
+# Two merges at once in one repository (two terminals, an IDE working in
+# the background): the files of the one that is still running must
+# survive the start of the other. Only what a dead run left behind goes.
+test_merge_keeps_the_files_of_a_merge_that_is_still_running() {
+	merge_repo json
+	commit_env "theirs: C" $'A=1\nB=2\nC=theirs\n'
+	git checkout -q main
+	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
+
+	local gitdir running gone
+	gitdir="$(git rev-parse --absolute-git-dir)"
+	mkdir "${gitdir}/sops-merge.LIVE01" "${gitdir}/sops-merge.DEAD01" "${gitdir}/sops-merge.OLD001" "${gitdir}/sops-merge.NEW001"
+	sleep 60 &
+	running=$!
+	printf '%s\n' "${running}" >"${gitdir}/sops-merge.LIVE01/pid"
+	printf 'A=the other merge is still reading this\n' >"${gitdir}/sops-merge.LIVE01/ours"
+	(:) &
+	gone=$!
+	wait "${gone}"
+	printf '%s\n' "${gone}" >"${gitdir}/sops-merge.DEAD01/pid"
+	touch -t 202001010000 "${gitdir}/sops-merge.OLD001"
+
+	run git merge --no-edit theirs
+	kill "${running}" 2>/dev/null || true
+	assert_eq "${RC}" "0" "git merge exit status"
+	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
+	[[ -f "${gitdir}/sops-merge.LIVE01/ours" ]] || fail "the files of a merge that is still running were removed"
+	[[ -d "${gitdir}/sops-merge.NEW001" ]] || fail "the directory of a merge that is just starting was removed"
+	[[ ! -e "${gitdir}/sops-merge.DEAD01" ]] || fail "what a dead run left behind is still there"
+	[[ ! -e "${gitdir}/sops-merge.OLD001" ]] || fail "a directory from years ago is still there"
+}
+
 test_merge_leaves_no_plaintext_under_git_dir() {
 	merge_repo json
 	commit_env "theirs: C" $'A=1\nB=2\nC=theirs\n'

@@ -87,16 +87,36 @@ esac
 GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null)" || fail "cannot locate the git directory"
 umask 077
 # A run that was killed (SIGKILL) could not clean up after itself and
-# left plaintext behind. Remove such leftovers now: only directories
-# that match this script's own mktemp template.
+# left plaintext behind. Remove such leftovers now, but only what is
+# clearly a leftover: another merge may be running in this repository
+# at this moment, and its directory matches the same pattern.
+#
+# left_behind <directory> : true when the run that made it is over.
+#   - It is older than an hour: no merge of one file takes that long.
+#   - Or the process id it recorded (the file "pid") is not running.
+# A fresh directory without that file belongs to a run that is starting.
+left_behind() {
+	local pid=""
+	if [[ -n "$(find "$1" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
+		return 0
+	fi
+	[[ ! -r "$1/pid" ]] || pid="$(cat "$1/pid" 2>/dev/null || true)"
+	case "${pid}" in
+	"" | *[!0-9]*) return 1 ;;
+	esac
+	# kill -0 sends nothing: it only asks whether the process is there.
+	! kill -0 "${pid}" 2>/dev/null
+}
 for stale in "${GIT_DIR_ABS}"/sops-merge.??????; do
-	if [[ -d "${stale}" && ! -L "${stale}" ]]; then
+	if [[ -d "${stale}" && ! -L "${stale}" ]] && left_behind "${stale}"; then
 		rm -rf "${stale}"
 	fi
 done
 WORK="$(mktemp -d "${GIT_DIR_ABS}/sops-merge.XXXXXX")" || fail "cannot create a work directory under ${GIT_DIR_ABS}"
 trap 'rm -rf "${WORK}"' EXIT
 trap 'exit 129' HUP INT TERM
+# For the next run: this one is alive as long as this process is.
+printf '%s\n' "$$" >"${WORK}/pid"
 
 # decrypt_version <file with the stored blob> <file for the plaintext> <which>
 decrypt_version() {
