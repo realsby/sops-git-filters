@@ -303,19 +303,31 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 	[[ "${index_mode}" != "120000" && "${index_mode}" != "160000" ]] || continue
 
 	# ── Is the tracked version an encrypted SOPS document? ────
+	# First the committed version, when it is not the staged one: is it
+	# encrypted in either format? It is looked at before anything below
+	# can move on to the next file, so that a plaintext commit is
+	# reported whatever the index holds by now.
+	head_sha="$(git -C "${TARGET_ROOT}" rev-parse -q --verify "HEAD:${path}" 2>/dev/null || true)"
+	head_plain=0
+	if [[ -n "${head_sha}" && "${head_sha}" != "${index_sha}" ]] &&
+		! sgf_blob_is_sops_doc "${STORE_FORMAT}" "${head_sha}" "${TARGET_ROOT}" &&
+		! sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${head_sha}" "${TARGET_ROOT}"; then
+		head_plain=1
+	fi
+
 	# Encrypted in the other storage format (a format change that is not
-	# finished) is its own case: nothing leaked, but it needs re-encrypting.
+	# finished) is its own case: it needs re-encrypting.
 	if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${index_sha}" "${TARGET_ROOT}"; then
 		OTHER_FORMAT_IN_GIT="${OTHER_FORMAT_IN_GIT}   - ${path}"$'\n'
+		[[ "${head_plain}" -eq 0 ]] || PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (HEAD)"$'\n'
 		continue
 	fi
 	where=""
 	sgf_blob_is_sops_doc "${STORE_FORMAT}" "${index_sha}" "${TARGET_ROOT}" || where="index"
-	head_sha="$(git -C "${TARGET_ROOT}" rev-parse -q --verify "HEAD:${path}" 2>/dev/null || true)"
 	if [[ -n "${head_sha}" && "${head_sha}" == "${index_sha}" ]]; then
 		[[ -z "${where}" ]] || where="index and HEAD"
-	elif [[ -n "${head_sha}" ]] && ! sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${head_sha}" "${TARGET_ROOT}"; then
-		sgf_blob_is_sops_doc "${STORE_FORMAT}" "${head_sha}" "${TARGET_ROOT}" || where="${where:+${where} and }HEAD"
+	elif [[ "${head_plain}" -eq 1 ]]; then
+		where="${where:+${where} and }HEAD"
 	fi
 	if [[ -n "${where}" ]]; then
 		PLAINTEXT_IN_GIT="${PLAINTEXT_IN_GIT}   - ${path}  (${where})"$'\n'
@@ -451,8 +463,8 @@ if [[ -n "${OTHER_FORMAT_IN_GIT}" ]]; then
 		echo " STORED IN THE OTHER FORMAT"
 		echo "========================================================"
 		echo ""
-		echo " .sops-filter.conf says ${STORE_FORMAT}, but git holds these files as"
-		echo " ${OTHER_FORMAT} (they are encrypted; nothing leaked):"
+		echo " .sops-filter.conf says ${STORE_FORMAT}, but the index holds these files"
+		echo " as ${OTHER_FORMAT} (encrypted, in the other format):"
 		echo ""
 		printf '%s' "${OTHER_FORMAT_IN_GIT}"
 		echo ""
