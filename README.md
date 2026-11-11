@@ -111,7 +111,7 @@ If you only want the commit-time guard (e.g. filters are managed some other way)
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/realsby/sops-git-filters
-    rev: v1.0.0
+    rev: v2.0.0
     hooks:
       - id: sops-encryption-guard
 ```
