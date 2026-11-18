@@ -207,7 +207,7 @@ SOPS_STORE_FORMAT=dotenv
 
 It also refuses the result if any value came back unencrypted: a creation rule with `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`, or a key ending in `_unencrypted` (the `sops` default suffix).
 
-**`core.autocrlf` needs `-text`.** With `core.autocrlf=true` (common on Windows), git adds CRLF line endings to the ciphertext before the smudge filter sees it; `sops` then fails to decrypt the dotenv ciphertext and the checkout stops. Mark the managed paths `-text` in `.gitattributes`, for example `.env filter=sops diff=sops merge=sops -text`. The json format is not affected.
+**`core.autocrlf` needs `-text`, for every storage format.** With `core.autocrlf=true` (common on Windows), git adds CRLF line endings to the ciphertext before the smudge filter sees it; `sops` then fails to decrypt the dotenv ciphertext and the checkout stops. Mark the managed paths `-text` in `.gitattributes`, for example `.env filter=sops diff=sops merge=sops -text`. Do this for the json format too: there later checkouts decrypt, but a fresh clone gets CRLF ciphertext in the working tree, and the re-smudge pass in `install.sh` does not recognise that copy as ciphertext. It leaves the file encrypted, prints nothing about it and still exits 0. The same happens to dotenv files on a fresh clone.
 
 Pick the format **before the first encrypted commit**. Migrating later, on a clone with the files decrypted:
 
