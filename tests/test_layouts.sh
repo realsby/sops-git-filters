@@ -35,6 +35,18 @@ test_perms_file_mode_comes_from_the_conf() {
 	printf 'SOPS_FILE_MODE=rw-r-----\n' >.sops-filter.conf
 	run "${TOOL}/harden-permissions.sh"
 	assert_ne "${RC}" "0" "an invalid SOPS_FILE_MODE is refused"
+
+	local m
+	for m in 4777 2600 666; do
+		printf 'SOPS_FILE_MODE=%s\n' "${m}" >.sops-filter.conf
+		run "${TOOL}/harden-permissions.sh"
+		assert_ne "${RC}" "0" "SOPS_FILE_MODE=${m} is refused"
+	done
+	for m in 600 0600 640; do
+		printf 'SOPS_FILE_MODE=%s\n' "${m}" >.sops-filter.conf
+		run "${TOOL}/harden-permissions.sh"
+		assert_eq "${RC}" "0" "SOPS_FILE_MODE=${m} is accepted"
+	done
 }
 
 test_install_keeps_hooks_it_did_not_write() {
