@@ -390,7 +390,7 @@ Not a bug. Git materializes textconv temp files *through the smudge filter*, so 
 
 **Can I mix formats per file?** Not currently — one `SOPS_STORE_FORMAT` per repo.
 
-**Does this work with worktrees/submodules as the *secret* repo?** Yes — everything resolves paths via `git rev-parse`, and `install.sh` targets whatever repo you run it from (it refuses to configure its own checkout and picks the superproject instead).
+**Does this work with worktrees/submodules as the *secret* repo?** Mostly. Everything resolves paths via `git rev-parse`, and `install.sh` targets whatever repo you run it from (it refuses to configure its own checkout and picks the superproject instead). A new linked worktree works as is with the vendored layout (tool copied into the repo). With the submodule layout, run `git submodule update --init` in the new worktree first; until then `git status` and `git add` fail and secrets stay 0644.
 
 ## Tests
 
