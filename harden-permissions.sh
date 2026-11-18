@@ -79,7 +79,9 @@ fi
 
 # A file tracked as 100755 keeps its owner execute bit: chmod 600 would
 # drop it, and git would then show the file as modified for ever.
-plain_mode="${FILE_MODE#0}"
+# Take the last three digits: stripping a leading 0 would also eat the
+# owner digit of a mode such as 060.
+plain_mode="${FILE_MODE: -3}"
 EXEC_MODE="$((${plain_mode:0:1} | 1))${plain_mode:1}"
 
 # ── Walk every tracked path carrying filter=sops ────
