@@ -83,14 +83,40 @@ test_perms_file_mode_comes_from_the_conf() {
 	local m
 	for m in 4777 2600 666; do
 		printf 'SOPS_FILE_MODE=%s\n' "${m}" >.sops-filter.conf
+		chmod 644 .env
 		run "${TOOL}/harden-permissions.sh"
 		assert_ne "${RC}" "0" "SOPS_FILE_MODE=${m} is refused"
+		assert_eq "$(mode_of .env)" "600" "mode after SOPS_FILE_MODE=${m} is refused"
 	done
 	for m in 600 0600 640; do
 		printf 'SOPS_FILE_MODE=%s\n' "${m}" >.sops-filter.conf
 		run "${TOOL}/harden-permissions.sh"
 		assert_eq "${RC}" "0" "SOPS_FILE_MODE=${m} is accepted"
 	done
+}
+
+# The hooks ignore the script's exit status, so a refused SOPS_FILE_MODE
+# must still leave the secret at 0600 after a checkout, not at the umask.
+test_perms_refused_mode_still_hardens_through_the_hook() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "v1"
+	printf 'A=2\n' >.env
+	git commit -q -am "v2"
+	git branch older HEAD~1
+	cd ..
+
+	fresh_clone origin clone
+	"${TOOL}/install.sh"
+	printf 'SOPS_FILE_MODE=2600\n' >.sops-filter.conf
+
+	umask 022
+	run git checkout -q older
+	assert_eq "${RC}" "0" "git checkout exit status"
+	assert_eq "$(cat .env)" "A=1" "working copy on the other branch"
+	assert_contains "${OUT}" "invalid SOPS_FILE_MODE '2600'" "the hook reports the refused mode"
+	assert_eq "$(mode_of .env)" "600" "mode after git checkout with a refused mode"
 }
 
 test_install_keeps_hooks_it_did_not_write() {

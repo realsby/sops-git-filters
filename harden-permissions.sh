@@ -71,10 +71,15 @@ if [[ -f "${TARGET_ROOT}/.sops-filter.conf" ]]; then
 	[[ -n "${conf_mode}" ]] && FILE_MODE="${conf_mode}"
 fi
 
-# No setuid/setgid/sticky digit and no bits for "other".
+# No setuid/setgid/sticky digit and no bits for "other". A refused value
+# must not leave the files at their umask mode: the hooks and install.sh
+# ignore this script's exit status. So harden to the safe default 0600
+# first, and only then report the error through the exit status.
+INVALID_MODE=""
 if [[ ! "${FILE_MODE}" =~ ^0?[0-7][0-7]0$ ]]; then
-	echo "Error: invalid SOPS_FILE_MODE '${FILE_MODE}' in .sops-filter.conf (expected octal owner/group bits only, e.g. 600 or 640; no setuid, setgid, sticky or 'other' bits)." >&2
-	exit 1
+	INVALID_MODE="${FILE_MODE}"
+	FILE_MODE="600"
+	echo "Error: invalid SOPS_FILE_MODE '${INVALID_MODE}' in .sops-filter.conf (expected octal owner/group bits only, e.g. 600 or 640; no setuid, setgid, sticky or 'other' bits). Applying the safe default 600 instead; fix the setting." >&2
 fi
 
 # A file tracked as 100755 keeps its owner execute bit: chmod 600 would
@@ -113,4 +118,4 @@ if [[ "${QUIET}" -eq 0 ]]; then
 	echo "Permissions: ${hardened} SOPS-managed file(s) set to ${FILE_MODE}."
 fi
 
-[[ "${failed}" -eq 0 ]] || exit 1
+[[ "${failed}" -eq 0 && -z "${INVALID_MODE}" ]] || exit 1
