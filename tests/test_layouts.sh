@@ -22,6 +22,50 @@ test_perms_install_and_checkout_leave_0600() {
 	assert_eq "$(mode_of .env)" "600" "mode after git checkout"
 }
 
+# A secret tracked as 100755 keeps its execute bit, or git would show it
+# as modified for ever.
+test_perms_executable_secret_keeps_its_execute_bit() {
+	new_repo origin
+	printf '#!/bin/sh\necho v1\n' >run.secret
+	chmod 755 run.secret
+	git add run.secret
+	git commit -q -m "v1"
+	printf '#!/bin/sh\necho v2\n' >run.secret
+	git commit -q -am "v2"
+	git branch older HEAD~1
+	assert_eq "$(git ls-files -s run.secret | cut -c1-6)" "100755" "index mode"
+	cd ..
+
+	fresh_clone origin clone
+	"${TOOL}/install.sh"
+	assert_eq "$(mode_of run.secret)" "700" "mode after install.sh"
+	assert_eq "$(git status --porcelain)" "" "git status after install.sh"
+
+	git checkout -q older
+	assert_eq "$(mode_of run.secret)" "700" "mode after git checkout"
+	assert_eq "$(git status --porcelain)" "" "git status after git checkout"
+
+	printf 'SOPS_FILE_MODE=640\n' >.sops-filter.conf
+	"${TOOL}/harden-permissions.sh"
+	assert_eq "$(mode_of run.secret)" "740" "mode with SOPS_FILE_MODE=640"
+
+	printf 'SOPS_FILE_MODE=0640\n' >.sops-filter.conf
+	"${TOOL}/harden-permissions.sh"
+	assert_eq "$(mode_of run.secret)" "740" "mode with SOPS_FILE_MODE=0640"
+	assert_eq "$(git status --porcelain -- run.secret)" "" "git status with SOPS_FILE_MODE=0640"
+
+	# A zero owner digit must not be dropped: 060 becomes 160, not 070.
+	# (The owner cannot read the file then, so git status is not checked.)
+	local m want
+	for m in 060:160 000:100; do
+		want="${m#*:}"
+		m="${m%%:*}"
+		printf 'SOPS_FILE_MODE=%s\n' "${m}" >.sops-filter.conf
+		"${TOOL}/harden-permissions.sh"
+		assert_eq "$(mode_of run.secret)" "${want}" "mode with SOPS_FILE_MODE=${m}"
+	done
+}
+
 test_perms_file_mode_comes_from_the_conf() {
 	new_repo repo
 	printf 'A=1\n' >.env

@@ -13,7 +13,9 @@
 # ║                                                                  ║
 # ║  This script chmods every tracked file whose git attribute is    ║
 # ║  filter=sops to 0600 (override with SOPS_FILE_MODE in            ║
-# ║  .sops-filter.conf). It is idempotent and safe to run often —    ║
+# ║  .sops-filter.conf). A file tracked as executable (100755) gets  ║
+# ║  the owner execute bit too (0700), so git sees no mode change.   ║
+# ║  It is idempotent and safe to run often —                        ║
 # ║  install.sh runs it, and the post-checkout / post-merge hooks    ║
 # ║  it installs run it again after every checkout and merge.        ║
 # ║                                                                  ║
@@ -75,6 +77,13 @@ if [[ ! "${FILE_MODE}" =~ ^0?[0-7][0-7]0$ ]]; then
 	exit 1
 fi
 
+# A file tracked as 100755 keeps its owner execute bit: chmod 600 would
+# drop it, and git would then show the file as modified for ever.
+# Take the last three digits: stripping a leading 0 would also eat the
+# owner digit of a mode such as 060.
+plain_mode="${FILE_MODE: -3}"
+EXEC_MODE="$((${plain_mode:0:1} | 1))${plain_mode:1}"
+
 # ── Walk every tracked path carrying filter=sops ────
 # check-attr -z emits NUL-separated <path> <attr> <value> triples, so
 # paths with spaces or newlines survive intact.
@@ -88,11 +97,15 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 	# deleted or not yet checked out.
 	[[ -f "${f}" && ! -L "${f}" ]] || continue
 
-	if chmod "${FILE_MODE}" "${f}" 2>/dev/null; then
+	mode="${FILE_MODE}"
+	entry="$(git -C "${TARGET_ROOT}" ls-files -s -- ":(literal)${path}")"
+	[[ "${entry:0:6}" == "100755" ]] && mode="${EXEC_MODE}"
+
+	if chmod "${mode}" "${f}" 2>/dev/null; then
 		hardened=$((hardened + 1))
 	else
 		failed=$((failed + 1))
-		echo "⚠  Could not chmod ${FILE_MODE} ${path}" >&2
+		echo "⚠  Could not chmod ${mode} ${path}" >&2
 	fi
 done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
 
