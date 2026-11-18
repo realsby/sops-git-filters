@@ -69,8 +69,9 @@ if [[ -f "${TARGET_ROOT}/.sops-filter.conf" ]]; then
 	[[ -n "${conf_mode}" ]] && FILE_MODE="${conf_mode}"
 fi
 
-if [[ ! "${FILE_MODE}" =~ ^[0-7]{3,4}$ ]]; then
-	echo "Error: invalid SOPS_FILE_MODE '${FILE_MODE}' in .sops-filter.conf (expected octal, e.g. 600)." >&2
+# No setuid/setgid/sticky digit and no bits for "other".
+if [[ ! "${FILE_MODE}" =~ ^0?[0-7][0-7]0$ ]]; then
+	echo "Error: invalid SOPS_FILE_MODE '${FILE_MODE}' in .sops-filter.conf (expected octal owner/group bits only, e.g. 600 or 640; no setuid, setgid, sticky or 'other' bits)." >&2
 	exit 1
 fi
 
