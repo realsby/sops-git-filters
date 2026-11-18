@@ -22,6 +22,34 @@ test_perms_install_and_checkout_leave_0600() {
 	assert_eq "$(mode_of .env)" "600" "mode after git checkout"
 }
 
+# A secret tracked as 100755 keeps its execute bit, or git would show it
+# as modified for ever.
+test_perms_executable_secret_keeps_its_execute_bit() {
+	new_repo origin
+	printf '#!/bin/sh\necho v1\n' >run.secret
+	chmod 755 run.secret
+	git add run.secret
+	git commit -q -m "v1"
+	printf '#!/bin/sh\necho v2\n' >run.secret
+	git commit -q -am "v2"
+	git branch older HEAD~1
+	assert_eq "$(git ls-files -s run.secret | cut -c1-6)" "100755" "index mode"
+	cd ..
+
+	fresh_clone origin clone
+	"${TOOL}/install.sh"
+	assert_eq "$(mode_of run.secret)" "700" "mode after install.sh"
+	assert_eq "$(git status --porcelain)" "" "git status after install.sh"
+
+	git checkout -q older
+	assert_eq "$(mode_of run.secret)" "700" "mode after git checkout"
+	assert_eq "$(git status --porcelain)" "" "git status after git checkout"
+
+	printf 'SOPS_FILE_MODE=640\n' >.sops-filter.conf
+	"${TOOL}/harden-permissions.sh"
+	assert_eq "$(mode_of run.secret)" "740" "mode with SOPS_FILE_MODE=640"
+}
+
 test_perms_file_mode_comes_from_the_conf() {
 	new_repo repo
 	printf 'A=1\n' >.env
