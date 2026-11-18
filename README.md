@@ -322,6 +322,7 @@ What you must still do:
 - **Merges need the driver.** Without `merge=sops` (or at least `merge=binary`) on a path, two branches that both changed that secret cannot be merged; see [Merging secrets](#merging-secrets).
 - **Recipients change only through `rekey.sh`.** Touching and re-adding a file does not re-encrypt it; see [Changing recipients](#changing-recipients-re-key).
 - **One filter name.** Everything is registered under the `sops` filter/diff driver; per-path different formats aren't supported (one `SOPS_STORE_FORMAT` per repo).
+- **`git add -p` stages a managed file whole.** Git shows the ciphertext, not your plaintext edit, and cannot stage part of the file. Stage the whole file with `git add`.
 
 ## Troubleshooting
 
