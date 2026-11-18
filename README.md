@@ -390,7 +390,7 @@ Not a bug. Git materializes textconv temp files *through the smudge filter*, so 
 
 **Can I mix formats per file?** Not currently — one `SOPS_STORE_FORMAT` per repo.
 
-**Does this work with worktrees/submodules as the *secret* repo?** Yes — everything resolves paths via `git rev-parse`, and `install.sh` targets whatever repo you run it from (it refuses to configure its own checkout and picks the superproject instead).
+**Does this work with worktrees/submodules as the *secret* repo?** Mostly. Everything resolves paths via `git rev-parse`, and `install.sh` targets whatever repo you run it from (it refuses to configure its own checkout and picks the superproject instead). A new linked worktree works as is with the vendored layout (tool copied into the repo). With the submodule layout, run `git submodule update --init` in the new worktree first; until then `git status` and `git add` fail. The post-checkout hook already ran during `git worktree add`, found `harden-permissions.sh` missing and exited 0, and submodule init does not re-run it, so the decrypted secrets stay 0644 (world-readable) until you run `./utilities/sops-git-filters/harden-permissions.sh` from the worktree root (or re-run `install.sh` in the worktree) after the init.
 
 ## Tests
 
