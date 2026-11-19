@@ -44,8 +44,10 @@
 # ║  Then permissions are tightened: git cannot store mode 0600, so  ║
 # ║  smudged secrets land with the caller's umask (0644 by default   ║
 # ║  — world-readable private keys). harden-permissions.sh chmods    ║
-# ║  every filter=sops file to 0600, and post-checkout/post-merge    ║
-# ║  hooks are installed so later checkouts and merges do the same.  ║
+# ║  every filter=sops file to 0600 (SOPS_FILE_MODE overrides; a     ║
+# ║  100755 file keeps its owner execute bit, 0700), and             ║
+# ║  post-checkout/post-merge hooks are installed so later checkouts ║
+# ║  and merges do the same.                                         ║
 # ║  Set SOPS_FILTER_INSTALL_HOOKS=0 to skip the hook install.       ║
 # ║                                                                  ║
 # ║  core.trustctime is set to false. The chmod changes a file's     ║
