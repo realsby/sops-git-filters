@@ -1,5 +1,7 @@
 # sops-git-filters
 
+[![Greptile: The War on Bugs](https://www.greptile.com/badge.svg)](https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source)
+
 Transparent, git-crypt-style secret encryption for git — powered by [SOPS](https://github.com/getsops/sops).
 
 Files you list in `.gitattributes` are **plaintext in your working tree** and **SOPS-encrypted in git**. You edit `.env` normally; git stores ciphertext; `git diff` still shows readable changes.
