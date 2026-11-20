@@ -110,7 +110,7 @@ path_with_only() {
 	for cmd in "$@"; do
 		ln -sf "$(command -v "${cmd}")" "${dir}/${cmd}"
 	done
-	(cd "${dir}" && pwd)
+	(CDPATH='' cd -- "${dir}" && pwd)
 }
 
 # stored <path> : the blob git holds for <path> in the index

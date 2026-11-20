@@ -292,3 +292,35 @@ test_install_sets_trustctime_unless_it_is_set() {
 	"${TOOL}/install.sh"
 	assert_eq "$(git config --local --get core.trustctime)" "true" "a core.trustctime that was set by hand"
 }
+
+# An exported CDPATH must not change where the scripts find themselves.
+# With it, `cd utilities/sops-git-filters` can land in another directory
+# of that name, and bash prints the path, so `$(cd ... && pwd)` returns
+# two lines. The scripts run here through the relative path ${TOOL}.
+test_install_ignores_cdpath() {
+	mkdir -p "decoy/${TOOL}"
+	decoy="$(CDPATH='' cd -- decoy && pwd)"
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env CDPATH="${decoy}" "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status with CDPATH set"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${TOOL}/clean-filter.sh %f" "clean filter command"
+	assert_not_contains "$(git config --local --list)" "decoy" "git config"
+	assert_eq "$(cat .env)" "A=1" "working copy"
+
+	printf 'A=PLAINTEXT\n' >.env
+	run env CDPATH="${decoy}" git add .env
+	assert_eq "${RC}" "0" "git add exit status with CDPATH set"
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "index blob"
+	assert_not_contains "$(stored .env)" 'PLAINTEXT' "index blob"
+	run env CDPATH="${decoy}" git commit -q -m "change .env"
+	assert_eq "${RC}" "0" "git commit exit status with CDPATH set"
+
+	run env CDPATH="${decoy}" "${TOOL}/rekey.sh" --help
+	assert_not_contains "${OUT}" "lib.sh is missing" "rekey.sh output"
+}

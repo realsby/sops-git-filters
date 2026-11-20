@@ -46,7 +46,7 @@ set -euo pipefail
 # Byte-wise pattern matching, whatever the caller's locale is.
 export LC_ALL=C
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -r "${SCRIPT_DIR}/lib.sh" ]]; then
 	echo "Error: lib.sh is missing next to rekey.sh (${SCRIPT_DIR})." >&2
 	exit 1

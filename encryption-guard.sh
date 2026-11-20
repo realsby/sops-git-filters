@@ -35,11 +35,11 @@ export LC_ALL=C
 # Follow it, so lib.sh is found next to the real file.
 SELF="${BASH_SOURCE[0]}"
 while [[ -L "${SELF}" ]]; do
-	SELF_DIR="$(cd -P "$(dirname "${SELF}")" && pwd)"
+	SELF_DIR="$(CDPATH='' cd -P -- "$(dirname "${SELF}")" && pwd)"
 	SELF="$(readlink "${SELF}")"
 	[[ "${SELF}" == /* ]] || SELF="${SELF_DIR}/${SELF}"
 done
-SCRIPT_DIR="$(cd -P "$(dirname "${SELF}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -P -- "$(dirname "${SELF}")" && pwd)"
 
 blocked() { # <headline> : print the banner; details follow from the caller
 	echo "========================================================" >&2

@@ -55,7 +55,7 @@ fail() {
 	exit 129
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -r "${SCRIPT_DIR}/lib.sh" ]] || fail "lib.sh is missing next to merge-driver.sh (${SCRIPT_DIR})"
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
