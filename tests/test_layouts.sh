@@ -239,3 +239,183 @@ test_layout_sparse_checkout() {
 	git sparse-checkout add conf
 	assert_eq "$(cat conf/prod.secret)" "K=1" "the secret once it is checked out"
 }
+
+# ── Paths that need quoting, and symlinked paths (audit L5) ────
+# A directory name with a space, a single quote, shell syntax and a %
+# (git's placeholder sign). The path must reach git's filter and merge
+# commands and the hooks as one quoted word: nothing in it may run.
+# shellcheck disable=SC2016  # the $(...) and backticks are the test
+ODD_NAME='sgf '\''tools;$(touch PWNED)`touch PWNED`%f'
+
+# odd_round_trip <base> : in the current repository (tool installed, .env
+# with merge=sops), check that git add, a merge through the merge driver
+# and the permission hook all work, and that nothing under <base> ran.
+odd_round_trip() {
+	local base="$1"
+	printf 'A=1\nB=2\nC=3\n' >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add exit status"
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "stored blob"
+	git commit -q -m "base"
+
+	git checkout -q -b theirs
+	printf 'A=1\nB=2\nC=theirs\n' >.env
+	git commit -q -am "theirs: C"
+	git checkout -q main
+	printf 'A=ours\nB=2\nC=3\n' >.env
+	git commit -q -am "ours: A"
+	run git merge --no-edit theirs
+	assert_eq "${RC}" "0" "git merge exit status"
+	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
+	assert_eq "$(plain_of_stored .env)" $'A=ours\nB=2\nC=theirs' "merged blob"
+
+	umask 022
+	git checkout -q theirs
+	assert_eq "$(cat .env)" $'A=1\nB=2\nC=theirs' "working copy on the other branch"
+	assert_eq "$(mode_of .env)" "600" "mode after git checkout (the hook ran)"
+
+	assert_eq "$(find "${base}" -name 'PWNED*')" "" "files created by the directory name"
+}
+
+# odd_repo : a repository with merge=sops on .env, no tool yet; cd into it
+odd_repo() {
+	git init -q repo
+	cd repo || exit 1
+	# shellcheck disable=SC2119  # no extra recipients here
+	write_sops_yaml
+	printf '.env filter=sops diff=sops merge=sops\n' >.gitattributes
+}
+
+test_layout_tool_path_that_needs_quoting_inside_the_repo() {
+	local base="${PWD}"
+	odd_repo
+	mkdir -p "utilities/${ODD_NAME}"
+	cp "${SGF_TOOL_DIR}"/*.sh "utilities/${ODD_NAME}/"
+	git add -A
+	git commit -q -m scaffold
+
+	run "utilities/${ODD_NAME}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_not_contains "${OUT}" "lives outside the target repo" "install.sh output"
+	assert_contains "$(git config --local --get filter.sops.clean)" \
+		"'utilities/sgf '\\''tools;" "clean filter command"
+	# shellcheck disable=SC2016  # $root is literal hook text
+	assert_contains "$(cat .git/hooks/post-checkout)" \
+		'HARDEN="$root"/'"'utilities/sgf '\\''tools;" "hook"
+	odd_round_trip "${base}"
+}
+
+test_layout_tool_path_that_needs_quoting_outside_the_repo() {
+	local base="${PWD}"
+	mkdir "${ODD_NAME}"
+	cp "${SGF_TOOL_DIR}"/*.sh "${ODD_NAME}/"
+	odd_repo
+	git add -A
+	git commit -q -m scaffold
+
+	run "${base}/${ODD_NAME}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_contains "${OUT}" "lives outside the target repo" "install.sh output"
+	assert_contains "$(git config --local --get filter.sops.clean)" \
+		"'${base}/sgf '\\''tools;" "clean filter command"
+	odd_round_trip "${base}"
+}
+
+# A non-ASCII directory name, such as a localized "Masaüstü" (Desktop).
+# Git runs the filter and merge commands with /bin/sh, which is dash on
+# Debian and Ubuntu, and dash does not know bash's $'...' quoting (what
+# printf %q writes for such a name under LC_ALL=C).
+NON_ASCII_NAME='Masaüstü'
+
+# check_posix_commands : the stored clean and merge commands hold no
+# $'...', and the clean command works under sh and, when there, dash.
+check_posix_commands() {
+	local clean merge sh_name out
+	clean="$(git config --local --get filter.sops.clean)"
+	merge="$(git config --local --get merge.sops.driver)"
+	assert_not_contains "${clean}" "\$'" "clean filter command"
+	assert_not_contains "${merge}" "\$'" "merge driver command"
+	printf 'A=1\n' >probe.env
+	for sh_name in sh dash; do
+		command -v "${sh_name}" >/dev/null 2>&1 || continue
+		out="$("${sh_name}" -c "${clean%' %f'} probe.env" <probe.env 2>&1)" ||
+			fail "clean filter command under ${sh_name}: ${out}"
+		assert_contains "${out}" 'ENC[AES256_GCM,data:' "clean filter output under ${sh_name}"
+	done
+	rm -f probe.env
+}
+
+test_layout_non_ascii_tool_path_inside_the_repo() {
+	local base="${PWD}"
+	odd_repo
+	mkdir -p "utilities/${NON_ASCII_NAME}/sgf"
+	cp "${SGF_TOOL_DIR}"/*.sh "utilities/${NON_ASCII_NAME}/sgf/"
+	git add -A
+	git commit -q -m scaffold
+
+	run "utilities/${NON_ASCII_NAME}/sgf/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(git config --local --get filter.sops.clean)" \
+		"'utilities/${NON_ASCII_NAME}/sgf'/clean-filter.sh %f" "clean filter command"
+	check_posix_commands
+	odd_round_trip "${base}"
+}
+
+test_layout_non_ascii_tool_path_outside_the_repo() {
+	local base="${PWD}"
+	mkdir -p "${NON_ASCII_NAME}/sgf"
+	cp "${SGF_TOOL_DIR}"/*.sh "${NON_ASCII_NAME}/sgf/"
+	odd_repo
+	git add -A
+	git commit -q -m scaffold
+
+	run "${base}/${NON_ASCII_NAME}/sgf/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(git config --local --get merge.sops.driver)" \
+		"'${base}/${NON_ASCII_NAME}/sgf'/merge-driver.sh %O %A %B %L %P" "merge driver command"
+	check_posix_commands
+	odd_round_trip "${base}"
+}
+
+# Reached through a symlink, the tool inside the repository is still
+# inside it: a relative path is written, not an absolute one.
+test_layout_install_through_a_symlinked_path() {
+	mkdir real
+	ln -s real link
+	cd real || exit 1
+	git init -q repo
+	cd repo || exit 1
+	vendor_tool
+	# shellcheck disable=SC2119  # no extra recipients here
+	write_sops_yaml
+	printf '.env filter=sops diff=sops\n' >.gitattributes
+	git add -A
+	git commit -q -m scaffold
+
+	cd ../../link/repo || exit 1
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_not_contains "${OUT}" "lives outside the target repo" "install.sh output"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${TOOL}/clean-filter.sh %f" "clean filter command"
+	assert_eq "$(git config --local --get merge.sops.driver)" "${TOOL}/merge-driver.sh %O %A %B %L %P" "merge driver command"
+	# shellcheck disable=SC2016  # $root is literal hook text
+	assert_contains "$(cat .git/hooks/post-checkout)" 'HARDEN="$root"/'"${TOOL}/harden-permissions.sh" "hook"
+
+	printf 'A=1\n' >.env
+	git add .env
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "stored blob"
+}
+
+test_layout_install_refuses_its_own_checkout_through_a_symlink() {
+	mkdir real
+	ln -s real link
+	git init -q real/tool
+	cp "${SGF_TOOL_DIR}"/*.sh real/tool/
+	(cd real/tool && git add -A && git commit -q -m "tool")
+
+	cd link/tool || exit 1
+	run ./install.sh
+	assert_eq "${RC}" "1" "install.sh exit status"
+	assert_contains "${OUT}" "inside the sops-git-filters checkout itself" "install.sh message"
+	assert_eq "$(git config --local --get filter.sops.clean || true)" "" "the tool's checkout is not configured"
+}
