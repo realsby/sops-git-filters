@@ -51,7 +51,7 @@ set -euo pipefail
 # Byte-wise pattern matching, whatever the caller's locale is.
 export LC_ALL=C
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -r "${SCRIPT_DIR}/lib.sh" ]]; then
 	echo "ERROR: lib.sh is missing next to clean-filter.sh (${SCRIPT_DIR}) — update or re-copy sops-git-filters" >&2
 	exit 1

@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Outer call: build the sandbox, then start again inside it ────
 if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
@@ -36,7 +36,7 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 	# Absolute: every test runs in a directory of its own, where a relative
 	# SGF_TOOL_DIR (../main) would point somewhere else.
 	tool_dir="${SGF_TOOL_DIR:-$(dirname "${HERE}")}"
-	if ! tool_dir="$(cd "${tool_dir}" 2>/dev/null && pwd)"; then
+	if ! tool_dir="$(CDPATH='' cd -- "${tool_dir}" 2>/dev/null && pwd)"; then
 		echo "tests/run.sh: SGF_TOOL_DIR is not a directory: ${SGF_TOOL_DIR:-}" >&2
 		exit 2
 	fi
@@ -44,7 +44,7 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 	root="$(mktemp -d "${TMPDIR:-/tmp}/sgf-tests.XXXXXX")"
 	# Physical path: git reports physical paths, and on macOS the temp
 	# directory sits behind a symlink.
-	root="$(cd "${root}" && pwd -P)"
+	root="$(CDPATH='' cd -- "${root}" && pwd -P)"
 	mkdir -p "${root}/home" "${root}/tmp" "${root}/keys" "${root}/work"
 
 	exec env -i \

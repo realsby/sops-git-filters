@@ -81,7 +81,7 @@ set -euo pipefail
 # Byte-wise pattern matching, whatever the caller's locale is.
 export LC_ALL=C
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILTER_SCRIPT="${SCRIPT_DIR}/clean-filter.sh"
 HARDEN_SCRIPT="${SCRIPT_DIR}/harden-permissions.sh"
 
