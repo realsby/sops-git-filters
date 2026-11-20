@@ -173,12 +173,19 @@ esac
 # shell_quote <path> : <path> as one shell word. Git runs the filter and
 # merge commands through sh, and the hooks below are shell scripts, so a
 # space, a ';' or a '$(...)' in a directory name must reach them quoted.
-# A leading ~ is escaped too (bash 3.2's %q leaves it).
+# POSIX single quotes, not printf %q: under LC_ALL=C, %q writes a non-ASCII
+# name as $'...', which dash (/bin/sh on Debian and Ubuntu) does not know.
+# A path of only [A-Za-z0-9_./+-] is left as it is.
 shell_quote() {
-	local q
-	q="$(printf '%q' "$1")"
-	[[ "${q}" != "~"* ]] || q="\\${q}"
-	printf '%s' "${q}"
+	case "$1" in
+	'' | *[!A-Za-z0-9_./+-]*) ;;
+	*)
+		printf '%s' "$1"
+		return
+		;;
+	esac
+	local sq="'" esc="'\\''"
+	printf "'%s'" "${1//${sq}/${esc}}"
 }
 
 # Prefer a REPO-RELATIVE path for the clean filter: git runs filters

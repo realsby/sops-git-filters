@@ -241,11 +241,11 @@ test_layout_sparse_checkout() {
 }
 
 # ── Paths that need quoting, and symlinked paths (audit L5) ────
-# A directory name with a space, shell syntax and a % (git's placeholder
-# sign). The path must reach git's filter and merge commands and the
-# hooks as one quoted word: nothing in it may run.
+# A directory name with a space, a single quote, shell syntax and a %
+# (git's placeholder sign). The path must reach git's filter and merge
+# commands and the hooks as one quoted word: nothing in it may run.
 # shellcheck disable=SC2016  # the $(...) and backticks are the test
-ODD_NAME='sgf tools;$(touch PWNED)`touch PWNED`%f'
+ODD_NAME='sgf '\''tools;$(touch PWNED)`touch PWNED`%f'
 
 # odd_round_trip <base> : in the current repository (tool installed, .env
 # with merge=sops), check that git add, a merge through the merge driver
@@ -297,9 +297,11 @@ test_layout_tool_path_that_needs_quoting_inside_the_repo() {
 	run "utilities/${ODD_NAME}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
 	assert_not_contains "${OUT}" "lives outside the target repo" "install.sh output"
-	assert_contains "$(git config --local --get filter.sops.clean)" 'utilities/sgf\ tools\;' "clean filter command"
+	assert_contains "$(git config --local --get filter.sops.clean)" \
+		"'utilities/sgf '\\''tools;" "clean filter command"
 	# shellcheck disable=SC2016  # $root is literal hook text
-	assert_contains "$(cat .git/hooks/post-checkout)" 'HARDEN="$root"/utilities/sgf\ tools\;' "hook"
+	assert_contains "$(cat .git/hooks/post-checkout)" \
+		'HARDEN="$root"/'"'utilities/sgf '\\''tools;" "hook"
 	odd_round_trip "${base}"
 }
 
@@ -314,7 +316,64 @@ test_layout_tool_path_that_needs_quoting_outside_the_repo() {
 	run "${base}/${ODD_NAME}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
 	assert_contains "${OUT}" "lives outside the target repo" "install.sh output"
-	assert_contains "$(git config --local --get filter.sops.clean)" "${base}/sgf\\ tools\;" "clean filter command"
+	assert_contains "$(git config --local --get filter.sops.clean)" \
+		"'${base}/sgf '\\''tools;" "clean filter command"
+	odd_round_trip "${base}"
+}
+
+# A non-ASCII directory name, such as a localized "Masaüstü" (Desktop).
+# Git runs the filter and merge commands with /bin/sh, which is dash on
+# Debian and Ubuntu, and dash does not know bash's $'...' quoting (what
+# printf %q writes for such a name under LC_ALL=C).
+NON_ASCII_NAME='Masaüstü'
+
+# check_posix_commands : the stored clean and merge commands hold no
+# $'...', and the clean command works under sh and, when there, dash.
+check_posix_commands() {
+	local clean merge sh_name out
+	clean="$(git config --local --get filter.sops.clean)"
+	merge="$(git config --local --get merge.sops.driver)"
+	assert_not_contains "${clean}" "\$'" "clean filter command"
+	assert_not_contains "${merge}" "\$'" "merge driver command"
+	printf 'A=1\n' >probe.env
+	for sh_name in sh dash; do
+		command -v "${sh_name}" >/dev/null 2>&1 || continue
+		out="$("${sh_name}" -c "${clean%' %f'} probe.env" <probe.env 2>&1)" ||
+			fail "clean filter command under ${sh_name}: ${out}"
+		assert_contains "${out}" 'ENC[AES256_GCM,data:' "clean filter output under ${sh_name}"
+	done
+	rm -f probe.env
+}
+
+test_layout_non_ascii_tool_path_inside_the_repo() {
+	local base="${PWD}"
+	odd_repo
+	mkdir -p "utilities/${NON_ASCII_NAME}/sgf"
+	cp "${SGF_TOOL_DIR}"/*.sh "utilities/${NON_ASCII_NAME}/sgf/"
+	git add -A
+	git commit -q -m scaffold
+
+	run "utilities/${NON_ASCII_NAME}/sgf/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(git config --local --get filter.sops.clean)" \
+		"'utilities/${NON_ASCII_NAME}/sgf'/clean-filter.sh %f" "clean filter command"
+	check_posix_commands
+	odd_round_trip "${base}"
+}
+
+test_layout_non_ascii_tool_path_outside_the_repo() {
+	local base="${PWD}"
+	mkdir -p "${NON_ASCII_NAME}/sgf"
+	cp "${SGF_TOOL_DIR}"/*.sh "${NON_ASCII_NAME}/sgf/"
+	odd_repo
+	git add -A
+	git commit -q -m scaffold
+
+	run "${base}/${NON_ASCII_NAME}/sgf/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(git config --local --get merge.sops.driver)" \
+		"'${base}/${NON_ASCII_NAME}/sgf'/merge-driver.sh %O %A %B %L %P" "merge driver command"
+	check_posix_commands
 	odd_round_trip "${base}"
 }
 
