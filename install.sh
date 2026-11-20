@@ -81,7 +81,10 @@ set -euo pipefail
 # Byte-wise pattern matching, whatever the caller's locale is.
 export LC_ALL=C
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Physical paths (pwd -P), here and for the repository below: git reports
+# the top level with symlinks resolved, and a path reached through a
+# symlink would never match it.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 FILTER_SCRIPT="${SCRIPT_DIR}/clean-filter.sh"
 HARDEN_SCRIPT="${SCRIPT_DIR}/harden-permissions.sh"
 
@@ -93,11 +96,12 @@ TARGET_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 	echo "Error: not inside a git repository. cd into the repo you want to configure." >&2
 	exit 1
 }
+TARGET_ROOT="$(CDPATH='' cd -- "${TARGET_ROOT}" && pwd -P)"
 
 if [[ "${TARGET_ROOT}" == "${SCRIPT_DIR}" ]]; then
 	SUPERPROJECT="$(git rev-parse --show-superproject-working-tree 2>/dev/null || true)"
 	if [[ -n "${SUPERPROJECT}" ]]; then
-		TARGET_ROOT="${SUPERPROJECT}"
+		TARGET_ROOT="$(CDPATH='' cd -- "${SUPERPROJECT}" && pwd -P)"
 	else
 		echo "Error: you are inside the sops-git-filters checkout itself." >&2
 		echo "cd into the repository you want to configure and run:" >&2
@@ -166,20 +170,33 @@ dotenv) DECRYPT_ARGS="--input-type dotenv --output-type dotenv" ;;
 esac
 
 # ── Compose the filter commands ────
+# shell_quote <path> : <path> as one shell word. Git runs the filter and
+# merge commands through sh, and the hooks below are shell scripts, so a
+# space, a ';' or a '$(...)' in a directory name must reach them quoted.
+# A leading ~ is escaped too (bash 3.2's %q leaves it).
+shell_quote() {
+	local q
+	q="$(printf '%q' "$1")"
+	[[ "${q}" != "~"* ]] || q="\\${q}"
+	printf '%s' "${q}"
+}
+
 # Prefer a REPO-RELATIVE path for the clean filter: git runs filters
 # from the top level of the working tree, and a relative path keeps
 # working when the repository directory is moved or renamed (an
 # absolute path in .git/config silently breaks on the next move).
 if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
-	CLEAN_CMD="${SCRIPT_DIR#"${TARGET_ROOT}"/}/clean-filter.sh %f"
-	MERGE_CMD="${SCRIPT_DIR#"${TARGET_ROOT}"/}/merge-driver.sh %O %A %B %L %P"
+	TOOL_DIR_Q="$(shell_quote "${SCRIPT_DIR#"${TARGET_ROOT}"/}")"
 else
-	CLEAN_CMD="${FILTER_SCRIPT} %f"
-	MERGE_CMD="${SCRIPT_DIR}/merge-driver.sh %O %A %B %L %P"
+	TOOL_DIR_Q="$(shell_quote "${SCRIPT_DIR}")"
 	echo "⚠  sops-git-filters lives outside the target repo — using an absolute" >&2
 	echo "   path in .git/config. It will break if either directory moves." >&2
 	echo "   Consider vendoring or adding it as a submodule inside the repo." >&2
 fi
+# Git reads %<letter> in these commands as a placeholder: a literal % is %%.
+TOOL_DIR_Q="${TOOL_DIR_Q//\%/%%}"
+CLEAN_CMD="${TOOL_DIR_Q}/clean-filter.sh %f"
+MERGE_CMD="${TOOL_DIR_Q}/merge-driver.sh %O %A %B %L %P"
 
 SMUDGE_CMD="sops decrypt ${DECRYPT_ARGS} --filename-override %f /dev/stdin"
 # textconv = cat is NOT a mistake. Git materializes textconv temp files
@@ -416,14 +433,17 @@ else
 
 	# Prefer a repo-relative reference for the same reason the clean
 	# filter does: an absolute path breaks silently when the repo moves.
+	# The path is quoted for the shell (shell_quote): inside double quotes
+	# a '$(...)' in a directory name would run at every checkout.
 	if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
-		HARDEN_REL="${SCRIPT_DIR#"${TARGET_ROOT}"/}/harden-permissions.sh"
+		HARDEN_REL_Q="$(shell_quote "${SCRIPT_DIR#"${TARGET_ROOT}"/}/harden-permissions.sh")"
 		# shellcheck disable=SC2016  # $root must reach the hook unexpanded
-		HOOK_HARDEN_ASSIGN='HARDEN="$root/'"${HARDEN_REL}"'"'
-		HARDEN_HINT="\"\$(git rev-parse --show-toplevel)/${HARDEN_REL}\""
+		HOOK_HARDEN_ASSIGN='HARDEN="$root"/'"${HARDEN_REL_Q}"
+		# shellcheck disable=SC2016  # printed for the user to paste
+		HARDEN_HINT='"$(git rev-parse --show-toplevel)"/'"${HARDEN_REL_Q}"
 	else
-		HOOK_HARDEN_ASSIGN='HARDEN="'"${HARDEN_SCRIPT}"'"'
-		HARDEN_HINT="\"${HARDEN_SCRIPT}\""
+		HOOK_HARDEN_ASSIGN="HARDEN=$(shell_quote "${HARDEN_SCRIPT}")"
+		HARDEN_HINT="$(shell_quote "${HARDEN_SCRIPT}")"
 	fi
 
 	mkdir -p "${HOOKS_DIR}"
