@@ -107,7 +107,6 @@ export LC_ALL=C
 # symlink would never match it.
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 FILTER_SCRIPT="${SCRIPT_DIR}/clean-filter.sh"
-HARDEN_SCRIPT="${SCRIPT_DIR}/harden-permissions.sh"
 # What git runs, and therefore what is copied under .git/ further down.
 # lib.sh first: the others load it.
 RUNTIME_SCRIPTS="lib.sh clean-filter.sh smudge-filter.sh merge-driver.sh harden-permissions.sh"
@@ -278,6 +277,10 @@ fi
 if [[ "${copy_changed}" -eq 1 ]]; then
 	echo "Installed the scripts git runs (version ${SGF_VERSION}) into ${INSTALL_DIR}"
 fi
+# From here on this script uses the installed harden-permissions.sh too:
+# it is the one the hooks will run, and it is executable whatever the
+# file modes of the checkout are.
+HARDEN_SCRIPT="${INSTALL_DIR}/harden-permissions.sh"
 
 # ── Configure git (local to the target repo only) ────
 git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
@@ -491,7 +494,7 @@ if [[ -x "${HARDEN_SCRIPT}" ]]; then
 	"${HARDEN_SCRIPT}" --root "${TARGET_ROOT}" || true
 else
 	echo "⚠  ${HARDEN_SCRIPT} missing or not executable — SOPS-managed files" >&2
-	echo "   keep their umask permissions (usually 0644). Update this checkout." >&2
+	echo "   keep their umask permissions (usually 0644). Run install.sh again." >&2
 fi
 
 # ── Permission hooks ────
