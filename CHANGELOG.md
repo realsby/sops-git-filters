@@ -39,7 +39,9 @@ Until step 2 is done in a clone, that clone works as before with the old setting
 
   Affected: you ran `install.sh` of v1.1.0 to v2.0.0 while `core.hooksPath` named a directory that other repositories use too. A clone that uses the default `.git/hooks` is not affected.
 
-  Fix: update to v2.1.0 and run `install.sh` again in one of your clones. It removes the two hooks from the shared directory (only files that are byte for byte what `install.sh` wrote; it tells you when it finds one that was changed by hand) and never writes there again. Or delete `post-checkout` and `post-merge` from that directory yourself if they start with the line `# managed by sops-git-filters (secret file permissions)`.
+  Fix: update to v2.1.0 and run `install.sh` again in one of your clones. It removes the two hooks from the shared directory (only files that are byte for byte what `install.sh` wrote; it tells you when it finds one that was changed by hand) and never writes there again. Or delete `post-checkout` and `post-merge` from that directory yourself if their second line is `# managed by sops-git-filters (secret file permissions)`.
+
+  Advisory: [GHSA-h5c9-chvh-476w](https://github.com/realsby/sops-git-filters/security/advisories/GHSA-h5c9-chvh-476w).
 
 ### Behaviour changes
 
