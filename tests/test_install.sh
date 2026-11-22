@@ -324,3 +324,26 @@ test_install_ignores_cdpath() {
 	run env CDPATH="${decoy}" "${TOOL}/rekey.sh" --help
 	assert_not_contains "${OUT}" "lib.sh is missing" "rekey.sh output"
 }
+
+# The re-smudge pass holds the plaintext in a shell variable too. A stored
+# version with NUL bytes (written without the clean filter) must not be
+# written to the working tree without them (audit F9).
+test_install_does_not_write_a_file_with_nul_bytes_damaged() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	printf 'a\0b\n' | sops encrypt --input-type binary --output-type json \
+		--filename-override bin.secret /dev/stdin >../bin.enc
+	git update-index --add --cacheinfo "100644,$(git hash-object -w ../bin.enc),bin.secret"
+	git commit -q -m "a text secret and a binary one"
+	cd ..
+
+	fresh_clone origin clone
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status"
+	assert_contains "${OUT}" "NUL BYTES IN THE CONTENT" "install.sh report"
+	assert_contains "${OUT}" "- bin.secret" "install.sh report"
+	assert_eq "$(cat .env)" "A=1" "the text secret is decrypted"
+	assert_eq "$(git hash-object --no-filters bin.secret)" "$(blob_id bin.secret)" "the binary one is left as ciphertext"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}

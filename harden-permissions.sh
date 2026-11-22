@@ -18,8 +18,9 @@
 # ║  SOPS_FILE_MODE may hold owner and group bits only; a refused    ║
 # ║  value still leaves the files at 0600 (0700) and exits 1.        ║
 # ║  It is idempotent and safe to run often —                        ║
-# ║  install.sh runs it, and the post-checkout / post-merge hooks    ║
-# ║  it installs run it again after every checkout and merge.        ║
+# ║  install.sh runs it, and the hooks it installs (post-checkout,   ║
+# ║  post-merge, post-rewrite, post-applypatch, post-commit) run it  ║
+# ║  again after a checkout, merge, rebase, `git am` and commit.     ║
 # ║                                                                  ║
 # ║  Usage:                                                          ║
 # ║    harden-permissions.sh [--root <repo>] [--quiet]               ║

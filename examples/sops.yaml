@@ -5,7 +5,10 @@
 # Generate an age key:  age-keygen -o key.txt   (public key is printed)
 creation_rules:
   # Order matters: first matching rule wins.
-  - path_regex: \.env$
+  # .env, .env.local, .env.production, prod.env: the names that
+  # examples/gitattributes sends through the filter. A managed file that
+  # no rule matches cannot be encrypted, and `git add` fails.
+  - path_regex: \.env(\.[^/]+)?$
     key_groups:
       - age:
           - age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
