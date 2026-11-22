@@ -29,6 +29,7 @@ A handful of small bash scripts. No daemon, no gpg, no custom key format — key
 - [The pre-commit guard](#the-pre-commit-guard)
 - [Merging secrets](#merging-secrets)
 - [Changing recipients (re-key)](#changing-recipients-re-key)
+- [When sops cannot decrypt: preflight and recovery](#when-sops-cannot-decrypt-preflight-and-recovery)
 - [Security model](#security-model)
 - [Repository policy](#repository-policy)
 - [Limitations](#limitations)
@@ -80,7 +81,7 @@ The pre-commit stash dance is also handled: the clean filter compares against th
 
 `SOPS_FILTER_FORCE_REENCRYPT=1` skips the comparison in step 4 and always re-encrypts (storage-format change, fresh data keys).
 
-`harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask — `0644` on a default workstation. `install.sh` runs the script once and installs `post-checkout` and `post-merge` hooks that re-run it, so private keys and kubeconfigs stay `0600` after every checkout, pull and merge. See [Security model](#security-model).
+`harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask — `0644` on a default workstation. `install.sh` runs the script once and installs five hooks that re-run it (`post-checkout`, `post-merge`, `post-rewrite`, `post-applypatch`, `post-commit`), so private keys and kubeconfigs are `0600` again after a checkout, pull, merge, rebase, cherry-pick, revert, `git am` and commit. A few commands run no hook (`git stash`, `git stash pop`, `git reset --hard`): see [Limitations](#limitations) and [Security model](#security-model).
 
 ## Requirements
 
@@ -99,11 +100,20 @@ git submodule add https://github.com/realsby/sops-git-filters.git utilities/sops
 ./utilities/sops-git-filters/install.sh
 ```
 
-Updating later: `git -C utilities/sops-git-filters pull origin main`, then commit the new submodule pointer. Every clone needs `git submodule update --init` — put it in your setup task (see below).
+Updating later: check out the latest release tag, not `main` (`main` is where the work between two releases happens):
+
+```sh
+git -C utilities/sops-git-filters fetch --tags origin
+git -C utilities/sops-git-filters checkout v2.1.0     # the latest tag on the releases page
+git add utilities/sops-git-filters && git commit -m "sops-git-filters v2.1.0"
+./utilities/sops-git-filters/install.sh
+```
+
+Read the [release notes](https://github.com/realsby/sops-git-filters/releases) first; they list what behaves differently ([CHANGELOG.md](CHANGELOG.md) holds the same text). Every clone needs `git submodule update --init`, and `install.sh` once more after an update — put both in your setup task (see below).
 
 ### B. Vendored copy (no submodule mechanics)
 
-Copy every `*.sh` file (`clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh`, `merge-driver.sh`, `rekey.sh`, and `lib.sh`, which the others load) into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
+Copy every `*.sh` file (`clean-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh`, `merge-driver.sh`, `rekey.sh`, `preflight.sh`, and `lib.sh`, which the others load) into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates.
 
 ### C. Guard only, via pre-commit remote
 
@@ -113,7 +123,7 @@ If you only want the commit-time guard (e.g. filters are managed some other way)
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/realsby/sops-git-filters
-    rev: v2.0.0
+    rev: v2.1.0
     hooks:
       - id: sops-encryption-guard
 ```
@@ -140,7 +150,7 @@ mkdir -p "$HOME/Library/Application Support/sops/age" && age-keygen -o "$HOME/Li
 
 ```yaml
 creation_rules:
-  - path_regex: \.env$
+  - path_regex: \.env(\.[^/]+)?$     # .env, .env.local, prod.env
     key_groups:
       - age:
           - age1abc...          # you
@@ -150,9 +160,13 @@ creation_rules:
 **3. Mark files in `.gitattributes`** (see [`examples/gitattributes`](examples/gitattributes)):
 
 ```
-.env      filter=sops diff=sops merge=sops
-**/.env   filter=sops diff=sops merge=sops
+.env           filter=sops diff=sops merge=sops
+.env.*         filter=sops diff=sops merge=sops
+*.env          filter=sops diff=sops merge=sops
+.env.example   !filter !diff !merge
 ```
+
+A pattern without a slash matches at every depth. The wildcards also cover `.env.local`, `.env.production` and `prod.env`: a name that a hand-written list misses is committed in plaintext without a word, and that is the mistake to rule out. Their price is the last line, which takes a template without secrets out again (it must come after the others; `!` and not `-`, because `-diff` would make git treat the file as binary). A template you forget to list is stored encrypted, which is harmless. The rule in `.sops.yaml` must match the same names.
 
 `merge=sops` is optional but you want it as soon as two branches can change the same secret: see [Merging secrets](#merging-secrets).
 
@@ -223,7 +237,7 @@ Until step 3 is done, the clean filter and the guard refuse those files and name
 ## Onboarding a teammate / a new machine
 
 1. Clone the repo. **The working tree now contains ciphertext** for SOPS-managed files — that's expected; filters live in `.git/config`, which isn't cloned.
-2. Get decryption access: receive the age private key (or have your cloud identity added to the KMS key policy) and put it where `sops` looks, see [step 1 of the walkthrough](#setup-walkthrough), or point `SOPS_AGE_KEY_FILE` at it. With a cloud KMS, sign in first (`aws sso login`).
+2. Get decryption access: receive the age private key (or have your cloud identity added to the KMS key policy) and put it where `sops` looks, see [step 1 of the walkthrough](#setup-walkthrough), or point `SOPS_AGE_KEY_FILE` at it. With a key service, sign in first (AWS: `aws sso login`; GCP: `gcloud auth application-default login`; Azure: `az login`; Vault: `vault login`).
 3. Run the setup task (or directly `./utilities/sops-git-filters/install.sh`). The install re-smudges the ciphertext files into plaintext in place.
 4. Sanity check: `cat .env` shows plaintext, `git status` is clean, `git show :.env` shows ciphertext.
 
@@ -296,6 +310,41 @@ git diff --cached --stat && git commit
 
 **Removing a recipient is not revocation.** `sops updatekeys` keeps the data key, and history keeps the old blobs: whoever was removed could read everything up to now. Rotate the secret values. Editing a value re-encrypts that file with a fresh data key; to do that for files you did not edit, run `SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize .`
 
+## When sops cannot decrypt: preflight and recovery
+
+Git removes a SOPS-managed file from the working tree *before* it runs the smudge filter. If `sops` cannot decrypt at that moment (a session with the key service that expired, a key that is not on this machine), the command stops right there. That is on purpose: the filter fails closed and never writes ciphertext or an empty file where a secret belongs. But the command is left half-done.
+
+**Ask first.** `preflight.sh` decrypts stored blobs to `/dev/null`, one for every set of keys that your tracked secrets name (with one `.sops.yaml` rule for all files that is a single decryption), and names what to check when that fails:
+
+```sh
+./utilities/sops-git-filters/preflight.sh && git pull
+```
+
+Exit status 0: decryption works. 1: it does not, so do not pull, check out, merge or rebase now. 2: the check could not run (not a repository, `sops` missing). It writes nothing and prints no plaintext; `--quiet` prints nothing at all when decryption works. It cannot know the commits you have not fetched yet: they may name other keys. A script or an assistant that runs git for you should call it before any command that changes the working tree.
+
+**What a stopped command leaves behind** (measured with git 2.54):
+
+- `git pull`, `git merge`, `git checkout <branch>`, `git switch`: exit status 128 at the first secret that changed, with `fatal: <file>: smudge filter sops failed` under the `sops` error. `HEAD` has not moved. In `git status --short` that secret shows as ` D` (git removed it), the files git wrote before it show as ` M` (they hold the *new* version) or `??` (files the new commits add), and everything later in sort order is as it was.
+- `git rebase`: the same, with the rebase left in progress.
+- `git checkout -- <secret>` and `git restore <secret>`: the working copy of that secret is gone (` D`).
+- `git log -p`, `git show` and `git diff` over a commit that touches a secret: exit status 128, nothing changed.
+
+**Do not run `git commit -a`, `git add -A` or `git stash` in that state.** They would record the deletion of the secret.
+
+**The way back:**
+
+1. Make the keys or the session available again and check with `./utilities/sops-git-filters/preflight.sh`.
+2. A rebase: `git rebase --abort` puts the branch and the files back. Then start it again.
+3. Anything else: put the working tree back to what `HEAD` says, then repeat the command.
+
+   ```sh
+   git status --short
+   git checkout -- <each " D" secret, and each " M" file you did not edit yourself>
+   rm <each "??" file that the stopped command created>
+   ```
+
+   Not sure which files those are? Repeat the command: git stops again before it changes anything and names the files in its way ("Your local changes to the following files would be overwritten", "The following untracked working tree files would be overwritten"). Your own uncommitted edits to other files stay as they are through all of this.
+
 ## Security model
 
 What you get:
@@ -305,28 +354,30 @@ What you get:
 - **No blind re-encryption.** If the stored version of a secret cannot be decrypted, the clean filter stops with the `sops` error. Input that already is ciphertext is stored unchanged.
 - **The output is checked, twice.** The clean filter refuses what `sops` returns unless it is a completely encrypted SOPS document. The guard then re-checks every tracked SOPS-managed blob at commit time, with no dependency on the filter machinery.
 - **No plaintext in the remote, the object store or the stash.** They hold ciphertext only. Plaintext still appears in a few places outside the object store: the temporary files git writes for `textconv` (`$TMPDIR/git-blob-XXXXXX/`, mode 0600 in a 0700 directory; one stays behind after `kill -9`), `.git/COMMIT_EDITMSG` after `git commit -v` (it holds the plaintext diff), the output of `git diff`, `git show` and `git log -p`, and `git archive`, which emits plaintext. To keep secrets out of archives, add `export-ignore` to the managed paths in `.gitattributes`, for example `.env filter=sops diff=sops merge=sops export-ignore`. Multi-recipient keys and break-glass access come from SOPS key groups.
-- **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600` (a file tracked as executable, mode `100755`, gets `0700`, so git sees no mode change); `install.sh` runs it and installs `post-checkout` and `post-merge` hooks that run it again after each checkout and merge. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf` (owner and group bits only, such as `640`, which gives `740` to an executable file; a setuid, setgid or sticky digit or any bit for others is refused: the files then get `0600` and the script exits with an error), or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`. Because a chmod changes a file's inode change time, `install.sh` also sets `core.trustctime=false` in the repository: git would otherwise take a freshly chmod-ed secret for locally modified. A value you set yourself (`git config core.trustctime true`) is left alone.
+- **Mode 0600 on decrypted files.** Git only round-trips the executable bit, so every smudge — clone, `checkout`, `pull`, the re-smudge pass in `install.sh` — writes the decrypted secret with your *umask*, which is `0644` on a default workstation: a world-readable deploy key, API key, kubeconfig or cluster-secrets bundle (and OpenSSH flatly refuses a `0644` private key). `harden-permissions.sh` chmods every `filter=sops` file to `0600` (a file tracked as executable, mode `100755`, gets `0700`, so git sees no mode change); `install.sh` runs it and installs five hooks that run it again: `post-checkout`, `post-merge`, `post-rewrite`, `post-applypatch` and `post-commit`, which covers checkout, switch, pull, merge, rebase, `commit --amend`, `git am`, commit, cherry-pick and revert (what is not covered is under [Limitations](#limitations)). The hooks go into the repository's own hooks directory, nowhere else: when `core.hooksPath` names a directory that other repositories use too (a machine-wide `~/.githooks`, say), `install.sh` writes nothing there, because a hook in such a directory runs in every repository, and it prints one line to add to your own hooks instead, which acts in this repository only. Hooks that `install.sh` wrote into such a directory up to v2.0.0 are removed on the next run. Override the mode with `SOPS_FILE_MODE` in `.sops-filter.conf` (owner and group bits only, such as `640`, which gives `740` to an executable file; a setuid, setgid or sticky digit or any bit for others is refused: the files then get `0600` and the script exits with an error), or skip the hook install with `SOPS_FILTER_INSTALL_HOOKS=0`. Because a chmod changes a file's inode change time, `install.sh` also sets `core.trustctime=false` in the repository: git would otherwise take a freshly chmod-ed secret for locally modified. A value you set yourself (`git config core.trustctime true`) is left alone.
 
 What you must still do:
 
 - **Protect working trees.** Checked-out secrets are plaintext on disk — that's the point. `0600` keeps other local accounts out; full-disk encryption and access control against everything else are on you.
-- **Re-run the tightening where hooks don't reach.** The hooks live in `.git/hooks`, which is not cloned, so a clone that never runs `install.sh` gets neither the filters nor the permissions. Anything that materialises secrets outside git (`sops decrypt > file`, a deploy script, an editor's temp copy) sets its own mode — run `harden-permissions.sh` afterwards or set the mode yourself.
+- **Re-run the tightening where hooks don't reach.** The hooks live in `.git/hooks`, which is not cloned, so a clone that never runs `install.sh` gets neither the filters nor the permissions. Anything that materialises secrets outside git (`sops decrypt > file`, a deploy script, an editor's temp copy) sets its own mode — run `harden-permissions.sh` afterwards or set the mode yourself. Do the same after `git stash`, `git stash pop` and `git reset --hard`: git runs no hook for them.
 - **Client-side hooks are opt-in.** A collaborator who never runs `install.sh`/`pre-commit install` has no filter and no guard; if they create a *new* secret file it lands in plaintext. Mitigate with a server-side/CI check (a grep for `ENC[AES256_GCM` on managed paths is enough).
 - **History is forever.** Anything committed in plaintext *before* adoption stays in history — rewrite history or rotate those secrets.
 - **Rotate on suspicion.** Ciphertext in a public/leaked repo is only as strong as your key custody.
 
 ## Repository policy
 
-`main` carries GitHub branch protection (no force-push, no deletion, enforced for admins) — this repository is public, so the Free plan allows it. The three private consumer repositories in this estate cannot have server-side protection on GitHub Free ("Upgrade to GitHub Pro or make this repository public"); by decision of 2026-09-15 they stay on Free and rely on client-side `no-commit-to-branch` pre-commit hooks instead. Recorded here so an audit of the tooling does not re-raise it.
+`main` carries GitHub branch protection (no force-push, no deletion, enforced for admins), and a release tag (`v*`) cannot be moved or deleted once it is pushed. To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Limitations
 
-- **Text files only.** File content passes through shell variables; NUL bytes are not preserved. Fine for `.env`, PEM/OpenSSH keys, YAML, JSON — not for binary blobs.
+- **Text files only.** File content passes through shell variables, and a shell variable cannot hold a NUL byte. A file with NUL bytes (a keystore, a DER certificate, UTF-16 text) is refused: `git add` fails and says why, instead of storing the file damaged. Store a text form of it (base64, PEM, UTF-8). Fine for `.env`, PEM/OpenSSH keys, YAML, JSON.
 - **Trailing-newline normalization.** Content round-trips exactly, except exotic cases like a file whose last line has no terminating newline *and* SOPS dotenv format (which appends one).
 - **Merges need the driver.** Without `merge=sops` (or at least `merge=binary`) on a path, two branches that both changed that secret cannot be merged; see [Merging secrets](#merging-secrets).
 - **Recipients change only through `rekey.sh`.** Touching and re-adding a file does not re-encrypt it; see [Changing recipients](#changing-recipients-re-key).
 - **One filter name.** Everything is registered under the `sops` filter/diff driver; per-path different formats aren't supported (one `SOPS_STORE_FORMAT` per repo).
 - **`git add -p` stages a managed file whole.** Git shows the ciphertext, not your plaintext edit, and cannot stage part of the file. Stage the whole file with `git add`.
+- **Mode 0600 does not come back after every command.** Git runs no hook after `git stash`, `git stash pop`, `git reset --hard` and `git sparse-checkout add`. A secret that one of them writes again has your umask mode (usually `0644`) until the next commit, checkout or merge, or until you run `harden-permissions.sh`. A new secret has the umask mode until its first commit.
+- **A secret with uncommitted changes costs key-service calls each time git looks at it.** Git runs the clean filter again whenever it compares the file: twice for one `git diff`, up to once for one `git status` (measured with git 2.54). Each run decrypts the stored version and encrypts the new one. Nothing is cached, on purpose: a cache would put data derived from the plaintext on disk.
 
 ## Troubleshooting
 
@@ -340,7 +391,7 @@ Another tool registered a long-running filter under the same driver name (`sops`
 Filters aren't configured yet on this clone. Run `install.sh` — it configures `.git/config` and decrypts pre-setup checkouts in place. Still ciphertext afterwards? `install.sh` then ended with `STILL ENCRYPTED IN THE WORKING TREE` and the `sops` error above it: your key or cloud session isn't available. Fix that and re-run.
 
 **`git status`, `git add` or `git commit` fails with "cannot decrypt the version of … that git holds"**
-To know whether a secret changed, the clean filter decrypts the stored version. That failed, and the `sops` message above the error says why: usually an expired cloud session (`aws sso login`) or an age key `sops` cannot find (`SOPS_AGE_KEY_FILE`; on macOS see [step 1 of the walkthrough](#setup-walkthrough)). Git runs the filter for every SOPS-managed file whose timestamp changed, so one touched secret is enough to stop these commands until decryption works again. The filter does not re-encrypt blindly: that would show unchanged secrets as modified and commit them again. `SOPS_FILTER_FORCE_REENCRYPT=1 git add <file>` re-encrypts on purpose.
+To know whether a secret changed, the clean filter decrypts the stored version. That failed, and the `sops` message above the error says why: usually a session with the key service that expired (AWS: `aws sso login`; GCP: `gcloud auth application-default login`; Azure: `az login`; Vault: `vault login`) or a key `sops` cannot find (age: `SOPS_AGE_KEY_FILE`, on macOS see [step 1 of the walkthrough](#setup-walkthrough); PGP: the secret key in your gpg keyring). The lines under the error name what to check for the kinds of key this file uses. Git runs the filter for every SOPS-managed file whose timestamp changed, so one touched secret is enough to stop these commands until decryption works again. The filter does not re-encrypt blindly: that would show unchanged secrets as modified and commit them again. `SOPS_FILTER_FORCE_REENCRYPT=1 git add <file>` re-encrypts on purpose.
 
 **Every `git status` shows my secret file as modified**
 With dotenv format, check for blank lines (not representable — the round-trip comparison then never matches; use `#` separator lines) and for a missing newline at the end of the file. Otherwise you are likely running an older clean filter: update, re-run `install.sh` and re-add the file once.
@@ -357,7 +408,10 @@ The permission hook chmod-ed the file after git checked it out, and git read the
 **`git stash` / pre-commit stash conflicts on secret files**
 The filter compares against the index specifically to keep stash blobs identical, which is what the [pre-commit](https://pre-commit.com) framework's stash needs. `git stash pop` itself is a three-way merge: if the secret changed on both sides (a newer commit, or `git stash --keep-index` with staged and unstaged edits), it needs `merge=sops` on that path like any other merge. See [Merging secrets](#merging-secrets).
 
-**`git merge`, `rebase`, `cherry-pick` or `stash pop` dies with "smudge filter sops failed"**
+**`git pull`, `git checkout` or `git rebase` stops with "smudge filter sops failed" under a key or credentials error from `sops`**
+`sops` could not decrypt, and git had already removed the working copy of the secret. Do not commit or stash now. The way back is under [When sops cannot decrypt](#when-sops-cannot-decrypt-preflight-and-recovery); `preflight.sh` tells you beforehand.
+
+**`git merge`, `rebase`, `cherry-pick` or `stash pop` dies with "smudge filter sops failed", and `sops` complains about the document, not about keys**
 Both sides changed a secret and the path has no `merge=sops`: git merged the ciphertext and wrote conflict markers into it. Get back to a clean state (`git checkout -- <file>` restores the working copy; `git rebase --abort` if a rebase is in progress), add `merge=sops` to the path in `.gitattributes`, re-run `install.sh`, and merge again.
 
 **Guard blocks a commit but `git show :file` looks encrypted**
@@ -371,6 +425,15 @@ The filters and hooks are installed, but the listed files are tracked in plainte
 
 **`git add` fails with "sops did not encrypt … completely"**
 `sops` returned a document with content in clear, and the clean filter refused it. The matching `.sops.yaml` rule has `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix` (give the SOPS-managed paths a rule of their own without those), a dotenv key ends in `_unencrypted`, or `sops` is older than 3.11.0. The line that starts with `Found:` says what the check saw. If it is "a key in the sops metadata that sops does not write", your `sops` is newer than this tool knows: update sops-git-filters. The guard and `install.sh` give the same reason next to each file they list.
+
+**`git add`, `git status` or `git commit` fails with "holds NUL bytes"**
+The file is binary (a keystore, a DER certificate) or UTF-16 text. Its content cannot pass through this tool, which would store it without the NUL bytes, so it is refused. Store a text form (base64, PEM, UTF-8), or take `filter=sops` off that path and encrypt the file with `sops` by hand. Before v2.1.0 such a file was stored damaged with exit status 0: if you have one in git, restore the original from a backup, not from git.
+
+**`install.sh` ends with "NUL BYTES IN THE CONTENT" (exit status 3)**
+The stored version of the listed files decrypts to content with NUL bytes; it was written to git without this tool's clean filter. `install.sh` left the working copy as ciphertext instead of writing it damaged. See the entry above.
+
+**`install.sh` says git runs the hooks "from a directory that is not its own"**
+`core.hooksPath` (or a symlinked `.git/hooks`) points at a directory that other repositories use too. `install.sh` does not write there: a hook in it runs in every repository, and the hook calls a script by its path inside the repository it runs in. The filters work all the same; only the step that sets secrets back to `0600` after a checkout, merge, rebase or commit is missing. Add the line that `install.sh` prints to your own hooks in that directory (it names this repository by its absolute path and does nothing anywhere else), or run `harden-permissions.sh` by hand.
 
 **`git add` fails with "cannot be stored in the dotenv format"**
 The file has a line the dotenv format would store in clear or not at all; the message names the line number. See [what the dotenv format refuses](#storage-formats-json-vs-dotenv).
