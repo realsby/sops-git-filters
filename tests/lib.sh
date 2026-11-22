@@ -142,6 +142,20 @@ stub() {
 	chmod +x "$1/$2"
 }
 
+# installed_dir : where install.sh puts the copy of the scripts git runs
+installed_dir() {
+	printf '%s/sops-git-filters\n' "$(CDPATH='' cd -- "$(git rev-parse --git-common-dir)" && pwd -P)"
+}
+
+# installed_source : the checkout of the tool, as install.sh recorded it
+installed_source() {
+	sed -n 's/^source=//p' "$(installed_dir)/INSTALLED"
+}
+
+# The filter commands install.sh writes: the same in every repository.
+# shellcheck disable=SC2016  # the command substitution belongs to git's shell
+INSTALLED_CMD_PREFIX='"$(git rev-parse --git-common-dir)"/sops-git-filters'
+
 # mode_of <file> : permission bits as octal digits (GNU and BSD stat)
 mode_of() {
 	stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"

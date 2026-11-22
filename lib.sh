@@ -3,10 +3,10 @@
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  Shared helpers for sops-git-filters                             ║
 # ║                                                                  ║
-# ║  Sourced by the other scripts (clean-filter.sh, install.sh,      ║
-# ║  encryption-guard.sh, merge-driver.sh, rekey.sh, preflight.sh).  ║
-# ║  It must sit next to them: copy it along when you vendor the     ║
-# ║  scripts. Nothing here runs on its own.                          ║
+# ║  Sourced by the other scripts (clean-filter.sh, smudge-filter.sh,║
+# ║  install.sh, encryption-guard.sh, merge-driver.sh, rekey.sh,     ║
+# ║  preflight.sh). It must sit next to them: copy it along when you ║
+# ║  vendor the scripts. Nothing here runs on its own.               ║
 # ║                                                                  ║
 # ║  The main job of this file is one question, asked in three       ║
 # ║  places: "is this blob a completely encrypted SOPS document?"    ║
@@ -22,6 +22,14 @@
 # ║                                                                  ║
 # ║  Callers must run with LC_ALL=C (byte-wise pattern ranges).      ║
 # ╚══════════════════════════════════════════════════════════════════╝
+
+# The version of these scripts. install.sh records it next to the copy it
+# installs under .git/, and that copy compares it with this line in the
+# checkout to notice an update that was not installed yet (see
+# sgf_warn_if_outdated). Keep it on one line, in exactly this form: it is
+# read as text, never by running the file.
+# shellcheck disable=SC2034  # read by install.sh
+SGF_VERSION="3.0.0"
 
 # Oldest sops this tool accepts. Up to 3.10.2, sops applies a creation
 # rule's encrypted_regex / unencrypted_regex / encrypted_suffix /
@@ -637,5 +645,72 @@ sgf_version_ge() {
 		a="${a#*.}"
 		b="${b#*.}"
 	done
+	return 0
+}
+
+# ── The installed copy and the checkout ───────────────────────────
+# Git does not run the scripts of the checkout (utilities/sops-git-filters
+# or wherever the tool lives). install.sh copies the ones git needs into
+# <git common dir>/sops-git-filters/ and points the filter, the merge
+# driver and the hooks there, so that checking out a branch cannot swap
+# the code that sees the plaintext. The price: an update of the checkout
+# does nothing until install.sh has run again. The installed copy says so.
+
+# sgf_version_of <a lib.sh> : prints the X.Y.Z of its SGF_VERSION line, or
+# nothing. The file is read as text with shell builtins: it may come from
+# a branch nobody reviewed, so it is never sourced and nothing of it is
+# printed unless it is a plain version number.
+sgf_version_of() {
+	local line n=0 version=""
+	[[ -r "$1" ]] || return 0
+	while IFS= read -r line && [[ "${n}" -lt 80 ]]; do
+		n=$((n + 1))
+		case "${line}" in
+		'SGF_VERSION="'*'"')
+			version="${line#SGF_VERSION=\"}"
+			version="${version%\"}"
+			break
+			;;
+		esac
+	done <"$1"
+	! sgf_is_version "${version}" || printf '%s\n' "${version}"
+}
+
+# sgf_is_version <text> : true for X.Y.Z made of digits, nothing else
+sgf_is_version() {
+	case "$1" in
+	"" | *[!0-9.]* | .* | *. | *..* | *.*.*.*) return 1 ;;
+	*.*.*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# sgf_warn_if_outdated <directory of the running script> <repository root>
+# Only the installed copy has the file INSTALLED next to it (written by
+# install.sh: its version, and where the checkout of the tool lives). When
+# that checkout holds a newer version than the copy, one line on stderr
+# says that install.sh must run again. Never fails.
+sgf_warn_if_outdated() {
+	local dir="$1" root="$2" line installed="" source="" theirs=""
+	[[ -r "${dir}/INSTALLED" ]] || return 0
+	while IFS= read -r line; do
+		case "${line}" in
+		version=*) installed="${line#version=}" ;;
+		source=*) source="${line#source=}" ;;
+		esac
+	done <"${dir}/INSTALLED"
+	if ! sgf_is_version "${installed}" || [[ -z "${source}" ]]; then
+		return 0
+	fi
+	case "${source}" in
+	/*) ;;
+	*) source="${root}/${source}" ;;
+	esac
+	theirs="$(sgf_version_of "${source}/lib.sh")"
+	[[ -n "${theirs}" ]] || return 0
+	if ! sgf_version_ge "${installed}" "${theirs}"; then
+		echo "sops-git-filters: git runs the installed copy, version ${installed}, but ${source} holds ${theirs}." >&2
+		echo "  The update has no effect until you run ${source}/install.sh (from a checkout you trust)." >&2
+	fi
 	return 0
 }

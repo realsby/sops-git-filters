@@ -18,7 +18,9 @@
 # ║  Four git mechanisms are used:                                   ║
 # ║                                                                  ║
 # ║  1. filter.sops.smudge   (checkout → working dir)                ║
-# ║     Decrypts the encrypted blob from git into plaintext.         ║
+# ║     Decrypts the encrypted blob from git into plaintext          ║
+# ║     (smudge-filter.sh: `sops decrypt`, plus a hint when that     ║
+# ║     fails).                                                      ║
 # ║                                                                  ║
 # ║  2. filter.sops.clean    (working dir → staging)                 ║
 # ║     Encrypts plaintext before git stores it. Delegates to        ║
@@ -34,6 +36,17 @@
 # ║     For paths with merge=sops in .gitattributes: merges the      ║
 # ║     plaintext of the three versions (merge-driver.sh) instead    ║
 # ║     of letting git merge ciphertext, which cannot work.          ║
+# ║                                                                  ║
+# ║  Git does NOT run these scripts from the checkout of the tool.   ║
+# ║  install.sh copies the ones git needs into                       ║
+# ║  <git common dir>/sops-git-filters/ and points the filter, the   ║
+# ║  merge driver and the hooks at that copy, with a path that is    ║
+# ║  resolved when the command runs ("$(git rev-parse                ║
+# ║  --git-common-dir)"/...), so it also works in a linked worktree  ║
+# ║  and after the repository moved. Checking out a branch therefore ║
+# ║  cannot swap the code that sees your plaintext. The price: after ║
+# ║  an update of the tool, NOTHING changes until install.sh has run ║
+# ║  again. The installed copy prints a line when it notices that.   ║
 # ║                                                                  ║
 # ║  Finally, a re-smudge pass fixes the fresh-clone gap: files      ║
 # ║  checked out BEFORE the filters were configured still hold raw   ║
@@ -95,6 +108,9 @@ export LC_ALL=C
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 FILTER_SCRIPT="${SCRIPT_DIR}/clean-filter.sh"
 HARDEN_SCRIPT="${SCRIPT_DIR}/harden-permissions.sh"
+# What git runs, and therefore what is copied under .git/ further down.
+# lib.sh first: the others load it.
+RUNTIME_SCRIPTS="lib.sh clean-filter.sh smudge-filter.sh merge-driver.sh harden-permissions.sh"
 
 # ── Resolve the repository to configure ────
 # The target is the repo the caller is standing in. If the caller is
@@ -146,6 +162,16 @@ if [[ ! -x "${FILTER_SCRIPT}" ]]; then
 	echo "Error: clean filter script not found or not executable: ${FILTER_SCRIPT}" >&2
 	exit 1
 fi
+for runtime_script in ${RUNTIME_SCRIPTS}; do
+	if [[ ! -r "${SCRIPT_DIR}/${runtime_script}" ]]; then
+		echo "Error: ${runtime_script} is missing next to install.sh (${SCRIPT_DIR}). Update or re-copy sops-git-filters." >&2
+		exit 1
+	fi
+done
+if ! sgf_is_version "${SGF_VERSION:-}"; then
+	echo "Error: lib.sh next to install.sh (${SCRIPT_DIR}) has no usable SGF_VERSION line. Update or re-copy sops-git-filters." >&2
+	exit 1
+fi
 
 if ! command -v sops >/dev/null 2>&1; then
 	echo "Error: sops not found on PATH. Install it first (mise/brew/apt)." >&2
@@ -177,43 +203,28 @@ json) DECRYPT_ARGS="--input-type json --output-type binary" ;;
 dotenv) DECRYPT_ARGS="--input-type dotenv --output-type dotenv" ;;
 esac
 
-# ── Compose the filter commands ────
-# shell_quote <path> : <path> as one shell word. Git runs the filter and
-# merge commands through sh, and the hooks below are shell scripts, so a
-# space, a ';' or a '$(...)' in a directory name must reach them quoted.
-# POSIX single quotes, not printf %q: under LC_ALL=C, %q writes a non-ASCII
-# name as $'...', which dash (/bin/sh on Debian and Ubuntu) does not know.
-# A path of only [A-Za-z0-9_./+-] is left as it is.
-shell_quote() {
-	case "$1" in
-	'' | *[!A-Za-z0-9_./+-]*) ;;
-	*)
-		printf '%s' "$1"
-		return
-		;;
-	esac
-	local sq="'" esc="'\\''"
-	printf "'%s'" "${1//${sq}/${esc}}"
-}
+# ── Where git finds the scripts ────
+# Not in the checkout of the tool: in a copy under the git directory
+# (installed below). The directory is the COMMON git directory, the one
+# all worktrees of this repository share, and it is asked for when the
+# command runs:
+#
+#   - In a linked worktree ".git" is a file, so a fixed ".git/..." path
+#     does not exist there. `git rev-parse --git-common-dir` gives the
+#     right directory from any worktree.
+#   - Nothing absolute is stored, so the repository can be moved.
+#
+# Git runs these commands through sh, from the top level of the working
+# tree. They are the same in every repository: the path of the tool is
+# no longer part of them.
+GIT_COMMON_P="$(CDPATH='' cd -- "${TARGET_ROOT}" && CDPATH='' cd -- "$(git rev-parse --git-common-dir)" && pwd -P)"
+INSTALL_DIR="${GIT_COMMON_P}/sops-git-filters"
+# shellcheck disable=SC2016  # $(...) must reach git's shell unexpanded
+INSTALLED_Q='"$(git rev-parse --git-common-dir)"/sops-git-filters'
+CLEAN_CMD="${INSTALLED_Q}/clean-filter.sh %f"
+SMUDGE_CMD="${INSTALLED_Q}/smudge-filter.sh %f"
+MERGE_CMD="${INSTALLED_Q}/merge-driver.sh %O %A %B %L %P"
 
-# Prefer a REPO-RELATIVE path for the clean filter: git runs filters
-# from the top level of the working tree, and a relative path keeps
-# working when the repository directory is moved or renamed (an
-# absolute path in .git/config silently breaks on the next move).
-if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
-	TOOL_DIR_Q="$(shell_quote "${SCRIPT_DIR#"${TARGET_ROOT}"/}")"
-else
-	TOOL_DIR_Q="$(shell_quote "${SCRIPT_DIR}")"
-	echo "⚠  sops-git-filters lives outside the target repo — using an absolute" >&2
-	echo "   path in .git/config. It will break if either directory moves." >&2
-	echo "   Consider vendoring or adding it as a submodule inside the repo." >&2
-fi
-# Git reads %<letter> in these commands as a placeholder: a literal % is %%.
-TOOL_DIR_Q="${TOOL_DIR_Q//\%/%%}"
-CLEAN_CMD="${TOOL_DIR_Q}/clean-filter.sh %f"
-MERGE_CMD="${TOOL_DIR_Q}/merge-driver.sh %O %A %B %L %P"
-
-SMUDGE_CMD="sops decrypt ${DECRYPT_ARGS} --filename-override %f /dev/stdin"
 # textconv = cat is NOT a mistake. Git materializes textconv temp files
 # through convert_to_working_tree(), i.e. the smudge filter runs FIRST
 # and textconv already receives decrypted plaintext. Without a textconv
@@ -221,6 +232,52 @@ SMUDGE_CMD="sops decrypt ${DECRYPT_ARGS} --filename-override %f /dev/stdin"
 # `cat` is exactly the switch that flips diffs to the smudged path.
 # (A `sops decrypt` textconv double-decrypts and errors on plaintext.)
 TEXTCONV_CMD="cat"
+
+# ── Install the copy that git runs ────
+# Before any git setting is written: a setting that points at a script
+# which is not there yet would make every git command on a secret fail.
+# Each file is written under a temporary name and moved into place, so a
+# git command that runs at this moment sees the old file or the new one.
+# INSTALLED records the version and where this checkout of the tool is:
+# the copy uses it to notice an update that was not installed yet.
+if [[ -L "${INSTALL_DIR}" ]]; then
+	echo "Error: ${INSTALL_DIR} is a symlink. Remove it and re-run this script." >&2
+	exit 1
+fi
+if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
+	INSTALL_SOURCE="${SCRIPT_DIR#"${TARGET_ROOT}"/}"
+else
+	INSTALL_SOURCE="${SCRIPT_DIR}"
+fi
+INSTALLED_NOTE="$(printf 'version=%s\nsource=%s\n' "${SGF_VERSION}" "${INSTALL_SOURCE}" && printf x)"
+INSTALLED_NOTE="${INSTALLED_NOTE%x}"
+mkdir -p "${INSTALL_DIR}"
+chmod 700 "${INSTALL_DIR}"
+copy_changed=0
+for runtime_script in ${RUNTIME_SCRIPTS}; do
+	if [[ ! -L "${INSTALL_DIR}/${runtime_script}" ]] &&
+		cmp -s "${SCRIPT_DIR}/${runtime_script}" "${INSTALL_DIR}/${runtime_script}" 2>/dev/null &&
+		[[ -x "${INSTALL_DIR}/${runtime_script}" || "${runtime_script}" == "lib.sh" ]]; then
+		continue
+	fi
+	cp "${SCRIPT_DIR}/${runtime_script}" "${INSTALL_DIR}/${runtime_script}.new.$$"
+	if [[ "${runtime_script}" == "lib.sh" ]]; then
+		chmod 600 "${INSTALL_DIR}/${runtime_script}.new.$$"
+	else
+		chmod 700 "${INSTALL_DIR}/${runtime_script}.new.$$"
+	fi
+	mv -f "${INSTALL_DIR}/${runtime_script}.new.$$" "${INSTALL_DIR}/${runtime_script}"
+	copy_changed=1
+done
+if [[ -L "${INSTALL_DIR}/INSTALLED" ]] ||
+	[[ "$(cat "${INSTALL_DIR}/INSTALLED" 2>/dev/null && printf x)" != "${INSTALLED_NOTE}x" ]]; then
+	printf '%s' "${INSTALLED_NOTE}" >"${INSTALL_DIR}/INSTALLED.new.$$"
+	mv -f "${INSTALL_DIR}/INSTALLED.new.$$" "${INSTALL_DIR}/INSTALLED"
+	copy_changed=1
+fi
+if [[ "${copy_changed}" -eq 1 ]]; then
+	echo "Installed the scripts git runs (version ${SGF_VERSION}) into ${INSTALL_DIR}"
+fi
 
 # ── Configure git (local to the target repo only) ────
 git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
@@ -251,10 +308,9 @@ if [[ -n "$(git_effective --get filter.sops.process)" ]]; then
 	exit 1
 fi
 
-# Idempotency: compare the SMUDGE command, not just the clean path —
-# the clean path is stable across storage-format migrations, so
-# comparing only it would skip smudge/textconv updates on existing
-# clones when the format changes.
+# Idempotency: write the settings only when one of them differs (a first
+# install, or a setup from before v3.0.0, whose commands named the
+# checkout of the tool).
 CURRENT_CLEAN=$(git_cfg --get filter.sops.clean 2>/dev/null || echo "")
 CURRENT_SMUDGE=$(git_cfg --get filter.sops.smudge 2>/dev/null || echo "")
 CURRENT_TEXTCONV=$(git_cfg --get diff.sops.textconv 2>/dev/null || echo "")
@@ -451,14 +507,41 @@ fi
 #
 # (`git stash`, `git stash pop`, `git reset --hard` and
 # `git sparse-checkout add` run no hook: see "Limitations" in the README.)
-# The hooks are deliberately NOT the place for any other logic: they call
-# harden-permissions.sh from the checkout, so updating the tool updates
-# the behaviour without re-running install.sh.
+# The hooks are deliberately NOT the place for any other logic. They call
+# the copy of harden-permissions.sh under the git directory (installed
+# above), found when the hook runs, like the filter commands: nothing in
+# the working tree is executed, and the same hook text fits every
+# repository and every worktree.
 HOOK_MARKER="# managed by sops-git-filters (secret file permissions)"
 HOOK_NAMES="post-checkout post-merge post-rewrite post-applypatch post-commit"
 
-# hook_text <hook name> <the HARDEN=... line> : the hook this script writes
+# hook_text <hook name> : the hook this script writes
 hook_text() {
+	cat <<EOF
+#!/usr/bin/env bash
+${HOOK_MARKER}
+#
+# $1: git cannot store mode 0600, so a command that writes a
+# SOPS-managed file again (through the smudge filter) leaves it with
+# the caller's umask (0644 by default). Re-tighten every filter=sops file.
+#
+# Generated by install.sh. It runs the copy of harden-permissions.sh that
+# install.sh put under the git directory, not a file of the working tree.
+# Delete it to opt out; re-running install.sh restores it.
+set -u
+root="\$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+common="\$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+HARDEN="\${common}/sops-git-filters/harden-permissions.sh"
+[ -x "\${HARDEN}" ] || exit 0
+"\${HARDEN}" --root "\${root}" --quiet || true
+exit 0
+EOF
+}
+
+# hook_text_2_1 <hook name> <the HARDEN=... line> : the hook that install.sh
+# wrote in v2.1.x, byte for byte. It called harden-permissions.sh in the
+# working tree. Kept to recognise those files; see is_generated_hook.
+hook_text_2_1() {
 	cat <<EOF
 #!/usr/bin/env bash
 ${HOOK_MARKER}
@@ -503,20 +586,22 @@ EOF
 
 # is_generated_hook <file> <hook name>
 # True when <file> is, byte for byte, a hook that this script generated
-# (now or in an earlier release) and nobody changed since. Only line 12
-# may differ, the one that names harden-permissions.sh. A symlink, a file
-# with one more line, or a hook of another tool that merely mentions
-# sops-git-filters is not one. This is the test before a file is removed.
+# (now or in an earlier release) and nobody changed since. In the hooks
+# of before v3.0.0 only line 12 may differ, the one that names
+# harden-permissions.sh. A symlink, a file with one more line, or a hook
+# of another tool that merely mentions sops-git-filters is not one. This
+# is the test before a file is removed.
 is_generated_hook() {
 	local file="$1" name="$2" assign content
 	[[ -f "${file}" && ! -L "${file}" ]] || return 1
+	content="$(cat "${file}" 2>/dev/null && printf x)" || return 1
+	[[ "${content}" != "$(hook_text "${name}" && printf x)" ]] || return 0
 	assign="$(sed -n '12p' "${file}" 2>/dev/null)" || return 1
 	case "${assign}" in
 	HARDEN=*harden-permissions.sh | HARDEN=*harden-permissions.sh\" | HARDEN=*harden-permissions.sh\') ;;
 	*) return 1 ;;
 	esac
-	content="$(cat "${file}" 2>/dev/null && printf x)" || return 1
-	[[ "${content}" == "$(hook_text "${name}" "${assign}" && printf x)" ||
+	[[ "${content}" == "$(hook_text_2_1 "${name}" "${assign}" && printf x)" ||
 		"${content}" == "$(hook_text_until_2_0 "${name}" "${assign}" && printf x)" ]]
 }
 
@@ -559,16 +644,16 @@ machine_wide_hooks_dirs() {
 }
 
 GIT_DIR_P="$(CDPATH='' cd -- "$(git -C "${TARGET_ROOT}" rev-parse --absolute-git-dir)" && pwd -P)"
-GIT_COMMON_P="$(CDPATH='' cd -- "${TARGET_ROOT}" && CDPATH='' cd -- "$(git rev-parse --git-common-dir)" && pwd -P)"
 
 # hooks_dir_is_own <physical path>
 # True when a hooks directory belongs to this repository alone: it lies in
 # the working tree or in the git directory, and it is not the directory
 # that the user's or the system's git config gives to every repository.
 # Everything else is shared: a hook written there would run in every
-# repository that uses the directory, and the hook calls a script by its
-# path inside the repository it runs in. Cloning any repository that
-# ships a file at that path would then execute it.
+# repository that uses the directory. Up to v2.0.0 that was a way to run
+# code of any repository that was cloned (the hook called a script in the
+# working tree). The hook of today calls nothing in a working tree, but
+# a tool should not write into a directory it shares with others.
 hooks_dir_is_own() {
 	local dir="$1" wide
 	[[ "${dir}" == "${TARGET_ROOT}" || "${dir}" == "${TARGET_ROOT}"/* ||
@@ -581,8 +666,9 @@ hooks_dir_is_own() {
 
 # remove_generated_hooks <shared hooks directory>
 # Up to v2.0.0 install.sh wrote its hooks into whatever core.hooksPath
-# named, a shared directory included. Take those files out again, and
-# only those: see is_generated_hook.
+# named, a shared directory included, and those hooks ran a script of the
+# working tree. Take those files out again, and only those: see
+# is_generated_hook.
 remove_generated_hooks() {
 	local dir="$1" name file
 	[[ -d "${dir}" ]] || return 0
@@ -652,40 +738,28 @@ if [[ "${SOPS_FILTER_INSTALL_HOOKS:-1}" == "0" ]]; then
 elif [[ ! -x "${HARDEN_SCRIPT}" ]]; then
 	echo "Skipping permission hooks: ${HARDEN_SCRIPT} is missing." >&2
 elif [[ "${HOOKS_DIR_OWN}" -eq 0 ]]; then
-	# Not this repository's own directory: write nothing. The line offered
-	# instead names this working tree by its absolute path, so in a hook
-	# that every repository runs it does something in this one only.
-	# (shell_quote leaves a plain path bare, which is fine in both places.)
-	ROOT_Q="$(shell_quote "${TARGET_ROOT}")"
+	# Not this repository's own directory: write nothing, offer the line.
+	# It runs the copy under the git directory of whatever repository the
+	# hook runs in, and does nothing where install.sh never ran.
 	{
 		echo "⚠  Git runs the hooks of this repository from a directory that is not its own:"
 		echo "     ${HOOKS_DIR}"
-		echo "   (core.hooksPath, or a symlinked hooks directory). A hook written there would"
-		echo "   run in every repository that uses the directory, so sops-git-filters does"
+		echo "   (core.hooksPath, or a symlinked hooks directory). sops-git-filters does"
 		echo "   not write there. Until you add the line below, SOPS-managed files are NOT"
 		echo "   set back to 0600 after a checkout, merge, rebase or commit in this"
 		echo "   repository (run harden-permissions.sh by hand when it matters)."
 		echo "   To get that back, add this line to these hooks in that directory:"
 		echo "     ${HOOK_NAMES}"
-		echo "   It acts in this working tree only, whichever repository runs the hook:"
+		echo "   It runs the copy that install.sh put under .git/, in every repository"
+		echo "   where install.sh ran, and does nothing anywhere else:"
 		# shellcheck disable=SC2016  # printed for the user to paste
-		echo '     [ "$(git rev-parse --show-toplevel 2>/dev/null)" = '"${ROOT_Q}"' ] && '"$(shell_quote "${HARDEN_SCRIPT}") --root ${ROOT_Q} --quiet || true"
+		echo '     h="$(git rev-parse --git-common-dir 2>/dev/null)/sops-git-filters/harden-permissions.sh"; [ -x "$h" ] && "$h" --quiet || true'
 	} >&2
 else
-	# Prefer a repo-relative reference for the same reason the clean
-	# filter does: an absolute path breaks silently when the repo moves.
-	# The path is quoted for the shell (shell_quote): inside double quotes
-	# a '$(...)' in a directory name would run at every checkout.
-	if [[ "${SCRIPT_DIR}" == "${TARGET_ROOT}"/* ]]; then
-		HARDEN_REL_Q="$(shell_quote "${SCRIPT_DIR#"${TARGET_ROOT}"/}/harden-permissions.sh")"
-		# shellcheck disable=SC2016  # $root must reach the hook unexpanded
-		HOOK_HARDEN_ASSIGN='HARDEN="$root"/'"${HARDEN_REL_Q}"
-		# shellcheck disable=SC2016  # printed for the user to paste
-		HARDEN_HINT='"$(git rev-parse --show-toplevel)"/'"${HARDEN_REL_Q}"
-	else
-		HOOK_HARDEN_ASSIGN="HARDEN=$(shell_quote "${HARDEN_SCRIPT}")"
-		HARDEN_HINT="$(shell_quote "${HARDEN_SCRIPT}")"
-	fi
+	# A hook of this tool or of somebody else? The line for somebody
+	# else's hook is the same in every repository.
+	# shellcheck disable=SC2016  # printed for the user to paste
+	HARDEN_HINT='"$(git rev-parse --git-common-dir)"/sops-git-filters/harden-permissions.sh'
 
 	mkdir -p "${HOOKS_DIR}"
 	installed_hooks=""
@@ -703,7 +777,7 @@ else
 			continue
 		fi
 
-		hook_text "${hook_name}" "${HOOK_HARDEN_ASSIGN}" >"${hook_path}"
+		hook_text "${hook_name}" >"${hook_path}"
 		chmod +x "${hook_path}"
 		installed_hooks="${installed_hooks} ${hook_name}"
 	done

@@ -115,8 +115,8 @@ STUB
 }
 
 # An incomplete copy of the tool (lib.sh was not copied along): install.sh
-# stops at once, and the clean filter cannot work either. The flag is
-# restored before that.
+# stops at once. The flag is restored before that, and the copy under
+# .git/ that an earlier run installed keeps working.
 test_install_restores_required_flag_with_an_incomplete_copy() {
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -132,8 +132,16 @@ test_install_restores_required_flag_with_an_incomplete_copy() {
 
 	printf 'A=PLAINTEXT\n' >.env
 	run git add .env
-	assert_ne "${RC}" "0" "git add exit status"
+	assert_eq "${RC}" "0" "git add with the installed copy"
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "index blob"
 	assert_not_contains "$(stored .env)" 'PLAINTEXT' "index blob"
+
+	# The same with one of the other scripts git needs.
+	mv "${TOOL}/lib.sh.off" "${TOOL}/lib.sh"
+	mv "${TOOL}/smudge-filter.sh" "${TOOL}/smudge-filter.sh.off"
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status without smudge-filter.sh"
+	assert_contains "${OUT}" "smudge-filter.sh is missing" "install.sh message"
 }
 
 # A secret that was committed before the filter existed stays plaintext
@@ -309,8 +317,10 @@ test_install_ignores_cdpath() {
 	fresh_clone origin clone
 	run env CDPATH="${decoy}" "${TOOL}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status with CDPATH set"
-	assert_eq "$(git config --local --get filter.sops.clean)" "${TOOL}/clean-filter.sh %f" "clean filter command"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
 	assert_not_contains "$(git config --local --list)" "decoy" "git config"
+	assert_eq "$(installed_source)" "${TOOL}" "the checkout of the tool, as recorded"
+	cmp "${TOOL}/clean-filter.sh" "$(installed_dir)/clean-filter.sh" || fail "the installed copy does not come from the checkout"
 	assert_eq "$(cat .env)" "A=1" "working copy"
 
 	printf 'A=PLAINTEXT\n' >.env

@@ -185,7 +185,8 @@ test_layout_install_from_a_submodule_configures_the_superproject() {
 	git commit -q -m scaffold
 
 	(cd utilities/sops-git-filters && ./install.sh)
-	assert_eq "$(git config --local --get filter.sops.clean)" "utilities/sops-git-filters/clean-filter.sh %f" "clean filter of the superproject"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter of the superproject"
+	assert_eq "$(installed_source)" "utilities/sops-git-filters" "the checkout of the tool, as recorded in the superproject"
 	assert_eq "$(git -C utilities/sops-git-filters config --local --get filter.sops.clean || true)" "" "the submodule itself is not configured"
 
 	printf 'A=1\n' >.env
@@ -242,8 +243,10 @@ test_layout_sparse_checkout() {
 
 # ── Paths that need quoting, and symlinked paths (audit L5) ────
 # A directory name with a space, a single quote, shell syntax and a %
-# (git's placeholder sign). The path must reach git's filter and merge
-# commands and the hooks as one quoted word: nothing in it may run.
+# (git's placeholder sign). Since v3.0.0 the path of the tool is in no
+# command at all: git config and the hooks name the copy under .git/.
+# install.sh still has to copy from such a directory, and nothing in its
+# name may run.
 # shellcheck disable=SC2016  # the $(...) and backticks are the test
 ODD_NAME='sgf '\''tools;$(touch PWNED)`touch PWNED`%f'
 
@@ -296,12 +299,9 @@ test_layout_tool_path_that_needs_quoting_inside_the_repo() {
 
 	run "utilities/${ODD_NAME}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
-	assert_not_contains "${OUT}" "lives outside the target repo" "install.sh output"
-	assert_contains "$(git config --local --get filter.sops.clean)" \
-		"'utilities/sgf '\\''tools;" "clean filter command"
-	# shellcheck disable=SC2016  # $root is literal hook text
-	assert_contains "$(cat .git/hooks/post-checkout)" \
-		'HARDEN="$root"/'"'utilities/sgf '\\''tools;" "hook"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
+	assert_not_contains "$(cat .git/hooks/post-checkout)" "tools;" "the hook does not name the tool's directory"
+	assert_eq "$(installed_source)" "utilities/${ODD_NAME}" "the checkout of the tool, as recorded"
 	odd_round_trip "${base}"
 }
 
@@ -315,16 +315,15 @@ test_layout_tool_path_that_needs_quoting_outside_the_repo() {
 
 	run "${base}/${ODD_NAME}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
-	assert_contains "${OUT}" "lives outside the target repo" "install.sh output"
-	assert_contains "$(git config --local --get filter.sops.clean)" \
-		"'${base}/sgf '\\''tools;" "clean filter command"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
+	assert_eq "$(installed_source)" "${base}/${ODD_NAME}" "the checkout of the tool, as recorded"
 	odd_round_trip "${base}"
 }
 
 # A non-ASCII directory name, such as a localized "Masaüstü" (Desktop).
 # Git runs the filter and merge commands with /bin/sh, which is dash on
-# Debian and Ubuntu, and dash does not know bash's $'...' quoting (what
-# printf %q writes for such a name under LC_ALL=C).
+# Debian and Ubuntu, and dash does not know bash's $'...' quoting. The
+# commands hold a "$(git rev-parse ...)" that sh and dash must run.
 NON_ASCII_NAME='Masaüstü'
 
 # check_posix_commands : the stored clean and merge commands hold no
@@ -355,8 +354,8 @@ test_layout_non_ascii_tool_path_inside_the_repo() {
 
 	run "utilities/${NON_ASCII_NAME}/sgf/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
-	assert_eq "$(git config --local --get filter.sops.clean)" \
-		"'utilities/${NON_ASCII_NAME}/sgf'/clean-filter.sh %f" "clean filter command"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
+	assert_eq "$(installed_source)" "utilities/${NON_ASCII_NAME}/sgf" "the checkout of the tool, as recorded"
 	check_posix_commands
 	odd_round_trip "${base}"
 }
@@ -372,13 +371,15 @@ test_layout_non_ascii_tool_path_outside_the_repo() {
 	run "${base}/${NON_ASCII_NAME}/sgf/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
 	assert_eq "$(git config --local --get merge.sops.driver)" \
-		"'${base}/${NON_ASCII_NAME}/sgf'/merge-driver.sh %O %A %B %L %P" "merge driver command"
+		"${INSTALLED_CMD_PREFIX}/merge-driver.sh %O %A %B %L %P" "merge driver command"
+	assert_eq "$(installed_source)" "${base}/${NON_ASCII_NAME}/sgf" "the checkout of the tool, as recorded"
 	check_posix_commands
 	odd_round_trip "${base}"
 }
 
 # Reached through a symlink, the tool inside the repository is still
-# inside it: a relative path is written, not an absolute one.
+# inside it: its path is recorded relative to the repository, not as an
+# absolute one.
 test_layout_install_through_a_symlinked_path() {
 	mkdir real
 	ln -s real link
@@ -395,11 +396,10 @@ test_layout_install_through_a_symlinked_path() {
 	cd ../../link/repo || exit 1
 	run "${TOOL}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
-	assert_not_contains "${OUT}" "lives outside the target repo" "install.sh output"
-	assert_eq "$(git config --local --get filter.sops.clean)" "${TOOL}/clean-filter.sh %f" "clean filter command"
-	assert_eq "$(git config --local --get merge.sops.driver)" "${TOOL}/merge-driver.sh %O %A %B %L %P" "merge driver command"
-	# shellcheck disable=SC2016  # $root is literal hook text
-	assert_contains "$(cat .git/hooks/post-checkout)" 'HARDEN="$root"/'"${TOOL}/harden-permissions.sh" "hook"
+	assert_eq "$(installed_source)" "${TOOL}" "the checkout of the tool, as recorded"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
+	assert_eq "$(git config --local --get merge.sops.driver)" "${INSTALLED_CMD_PREFIX}/merge-driver.sh %O %A %B %L %P" "merge driver command"
+	assert_contains "$(cat .git/hooks/post-checkout)" 'git rev-parse --git-common-dir' "hook"
 
 	printf 'A=1\n' >.env
 	git add .env
