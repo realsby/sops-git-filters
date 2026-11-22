@@ -25,7 +25,7 @@ Every release is a tag. The same notes are on the [releases page](https://github
 
 ### Added
 
-- **`preflight.sh`**: asks whether `sops` can decrypt, before git needs it. It decrypts one stored blob per set of keys to `/dev/null` and exits 0, 1 (cannot decrypt) or 2 (could not check). Run it before a pull, checkout or rebase: `./utilities/sops-git-filters/preflight.sh && git pull`.
+- **`preflight.sh`**: asks whether `sops` can decrypt, before git needs it. It decrypts one stored blob per set of keys (key groups, keys and threshold) to `/dev/null` and exits 0, 1 (cannot decrypt) or 2 (could not check, or could not check everything). Run it before a pull, checkout or rebase: `./utilities/sops-git-filters/preflight.sh && git pull`.
 - **README: "When sops cannot decrypt: preflight and recovery".** What a pull, checkout or rebase leaves behind when it stops in the smudge filter, and the way back.
 - **Hints by kind of key.** When decryption fails, the clean filter, `install.sh` and `preflight.sh` name what to check for the keys the file was encrypted for (age, AWS KMS, GCP KMS, Azure Key Vault, HashiCorp Vault, PGP), not only for AWS.
 - **Mode 0600 after more commands**: rebase, `commit --amend`, cherry-pick, revert, `git am`, and the first commit of a new secret (the three new hooks). Not covered, because git runs no hook: `git stash`, `git stash pop`, `git reset --hard`, `git sparse-checkout add`.

@@ -14,8 +14,10 @@
 # ║  This script finds that out first. It decrypts stored blobs to   ║
 # ║  /dev/null: one for every set of keys the tracked SOPS-managed   ║
 # ║  files name (with one .sops.yaml rule for all files that is a    ║
-# ║  single decryption, one call to the key service). Nothing is     ║
-# ║  written, and no plaintext is printed.                           ║
+# ║  single decryption, one call to the key service). A "set" is the ║
+# ║  whole access rule of a file: its key groups, the keys in each   ║
+# ║  and the threshold. Nothing is written, and no plaintext is      ║
+# ║  printed.                                                        ║
 # ║                                                                  ║
 # ║    ./utilities/sops-git-filters/preflight.sh && git pull         ║
 # ║                                                                  ║
@@ -30,7 +32,8 @@
 # ║  Exit status:                                                    ║
 # ║    0  decryption works (or no SOPS-managed file is tracked)      ║
 # ║    1  sops could not decrypt: do not pull, check out or rebase   ║
-# ║    2  the check could not run (not a repository, sops missing)   ║
+# ║    2  the check could not run or is incomplete (not a            ║
+# ║       repository, sops missing, the index or a blob unreadable)  ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -80,32 +83,64 @@ json) DECRYPT_ARGS=(--input-type json --output-type binary) ;;
 dotenv) DECRYPT_ARGS=(--input-type dotenv --output-type dotenv) ;;
 esac
 
-# key_set   (SOPS document on stdin)
-# The keys a document names, on one line: recipients, key ids and the
-# like, sorted. Two files with the same line are decrypted with the same
-# keys, so checking one of them is enough. Only metadata that sops stores
-# in clear is read.
-key_set() {
-	awk '
-	/"(recipient|arn|resource_id|vault_url|vault_address|key_name|name|fp|key_id)"[ \t]*:/ {
-		line = $0
-		gsub(/^[ \t]+|[ \t,]+$/, "", line)
-		print line
-	}
-	/^sops_.*__map_(recipient|arn|resource_id|vault_url|vault_address|key_name|name|fp|key_id)=/ {
-		line = $0
-		sub(/^sops_.*__map_/, "", line)
-		print line
-	}
-	' | sort -u | tr '\n' ' '
+# access_of <format>   (SOPS document on stdin)
+# Prints everything in the metadata of a document that decides who can
+# decrypt it: the key groups in their order, the keys in each of them and
+# the threshold. That is the metadata without the fields that differ from
+# file to file by nature (the encrypted data key, the time stamps, the
+# MAC). Two documents with the same output need the same keys, so one
+# decryption answers for both. Group boundaries count: recipients A and B
+# in one group (either key will do) are not the same as A and B in two
+# groups (both are needed).
+#
+# Only metadata that sops stores in clear is read. Returns 1 when the
+# document does not have the layout sops writes (one field per line): the
+# caller then checks that file on its own.
+access_of() {
+	case "$1" in
+	json)
+		awk '
+		/^[ \t]*"(enc|created_at|lastmodified)"[ \t]*:/ { next }
+		/^[ \t]*"(data|mac)"[ \t]*:/ { own_line++; next }
+		{ sub(/\r$/, ""); print }
+		END { if (own_line != 2) exit 1 }
+		'
+		;;
+	dotenv)
+		awk '
+		/^sops_/ {
+			key = $0
+			sub(/=.*/, "", key)
+			if (key == "sops_mac") { mac++; next }
+			if (key == "sops_lastmodified" || key ~ /__map_(enc|created_at)$/) next
+			sub(/\r$/, "")
+			print
+		}
+		END { if (mac != 1) exit 1 }
+		'
+		;;
+	esac
 }
 
+# ── Can the files be listed at all? ────
+# The loop below reads this list through a process substitution, whose
+# exit status is lost. A list that is cut short (an index that cannot be
+# read) must not look like "nothing to check": ask once here, where the
+# status counts.
+if ! git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter >/dev/null; then
+	echo "preflight: cannot list the tracked files and their attributes (git's message is above)." >&2
+	exit 2
+fi
+
 # ── Walk the tracked SOPS-managed files ────
-# One decryption per distinct set of keys. Blobs that are not SOPS
-# documents in this repository's storage format are skipped: they are
-# install.sh's and the guard's business, and nothing can decrypt them.
+# One decryption per distinct answer of access_of. Blobs that are not
+# SOPS documents in this repository's storage format are not checked:
+# they are install.sh's and the guard's business, and nothing can decrypt
+# them. A blob that cannot be read at all makes the check incomplete.
 checked=0
 failed=0
+unreadable=0
+not_documents=0
 seen_sets=""
 
 while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
@@ -113,19 +148,42 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 
 	# "<mode> <object id>" of the index entry. GIT_LITERAL_PATHSPECS: the
 	# path is a file name here, not a pattern.
-	entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}')
+	entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}') || entry=""
 	mode="${entry%% *}"
 	sha="${entry#* }"
-	[[ -n "${sha}" ]] || continue
+	if [[ -z "${sha}" ]]; then
+		echo "preflight: cannot read the index entry of ${path}." >&2
+		unreadable=$((unreadable + 1))
+		continue
+	fi
 	# A symlink or a submodule: git never runs a filter on these.
 	[[ "${mode}" != "120000" && "${mode}" != "160000" ]] || continue
-	sgf_blob_is_sops_doc "${STORE_FORMAT}" "${sha}" "${TARGET_ROOT}" || continue
 
-	set_of_keys="$(git -C "${TARGET_ROOT}" cat-file blob "${sha}" | key_set)"
-	case "${seen_sets}" in
-	*"|${set_of_keys}|"*) continue ;;
+	doc_status=0
+	sgf_blob_is_sops_doc "${STORE_FORMAT}" "${sha}" "${TARGET_ROOT}" || doc_status=$?
+	case "${doc_status}" in
+	0) ;;
+	1)
+		not_documents=$((not_documents + 1))
+		continue
+		;;
+	*)
+		echo "preflight: cannot read the stored version of ${path}." >&2
+		unreadable=$((unreadable + 1))
+		continue
+		;;
 	esac
-	seen_sets="${seen_sets}|${set_of_keys}|"
+
+	# The same access as a file that was checked already? Compared by a
+	# hash of what access_of prints. A layout it does not know gets an id
+	# of its own, so that file is decrypted in any case.
+	if ! set_id="$(git -C "${TARGET_ROOT}" cat-file blob "${sha}" | access_of "${STORE_FORMAT}" | git hash-object --stdin)"; then
+		set_id="blob-${sha}"
+	fi
+	case "${seen_sets}" in
+	*"|${set_id}|"*) continue ;;
+	esac
+	seen_sets="${seen_sets}|${set_id}|"
 
 	checked=$((checked + 1))
 	# sops' own message is the reason, so its stderr is left alone.
@@ -150,10 +208,19 @@ if [[ "${failed}" -ne 0 ]]; then
 	exit 1
 fi
 
+# Not a failed decryption, but not an answer either.
+if [[ "${unreadable}" -ne 0 ]]; then
+	echo "preflight: the check is incomplete: ${unreadable} file(s) could not be read from git (see above)." >&2
+	exit 2
+fi
+
 if [[ "${QUIET}" -eq 0 ]]; then
 	if [[ "${checked}" -eq 0 ]]; then
 		echo "preflight: no encrypted SOPS-managed file is tracked here; nothing to check."
 	else
 		echo "preflight: decryption works (${checked} set(s) of keys checked)."
+	fi
+	if [[ "${not_documents}" -ne 0 ]]; then
+		echo "preflight: ${not_documents} SOPS-managed file(s) are not encrypted SOPS documents in the ${STORE_FORMAT} format and were not checked; run install.sh for the list."
 	fi
 fi

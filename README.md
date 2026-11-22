@@ -314,13 +314,13 @@ git diff --cached --stat && git commit
 
 Git removes a SOPS-managed file from the working tree *before* it runs the smudge filter. If `sops` cannot decrypt at that moment (a session with the key service that expired, a key that is not on this machine), the command stops right there. That is on purpose: the filter fails closed and never writes ciphertext or an empty file where a secret belongs. But the command is left half-done.
 
-**Ask first.** `preflight.sh` decrypts stored blobs to `/dev/null`, one for every set of keys that your tracked secrets name (with one `.sops.yaml` rule for all files that is a single decryption), and names what to check when that fails:
+**Ask first.** `preflight.sh` decrypts stored blobs to `/dev/null`, one for every set of keys that your tracked secrets name (with one `.sops.yaml` rule for all files that is a single decryption; a set is the whole access rule: key groups, the keys in each, the threshold), and names what to check when that fails:
 
 ```sh
 ./utilities/sops-git-filters/preflight.sh && git pull
 ```
 
-Exit status 0: decryption works. 1: it does not, so do not pull, check out, merge or rebase now. 2: the check could not run (not a repository, `sops` missing). It writes nothing and prints no plaintext; `--quiet` prints nothing at all when decryption works. It cannot know the commits you have not fetched yet: they may name other keys. A script or an assistant that runs git for you should call it before any command that changes the working tree.
+Exit status 0: decryption works. 1: it does not, so do not pull, check out, merge or rebase now. 2: the check could not run or is incomplete (not a repository, `sops` missing, the index or a stored blob unreadable). It writes nothing and prints no plaintext; `--quiet` prints nothing at all when decryption works. It cannot know the commits you have not fetched yet: they may name other keys. A script or an assistant that runs git for you should call it before any command that changes the working tree.
 
 **What a stopped command leaves behind** (measured with git 2.54):
 
