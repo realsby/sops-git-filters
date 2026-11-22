@@ -296,3 +296,72 @@ test_clean_empty_file_keeps_its_blob() {
 	assert_eq "$(blob_id empty.secret)" "${id}" "blob id after touch + add"
 	assert_eq "$(git status --porcelain)" "" "git status"
 }
+
+# ── Content with NUL bytes (audit F9) ────
+# File content passes through shell variables, and a shell variable cannot
+# hold a NUL byte. Before, `git add` exited 0 and stored the file without
+# them: a keystore or a UTF-16 file was committed damaged.
+test_clean_refuses_content_with_nul_bytes() {
+	new_repo repo
+	printf 'a\0b\n' >bin.secret
+	run git add bin.secret
+	assert_ne "${RC}" "0" "git add of a file with a NUL byte"
+	assert_contains "${OUT}" "bin.secret holds NUL bytes (1)" "clean filter message"
+	assert_eq "$(git ls-files -s -- bin.secret)" "" "nothing is staged"
+
+	# UTF-16 text is full of them.
+	printf '\377\376A\0=\0001\0\n\0' >utf16.secret
+	run git add utf16.secret
+	assert_ne "${RC}" "0" "git add of a UTF-16 file"
+	assert_contains "${OUT}" "utf16.secret holds NUL bytes (4)" "clean filter message"
+	assert_eq "$(git ls-files -s -- utf16.secret)" "" "nothing is staged"
+	rm bin.secret utf16.secret
+
+	# A tracked text secret that turns binary keeps its good blob in git.
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	local before
+	before="$(blob_id .env)"
+	printf 'A=1\0\n' >.env
+	run git add .env
+	assert_ne "${RC}" "0" "git add after a NUL byte was added"
+	assert_eq "$(blob_id .env)" "${before}" "the index keeps the earlier blob"
+	run git commit -q -am "would store a damaged file"
+	assert_ne "${RC}" "0" "git commit -a with a NUL byte in the secret"
+	assert_eq "$(git rev-parse HEAD:.env)" "${before}" "HEAD keeps the earlier blob"
+
+	# Without the NUL byte the file is taken again.
+	printf 'A=2\n' >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add of the text file"
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+}
+
+test_clean_dotenv_refuses_content_with_nul_bytes() {
+	new_repo repo dotenv
+	printf 'A=1\0\nB=2\n' >.env
+	run git add .env
+	assert_ne "${RC}" "0" "git add of a dotenv file with a NUL byte"
+	assert_contains "${OUT}" ".env holds NUL bytes (1)" "clean filter message"
+	assert_eq "$(git ls-files -s -- .env)" "" "nothing is staged"
+}
+
+# A stored version with NUL bytes (written without this filter) is never
+# taken for "unchanged" because the shell dropped them on the way.
+test_clean_does_not_reuse_a_stored_blob_with_nul_bytes() {
+	new_repo repo
+	printf 'a\0b\n' | sops encrypt --input-type binary --output-type json \
+		--filename-override bin.secret /dev/stdin >../bin.enc
+	git update-index --add --cacheinfo "100644,$(git hash-object -w ../bin.enc),bin.secret"
+	git commit -q -m "a binary secret stored without the filter"
+	local before
+	before="$(blob_id bin.secret)"
+
+	# The same bytes without the NUL: a different file.
+	printf 'ab\n' >bin.secret
+	run git add bin.secret
+	assert_eq "${RC}" "0" "git add exit status"
+	assert_ne "$(blob_id bin.secret)" "${before}" "the staged blob is a new one"
+	assert_eq "$(plain_of_stored bin.secret)" "ab" "plaintext of the staged blob"
+}

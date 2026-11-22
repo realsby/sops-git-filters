@@ -69,10 +69,27 @@ fi
 FILENAME="$1"
 
 # Git pipes the file content (plaintext from working dir) to stdin.
-# Capture it so we can compare and/or encrypt it. The trailing "x"
-# trick preserves trailing newlines that $(...) would otherwise strip.
-INPUT=$(cat && printf x)
-INPUT="${INPUT%x}"
+# Capture it so we can compare and/or encrypt it. The capture ends in a
+# trailer ("x" and the number of NUL bytes, see lib.sh), which also
+# preserves the trailing newlines that $(...) would otherwise strip.
+if ! SGF_CAPTURED="$(sgf_cat_counting_nuls)" || ! sgf_split_counted; then
+	echo "ERROR: could not read the content of ${FILENAME} from git — refusing to stage it" >&2
+	exit 1
+fi
+INPUT="${SGF_CONTENT}"
+
+# ── Text files only: refuse content with NUL bytes ────
+# A shell variable cannot hold a NUL byte, so INPUT has already lost
+# them: encrypting it would store a damaged file with exit status 0, and
+# the next checkout would replace the good working copy with it.
+if [[ "${SGF_NUL_COUNT}" != "0" ]]; then
+	echo "ERROR: ${FILENAME} holds NUL bytes (${SGF_NUL_COUNT}) — refusing to stage it." >&2
+	echo "       sops-git-filters handles text files only: a binary file (a keystore, a DER" >&2
+	echo "       certificate) or UTF-16 text would be stored damaged. Store a text form" >&2
+	echo "       instead (base64 or PEM; UTF-8 for text), or keep the file out of the sops" >&2
+	echo "       filter and encrypt it with sops by hand." >&2
+	exit 1
+fi
 
 # Git runs clean filters from the top level of the working tree, but
 # resolve the root explicitly so this also works when invoked by hand.
@@ -241,20 +258,24 @@ fi
 
 # ── Decrypt the stored version to compare plaintext with plaintext ────
 # sops' stderr is left alone: if this fails, its message is the reason.
-if ! EXISTING_DECRYPTED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
+# (pipefail: the status of the pipeline is that of sops.)
+if ! SGF_CAPTURED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
 	"${DECRYPT_ARGS[@]}" \
 	--filename-override "${FILENAME}" \
-	/dev/stdin && printf x); then
+	/dev/stdin | sgf_cat_counting_nuls) || ! sgf_split_counted; then
 	echo "ERROR: cannot decrypt the version of ${FILENAME} that git holds (sops' message is above)." >&2
 	echo "       Without it this filter cannot tell whether the file changed, and it does not" >&2
-	echo "       re-encrypt blindly. Are your keys or cloud credentials available?" >&2
-	echo "       (AWS SSO: aws sso login. age: SOPS_AGE_KEY_FILE.)" >&2
+	echo "       re-encrypt blindly. Are your keys or credentials available?" >&2
+	# shellcheck disable=SC2046  # one word per key type
+	sgf_credential_hint "         " $(printf '%s' "${EXISTING_ENCRYPTED}" | sgf_doc_key_types) >&2
 	echo "       To re-encrypt regardless: SOPS_FILTER_FORCE_REENCRYPT=1 git add ${FILENAME}" >&2
 	exit 1
 fi
-EXISTING_DECRYPTED="${EXISTING_DECRYPTED%x}"
+EXISTING_DECRYPTED="${SGF_CONTENT}"
 
-if [[ "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; then
+# A stored version with NUL bytes (written by another tool) can never
+# equal the input, which has none: the variable only looks the same.
+if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; then
 	# Content unchanged — reuse the existing ciphertext verbatim.
 	# Same plaintext → same stored blob → no false diff. (This holds for
 	# an empty file too: what counts is that the decryption worked.)

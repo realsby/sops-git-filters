@@ -3,7 +3,8 @@
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  Shared helpers for sops-git-filters                             ║
 # ║                                                                  ║
-# ║  Sourced by clean-filter.sh, install.sh and encryption-guard.sh. ║
+# ║  Sourced by the other scripts (clean-filter.sh, install.sh,      ║
+# ║  encryption-guard.sh, merge-driver.sh, rekey.sh, preflight.sh).  ║
 # ║  It must sit next to them: copy it along when you vendor the     ║
 # ║  scripts. Nothing here runs on its own.                          ║
 # ║                                                                  ║
@@ -519,6 +520,100 @@ sgf_blob_is_sops_doc() {
 # sgf_doc_problem for a blob in the object store.
 sgf_blob_problem() {
 	git -C "${3:-.}" cat-file blob "$2" 2>/dev/null | sgf_doc_problem "$1"
+}
+
+# ── Content with NUL bytes ────────────────────────────────────────
+# The scripts hold file content in shell variables, and a shell variable
+# cannot hold a NUL byte: bash drops it (4.4 and later print a warning,
+# 3.2 says nothing). A keystore, a DER certificate or a UTF-16 text file
+# would be stored damaged, with exit status 0. So content is counted on
+# its way into the variable, and the caller refuses it when the count
+# is not 0.
+#
+# sgf_cat_counting_nuls   (content on stdin)
+# Copies stdin to stdout and then prints "x<number of NUL bytes>". One
+# pass: tee hands every chunk to the capture (fd 3) and to tr, which
+# keeps the NUL bytes only; wc counts them. The count is printed when tr
+# has seen the end of the input, so it always follows the content. Use:
+#
+#   SGF_CAPTURED="$(sgf_cat_counting_nuls)" || ...   then   sgf_split_counted
+sgf_cat_counting_nuls() {
+	{
+		tee /dev/fd/3 | {
+			nuls="$(tr -cd '\000' | wc -c)"
+			printf 'x%s' "${nuls//[!0-9]/}"
+		}
+	} 3>&1
+}
+
+# sgf_split_counted
+# Takes SGF_CAPTURED apart: the content goes to SGF_CONTENT (byte for
+# byte, trailing newlines included, NUL bytes dropped by the shell) and
+# the number of NUL bytes the input had to SGF_NUL_COUNT. Returns 1 when
+# SGF_CAPTURED does not end in the trailer (the pipeline was cut short).
+# shellcheck disable=SC2034  # read by the scripts that source this file
+SGF_CAPTURED=""
+SGF_CONTENT=""
+SGF_NUL_COUNT=""
+sgf_split_counted() {
+	local tail="${SGF_CAPTURED}" len="${#SGF_CAPTURED}"
+	# Look for the trailer in the last bytes only: a pattern match over
+	# the whole of a large file is slow.
+	if [[ "${len}" -gt 24 ]]; then
+		tail="${SGF_CAPTURED:$((len - 24))}"
+	fi
+	SGF_NUL_COUNT="${tail##*x}"
+	case "${SGF_NUL_COUNT}" in
+	"" | *[!0-9]*)
+		SGF_NUL_COUNT=""
+		return 1
+		;;
+	esac
+	[[ "${tail}" == *x"${SGF_NUL_COUNT}" ]] || return 1
+	SGF_CONTENT="${SGF_CAPTURED%x"${SGF_NUL_COUNT}"}"
+	SGF_CAPTURED=""
+}
+
+# ── Which keys a document names, and what to check for them ───────
+# sgf_doc_key_types   (SOPS document on stdin, either format)
+# Prints the kinds of key the document was encrypted for, one per line:
+# age kms gcp_kms azure_kv hc_vault pgp hckms. It reads the metadata
+# sops stores in clear (recipients, key ids), nothing else.
+sgf_doc_key_types() {
+	awk '
+	/"recipient"[ \t]*:/ || /^sops_.*__map_recipient=/ { t["age"] = 1 }
+	/"arn"[ \t]*:/ || /^sops_.*__map_arn=/ { t["kms"] = 1 }
+	/"resource_id"[ \t]*:/ || /^sops_.*__map_resource_id=/ { t["gcp_kms"] = 1 }
+	/"vault_url"[ \t]*:/ || /^sops_.*__map_vault_url=/ { t["azure_kv"] = 1 }
+	/"vault_address"[ \t]*:/ || /^sops_.*__map_vault_address=/ { t["hc_vault"] = 1 }
+	/"fp"[ \t]*:/ || /^sops_.*__map_fp=/ { t["pgp"] = 1 }
+	/"key_id"[ \t]*:/ || /^sops_.*__map_key_id=/ { t["hckms"] = 1 }
+	END {
+		n = split("age kms gcp_kms azure_kv hc_vault pgp hckms", order, " ")
+		for (i = 1; i <= n; i++) if (order[i] in t) print order[i]
+	}
+	'
+}
+
+# sgf_credential_hint <indent> [key type...]
+# What to check when sops cannot decrypt, one line per kind of key, each
+# line starting with <indent>. Without key types (the document could not
+# be read, or names none of the known kinds) every kind is listed.
+sgf_credential_hint() {
+	local indent="$1" type
+	shift
+	[[ $# -gt 0 ]] || set -- age kms gcp_kms azure_kv hc_vault pgp
+	for type in "$@"; do
+		case "${type}" in
+		age) printf '%s%s\n' "${indent}" "age: the private key must be where sops looks (SOPS_AGE_KEY_FILE, SOPS_AGE_KEY, or its default keys.txt)" ;;
+		kms) printf '%s%s\n' "${indent}" "AWS KMS: sign in again (aws sso login, or the AWS credentials / AWS_PROFILE you normally use)" ;;
+		gcp_kms) printf '%s%s\n' "${indent}" "GCP KMS: sign in again (gcloud auth application-default login, or GOOGLE_APPLICATION_CREDENTIALS)" ;;
+		azure_kv) printf '%s%s\n' "${indent}" "Azure Key Vault: sign in again (az login, or the AZURE_* variables of a service principal)" ;;
+		hc_vault) printf '%s%s\n' "${indent}" "HashiCorp Vault: sign in again (vault login; VAULT_ADDR and VAULT_TOKEN must be set)" ;;
+		pgp) printf '%s%s\n' "${indent}" "PGP: the secret key must be in your gpg keyring and gpg-agent must be able to ask for its passphrase (GPG_TTY)" ;;
+		hckms) printf '%s%s\n' "${indent}" "Huawei Cloud KMS: check the Huawei Cloud credentials sops reads" ;;
+		esac
+	done
 }
 
 # ── sops version ──────────────────────────────────────────────────

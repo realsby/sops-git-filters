@@ -231,3 +231,84 @@ test_lib_store_format() {
 	printf 'SOPS_STORE_FORMAT=yaml\n' >repo/.sops-filter.conf
 	is_not sgf_store_format repo
 }
+
+# ── Which keys a document names, and the hint for them ────
+test_lib_key_types_and_credential_hint() {
+	load_lib
+	local doc
+	doc='{
+	"data": "'"${ENC}"'",
+	"sops": {
+		"kms": [
+			{
+				"arn": "arn:aws:kms:eu-central-1:111111111111:key/00000000-0000-0000-0000-000000000000",
+				"created_at": "2026-01-01T00:00:00Z",
+				"enc": "AQICAH"
+			}
+		],
+		"age": [
+			{
+				"recipient": "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+				"enc": "-----BEGIN AGE ENCRYPTED FILE-----\n"
+			}
+		],
+		"mac": "'"${ENC}"'",
+		"version": "3.13.3"
+	}
+}'
+	assert_eq "$(printf '%s\n' "${doc}" | sgf_doc_key_types | tr '\n' ' ')" "age kms " "key types of a json document"
+
+	doc="A=${ENC}
+sops_gcp_kms__list_0__map_resource_id=projects/p/locations/global/keyRings/r/cryptoKeys/k
+sops_key_groups__list_0__map_pgp__list_0__map_fp=0123456789ABCDEF
+sops_hc_vault__list_0__map_vault_address=https://vault.example.invalid
+sops_azure_kv__list_0__map_vault_url=https://v.vault.azure.net
+x__map_recipient=${ENC}
+sops_mac=${ENC}
+sops_version=3.13.3"
+	assert_eq "$(printf '%s\n' "${doc}" | sgf_doc_key_types | tr '\n' ' ')" \
+		"gcp_kms azure_kv hc_vault pgp " "key types of a dotenv document"
+	assert_eq "$(printf 'A=1\n' | sgf_doc_key_types)" "" "key types of a plaintext file"
+
+	assert_contains "$(sgf_credential_hint '> ' kms)" "> AWS KMS: sign in again (aws sso login" "hint for AWS KMS"
+	assert_eq "$(sgf_credential_hint '' kms age | wc -l | tr -d ' ')" "2" "one line per key type"
+	# No key type known: every kind is listed, none is favoured.
+	local all
+	all="$(sgf_credential_hint '')"
+	local word
+	for word in "age:" "AWS KMS:" "GCP KMS:" "Azure Key Vault:" "HashiCorp Vault:" "PGP:"; do
+		assert_contains "${all}" "${word}" "hint without a key type"
+	done
+}
+
+# ── Content with NUL bytes ────
+test_lib_counts_nul_bytes_and_keeps_the_content() {
+	load_lib
+	# capture <printf format> : sets SGF_CONTENT and SGF_NUL_COUNT
+	capture() {
+		# shellcheck disable=SC2059  # the format is the test input
+		SGF_CAPTURED="$(printf "$1" | sgf_cat_counting_nuls 2>/dev/null)"
+		sgf_split_counted
+	}
+	capture 'A=1\n'
+	assert_eq "${SGF_NUL_COUNT}:${SGF_CONTENT}" $'0:A=1\n' "plain text"
+	capture ''
+	assert_eq "${SGF_NUL_COUNT}:${SGF_CONTENT}" "0:" "empty input"
+	capture 'three newlines\n\n\n'
+	assert_eq "${SGF_NUL_COUNT}:${SGF_CONTENT}" $'0:three newlines\n\n\n' "trailing newlines are kept"
+	# Content that looks like the trailer the capture ends in.
+	capture 'ends in x'
+	assert_eq "${SGF_NUL_COUNT}:${SGF_CONTENT}" "0:ends in x" "content ending in x"
+	capture 'x12'
+	assert_eq "${SGF_NUL_COUNT}:${SGF_CONTENT}" "0:x12" "content that looks like a trailer"
+	capture 'a\0b\0\n'
+	assert_eq "${SGF_NUL_COUNT}" "2" "NUL bytes are counted"
+	capture '\0'
+	assert_eq "${SGF_NUL_COUNT}" "1" "a single NUL byte"
+
+	# A capture that was cut short is not taken for content.
+	SGF_CAPTURED="123"
+	is_not sgf_split_counted
+	SGF_CAPTURED=""
+	is_not sgf_split_counted
+}

@@ -45,10 +45,17 @@
 # ║  smudged secrets land with the caller's umask (0644 by default   ║
 # ║  — world-readable private keys). harden-permissions.sh chmods    ║
 # ║  every filter=sops file to 0600 (SOPS_FILE_MODE overrides; a     ║
-# ║  100755 file keeps its owner execute bit, 0700), and             ║
-# ║  post-checkout/post-merge hooks are installed so later checkouts ║
-# ║  and merges do the same.                                         ║
-# ║  Set SOPS_FILTER_INSTALL_HOOKS=0 to skip the hook install.       ║
+# ║  100755 file keeps its owner execute bit, 0700), and five hooks  ║
+# ║  are installed so that later git commands do the same:           ║
+# ║  post-checkout, post-merge, post-rewrite, post-applypatch and    ║
+# ║  post-commit. Set SOPS_FILTER_INSTALL_HOOKS=0 to skip them.      ║
+# ║                                                                  ║
+# ║  The hooks are written into this repository's own hooks          ║
+# ║  directory only. When core.hooksPath names a directory that      ║
+# ║  other repositories use too, nothing is written there (a hook    ║
+# ║  in it runs for every one of them); the line to add by hand is   ║
+# ║  printed instead. Hooks that an older install.sh wrote into      ║
+# ║  such a directory are removed.                                   ║
 # ║                                                                  ║
 # ║  core.trustctime is set to false. The chmod changes a file's     ║
 # ║  inode change time, and git would take the secret for locally    ║
@@ -67,8 +74,9 @@
 # ║       old, bad .sops-filter.conf, conflicting git config)        ║
 # ║    3  filters and hooks are in place, but files need attention:  ║
 # ║       tracked in plaintext, still stored in the other storage    ║
-# ║       format, or not decrypted because sops could not (keys or   ║
-# ║       credentials missing). See the lists printed at the end.    ║
+# ║       format, not decrypted because sops could not (keys or      ║
+# ║       credentials missing), or holding NUL bytes. See the lists  ║
+# ║       printed at the end.                                        ║
 # ║                                                                  ║
 # ║  Requires:                                                       ║
 # ║    - sops >= 3.11.0 on PATH                                      ║
@@ -314,6 +322,8 @@ FOUND_ANY=0
 PLAINTEXT_IN_GIT=""
 OTHER_FORMAT_IN_GIT=""
 STILL_ENCRYPTED=""
+STILL_ENCRYPTED_KEY_TYPES=""
+HOLDS_NUL_BYTES=""
 while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
 	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
 	FOUND_ANY=1
@@ -379,10 +389,19 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 	# no key, expired session, ...); the files after it are only listed.
 	decrypt_stderr=/dev/stderr
 	[[ -z "${STILL_ENCRYPTED}" ]] || decrypt_stderr=/dev/null
+	# The plaintext passes through a shell variable, which cannot hold a
+	# NUL byte: they are counted on the way in (lib.sh), and a file that
+	# has any is not written, because it would be written damaged.
+	# (pipefail: the status of the pipeline is that of sops.)
 	# shellcheck disable=SC2086  # DECRYPT_ARGS is a flag list
-	if plaintext=$( (git -C "${TARGET_ROOT}" cat-file blob "${index_sha}" |
-		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" /dev/stdin 2>"${decrypt_stderr}") && printf x); then
-		printf '%s' "${plaintext%x}" >"${f}"
+	if SGF_CAPTURED=$(git -C "${TARGET_ROOT}" cat-file blob "${index_sha}" |
+		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" /dev/stdin 2>"${decrypt_stderr}" |
+		sgf_cat_counting_nuls) && sgf_split_counted; then
+		if [[ "${SGF_NUL_COUNT}" != "0" ]]; then
+			HOLDS_NUL_BYTES="${HOLDS_NUL_BYTES}   - ${path}"$'\n'
+			continue
+		fi
+		printf '%s' "${SGF_CONTENT}" >"${f}"
 		# The write above bypassed git, so the index's cached stat still
 		# describes the ciphertext checkout — and git flags size deltas
 		# as "modified" without consulting filters. update-index re-runs
@@ -393,6 +412,13 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 		echo "Re-smudged ${path} (was raw ciphertext from a pre-setup checkout)."
 	else
 		STILL_ENCRYPTED="${STILL_ENCRYPTED}   - ${path}"$'\n'
+		# For the hint at the end: the kinds of key these files name.
+		for key_type in $(git -C "${TARGET_ROOT}" cat-file blob "${index_sha}" | sgf_doc_key_types); do
+			case " ${STILL_ENCRYPTED_KEY_TYPES} " in
+			*" ${key_type} "*) ;;
+			*) STILL_ENCRYPTED_KEY_TYPES="${STILL_ENCRYPTED_KEY_TYPES} ${key_type}" ;;
+			esac
+		done
 	fi
 done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
 
@@ -412,32 +438,240 @@ else
 	echo "   keep their umask permissions (usually 0644). Update this checkout." >&2
 fi
 
-# ── Install post-checkout / post-merge permission hooks ────
+# ── Permission hooks ────
 # A plain `git checkout` or `git pull` re-runs the smudge filter and so
-# re-creates the 0644 problem. These two hooks re-tighten afterwards.
-# They are deliberately NOT the place for any other logic: they call
+# re-creates the 0644 problem, and so does every other command that
+# writes a SOPS-managed file again. Git runs a hook after most of them:
+#
+#   post-checkout    checkout, switch, restore, worktree add, bisect
+#   post-merge       merge, pull
+#   post-rewrite     rebase, commit --amend
+#   post-applypatch  am
+#   post-commit      commit, cherry-pick, revert, each step of a rebase
+#
+# (`git stash`, `git stash pop`, `git reset --hard` and
+# `git sparse-checkout add` run no hook: see "Limitations" in the README.)
+# The hooks are deliberately NOT the place for any other logic: they call
 # harden-permissions.sh from the checkout, so updating the tool updates
 # the behaviour without re-running install.sh.
+HOOK_MARKER="# managed by sops-git-filters (secret file permissions)"
+HOOK_NAMES="post-checkout post-merge post-rewrite post-applypatch post-commit"
+
+# hook_text <hook name> <the HARDEN=... line> : the hook this script writes
+hook_text() {
+	cat <<EOF
+#!/usr/bin/env bash
+${HOOK_MARKER}
+#
+# $1: git cannot store mode 0600, so a command that writes a
+# SOPS-managed file again (through the smudge filter) leaves it with
+# the caller's umask (0644 by default). Re-tighten every filter=sops file.
+#
+# Generated by install.sh — edit harden-permissions.sh, not this file.
+# Delete it to opt out; re-running install.sh restores it.
+set -u
+root="\$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+$2
+[ -x "\${HARDEN}" ] || exit 0
+"\${HARDEN}" --root "\${root}" --quiet || true
+exit 0
+EOF
+}
+
+# hook_text_until_2_0 <hook name> <the HARDEN=... line> : the hook that
+# install.sh wrote from v1.1.0 to v2.0.0, byte for byte. Kept to recognise
+# those files; see is_generated_hook.
+hook_text_until_2_0() {
+	cat <<EOF
+#!/usr/bin/env bash
+${HOOK_MARKER}
+#
+# $1: git cannot store mode 0600, so a checkout or merge that
+# re-runs the SOPS smudge filter recreates secrets with the caller's
+# umask (0644 by default). Re-tighten every filter=sops file.
+#
+# Generated by install.sh — edit harden-permissions.sh, not this file.
+# Delete it to opt out; re-running install.sh restores it.
+set -u
+root="\$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+$2
+[ -x "\${HARDEN}" ] || exit 0
+"\${HARDEN}" --root "\${root}" --quiet || true
+exit 0
+EOF
+}
+
+# is_generated_hook <file> <hook name>
+# True when <file> is, byte for byte, a hook that this script generated
+# (now or in an earlier release) and nobody changed since. Only line 12
+# may differ, the one that names harden-permissions.sh. A symlink, a file
+# with one more line, or a hook of another tool that merely mentions
+# sops-git-filters is not one. This is the test before a file is removed.
+is_generated_hook() {
+	local file="$1" name="$2" assign content
+	[[ -f "${file}" && ! -L "${file}" ]] || return 1
+	assign="$(sed -n '12p' "${file}" 2>/dev/null)" || return 1
+	case "${assign}" in
+	HARDEN=*harden-permissions.sh | HARDEN=*harden-permissions.sh\" | HARDEN=*harden-permissions.sh\') ;;
+	*) return 1 ;;
+	esac
+	content="$(cat "${file}" 2>/dev/null && printf x)" || return 1
+	[[ "${content}" == "$(hook_text "${name}" "${assign}" && printf x)" ||
+		"${content}" == "$(hook_text_until_2_0 "${name}" "${assign}" && printf x)" ]]
+}
+
+# physical_path <path> : <path> with its symlinks resolved. The path need
+# not exist: the deepest directory that does is resolved and the rest is
+# appended. Fails when that cannot be done by reading names alone (a "."
+# or ".." below the last existing directory, a symlink that leads nowhere).
+physical_path() {
+	local path="$1" rest="" base
+	while [[ ! -d "${path}" ]]; do
+		[[ ! -L "${path}" ]] || return 1
+		base="$(basename -- "${path}")"
+		case "${base}" in
+		. | .. | /) return 1 ;;
+		esac
+		rest="/${base}${rest}"
+		path="$(dirname -- "${path}")"
+	done
+	path="$(CDPATH='' cd -- "${path}" 2>/dev/null && pwd -P)" || return 1
+	[[ "${path}" != "/" ]] || path=""
+	[[ -n "${path}${rest}" ]] || path="/"
+	printf '%s\n' "${path}${rest}"
+}
+
+# machine_wide_hooks_dirs : the directories that a core.hooksPath in the
+# user's or the system's git config names with an absolute path (git
+# expands a leading ~), one per line, symlinks resolved. Every repository
+# of this user runs its hooks from there. A relative value is not listed:
+# git resolves it inside each repository.
+machine_wide_hooks_dirs() {
+	local value
+	{
+		git config --global --includes --type=path --get-all core.hooksPath 2>/dev/null || true
+		git config --system --includes --type=path --get-all core.hooksPath 2>/dev/null || true
+	} | while IFS= read -r value; do
+		case "${value}" in
+		/*) physical_path "${value}" || true ;;
+		esac
+	done
+}
+
+GIT_DIR_P="$(CDPATH='' cd -- "$(git -C "${TARGET_ROOT}" rev-parse --absolute-git-dir)" && pwd -P)"
+GIT_COMMON_P="$(CDPATH='' cd -- "${TARGET_ROOT}" && CDPATH='' cd -- "$(git rev-parse --git-common-dir)" && pwd -P)"
+
+# hooks_dir_is_own <physical path>
+# True when a hooks directory belongs to this repository alone: it lies in
+# the working tree or in the git directory, and it is not the directory
+# that the user's or the system's git config gives to every repository.
+# Everything else is shared: a hook written there would run in every
+# repository that uses the directory, and the hook calls a script by its
+# path inside the repository it runs in. Cloning any repository that
+# ships a file at that path would then execute it.
+hooks_dir_is_own() {
+	local dir="$1" wide
+	[[ "${dir}" == "${TARGET_ROOT}" || "${dir}" == "${TARGET_ROOT}"/* ||
+		"${dir}" == "${GIT_DIR_P}"/* || "${dir}" == "${GIT_COMMON_P}"/* ]] || return 1
+	while IFS= read -r wide; do
+		[[ "${wide}" != "${dir}" ]] || return 1
+	done < <(machine_wide_hooks_dirs)
+	return 0
+}
+
+# remove_generated_hooks <shared hooks directory>
+# Up to v2.0.0 install.sh wrote its hooks into whatever core.hooksPath
+# named, a shared directory included. Take those files out again, and
+# only those: see is_generated_hook.
+remove_generated_hooks() {
+	local dir="$1" name file
+	[[ -d "${dir}" ]] || return 0
+	for name in ${HOOK_NAMES}; do
+		file="${dir}/${name}"
+		[[ -e "${file}" || -L "${file}" ]] || continue
+		if is_generated_hook "${file}" "${name}"; then
+			if rm -f -- "${file}" 2>/dev/null; then
+				echo "Removed ${file}: an earlier install.sh wrote it into this shared hooks directory, where it ran for every repository."
+			else
+				echo "⚠  Could not remove ${file}. Delete it by hand: an earlier install.sh wrote it" >&2
+				echo "   into this shared hooks directory, where it runs for every repository." >&2
+			fi
+		elif grep -qF "${HOOK_MARKER}" "${file}" 2>/dev/null; then
+			echo "⚠  ${file} carries the sops-git-filters marker but is not the file install.sh" >&2
+			echo "   wrote (it was changed, or it is a symlink). It is in a shared hooks directory:" >&2
+			echo "   take the lines that call harden-permissions.sh out of it by hand." >&2
+		fi
+	done
+}
+
+# core.hooksPath wins over $GIT_DIR/hooks when it is set. It is a pathname
+# value, so read it with --type=path (git >= 2.18): git expands a leading
+# ~ itself, and without this a "~/.githooks" setting would be treated as a
+# relative path inside the repo.
+HOOKS_DIR="$(git -C "${TARGET_ROOT}" config --type=path --get core.hooksPath 2>/dev/null || true)"
+if [[ -z "${HOOKS_DIR}" ]]; then
+	HOOKS_DIR="$(git -C "${TARGET_ROOT}" rev-parse --git-path hooks)"
+fi
+case "${HOOKS_DIR}" in
+/*) ;;
+*) HOOKS_DIR="${TARGET_ROOT}/${HOOKS_DIR}" ;;
+esac
+HOOKS_DIR_P="$(physical_path "${HOOKS_DIR}" || true)"
+HOOKS_DIR_OWN=0
+if [[ -n "${HOOKS_DIR_P}" ]] && hooks_dir_is_own "${HOOKS_DIR_P}"; then
+	HOOKS_DIR_OWN=1
+fi
+
+# ── Take earlier hooks out of shared directories ────
+# Every directory a core.hooksPath setting names, in any config file git
+# reads here, plus the one in effect. Done on every run, also when the
+# hooks are skipped below: these files are a way to run code from any
+# repository that is cloned, and this script put them there.
+SEEN_HOOKS_DIRS=""
+while IFS= read -r candidate; do
+	[[ -n "${candidate}" ]] || continue
+	case "${candidate}" in
+	/*) ;;
+	*) candidate="${TARGET_ROOT}/${candidate}" ;;
+	esac
+	candidate_p="$(physical_path "${candidate}" || true)"
+	[[ -n "${candidate_p}" ]] || continue
+	case "${SEEN_HOOKS_DIRS}" in
+	*"|${candidate_p}|"*) continue ;;
+	esac
+	SEEN_HOOKS_DIRS="${SEEN_HOOKS_DIRS}|${candidate_p}|"
+	hooks_dir_is_own "${candidate_p}" || remove_generated_hooks "${candidate_p}"
+done < <(
+	printf '%s\n' "${HOOKS_DIR}"
+	git -C "${TARGET_ROOT}" config --type=path --get-all core.hooksPath 2>/dev/null || true
+)
+
+# ── Install the hooks ────
 if [[ "${SOPS_FILTER_INSTALL_HOOKS:-1}" == "0" ]]; then
-	echo "Skipping post-checkout/post-merge hook install (SOPS_FILTER_INSTALL_HOOKS=0)."
+	echo "Skipping the permission hooks (SOPS_FILTER_INSTALL_HOOKS=0)."
 elif [[ ! -x "${HARDEN_SCRIPT}" ]]; then
 	echo "Skipping permission hooks: ${HARDEN_SCRIPT} is missing." >&2
+elif [[ "${HOOKS_DIR_OWN}" -eq 0 ]]; then
+	# Not this repository's own directory: write nothing. The line offered
+	# instead names this working tree by its absolute path, so in a hook
+	# that every repository runs it does something in this one only.
+	# (shell_quote leaves a plain path bare, which is fine in both places.)
+	ROOT_Q="$(shell_quote "${TARGET_ROOT}")"
+	{
+		echo "⚠  Git runs the hooks of this repository from a directory that is not its own:"
+		echo "     ${HOOKS_DIR}"
+		echo "   (core.hooksPath, or a symlinked hooks directory). A hook written there would"
+		echo "   run in every repository that uses the directory, so sops-git-filters does"
+		echo "   not write there. Until you add the line below, SOPS-managed files are NOT"
+		echo "   set back to 0600 after a checkout, merge, rebase or commit in this"
+		echo "   repository (run harden-permissions.sh by hand when it matters)."
+		echo "   To get that back, add this line to these hooks in that directory:"
+		echo "     ${HOOK_NAMES}"
+		echo "   It acts in this working tree only, whichever repository runs the hook:"
+		# shellcheck disable=SC2016  # printed for the user to paste
+		echo '     [ "$(git rev-parse --show-toplevel 2>/dev/null)" = '"${ROOT_Q}"' ] && '"$(shell_quote "${HARDEN_SCRIPT}") --root ${ROOT_Q} --quiet || true"
+	} >&2
 else
-	HOOK_MARKER="# managed by sops-git-filters (secret file permissions)"
-
-	# core.hooksPath wins over $GIT_DIR/hooks when it is set. It is a pathname
-	# value, so read it with --type=path (git >= 2.18): git expands a leading
-	# ~ itself, and without this a "~/.githooks" setting would be treated as a
-	# relative path inside the repo.
-	HOOKS_DIR="$(git -C "${TARGET_ROOT}" config --type=path --get core.hooksPath 2>/dev/null || true)"
-	if [[ -z "${HOOKS_DIR}" ]]; then
-		HOOKS_DIR="$(git -C "${TARGET_ROOT}" rev-parse --git-path hooks)"
-	fi
-	case "${HOOKS_DIR}" in
-	/*) ;;
-	*) HOOKS_DIR="${TARGET_ROOT}/${HOOKS_DIR}" ;;
-	esac
-
 	# Prefer a repo-relative reference for the same reason the clean
 	# filter does: an absolute path breaks silently when the repo moves.
 	# The path is quoted for the shell (shell_quote): inside double quotes
@@ -454,38 +688,33 @@ else
 	fi
 
 	mkdir -p "${HOOKS_DIR}"
-	for hook_name in post-checkout post-merge; do
+	installed_hooks=""
+	foreign_hooks=""
+	for hook_name in ${HOOK_NAMES}; do
 		hook_path="${HOOKS_DIR}/${hook_name}"
 
-		# Never clobber a hook this tool did not write — pre-commit,
-		# prek, husky and hand-rolled hooks all live here.
-		if [[ -e "${hook_path}" ]] && ! grep -qF "${HOOK_MARKER}" "${hook_path}" 2>/dev/null; then
-			echo "⚠  ${hook_name} hook exists and is not managed by sops-git-filters." >&2
-			echo "   Not overwriting. Add this line to it by hand:" >&2
-			echo "     ${HARDEN_HINT} --quiet || true" >&2
+		# Never clobber a hook this tool did not write — pre-commit, prek,
+		# husky and hand-rolled hooks all live here. A symlink is never
+		# written through either: its target can be a file outside this
+		# repository.
+		if [[ -L "${hook_path}" ]] ||
+			{ [[ -e "${hook_path}" ]] && ! grep -qF "${HOOK_MARKER}" "${hook_path}" 2>/dev/null; }; then
+			foreign_hooks="${foreign_hooks} ${hook_name}"
 			continue
 		fi
 
-		cat >"${hook_path}" <<EOF
-#!/usr/bin/env bash
-${HOOK_MARKER}
-#
-# ${hook_name}: git cannot store mode 0600, so a checkout or merge that
-# re-runs the SOPS smudge filter recreates secrets with the caller's
-# umask (0644 by default). Re-tighten every filter=sops file.
-#
-# Generated by install.sh — edit harden-permissions.sh, not this file.
-# Delete it to opt out; re-running install.sh restores it.
-set -u
-root="\$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-${HOOK_HARDEN_ASSIGN}
-[ -x "\${HARDEN}" ] || exit 0
-"\${HARDEN}" --root "\${root}" --quiet || true
-exit 0
-EOF
+		hook_text "${hook_name}" "${HOOK_HARDEN_ASSIGN}" >"${hook_path}"
 		chmod +x "${hook_path}"
-		echo "Installed ${hook_name} hook (re-applies 0600 after checkout/merge)."
+		installed_hooks="${installed_hooks} ${hook_name}"
 	done
+	if [[ -n "${installed_hooks}" ]]; then
+		echo "Installed the permission hooks (they set SOPS-managed files back to 0600):${installed_hooks}"
+	fi
+	if [[ -n "${foreign_hooks}" ]]; then
+		echo "⚠  These hooks exist and are not managed by sops-git-filters:${foreign_hooks}" >&2
+		echo "   Not overwriting. Add this line to each of them by hand:" >&2
+		echo "     ${HARDEN_HINT} --quiet || true" >&2
+	fi
 fi
 
 # ── Report files that need attention ────
@@ -555,10 +784,33 @@ if [[ -n "${STILL_ENCRYPTED}" ]]; then
 		echo ""
 		printf '%s' "${STILL_ENCRYPTED}"
 		echo ""
-		echo " Make your keys or cloud credentials available (AWS SSO:"
-		echo " aws sso login; age: SOPS_AGE_KEY_FILE) and re-run this script."
+		echo " Make your keys or credentials available and re-run this script:"
+		# shellcheck disable=SC2086  # one word per key type
+		sgf_credential_hint "   " ${STILL_ENCRYPTED_KEY_TYPES}
 		echo " Until then git sees those files as unchanged, and nothing is"
 		echo " encrypted a second time."
+		echo "========================================================"
+	} >&2
+	ATTENTION=1
+fi
+
+# Decrypted fine, but the content cannot pass through this tool.
+if [[ -n "${HOLDS_NUL_BYTES}" ]]; then
+	{
+		echo ""
+		echo "========================================================"
+		echo " NUL BYTES IN THE CONTENT"
+		echo "========================================================"
+		echo ""
+		echo " The stored version of these files decrypts to content with NUL"
+		echo " bytes (binary data, or UTF-16 text). sops-git-filters handles"
+		echo " text files only, so their working copy was left as ciphertext"
+		echo " instead of being written damaged:"
+		echo ""
+		printf '%s' "${HOLDS_NUL_BYTES}"
+		echo ""
+		echo " Store such a secret in a text form (base64, PEM, UTF-8), or take"
+		echo " filter=sops off its path and encrypt it with sops by hand."
 		echo "========================================================"
 	} >&2
 	ATTENTION=1

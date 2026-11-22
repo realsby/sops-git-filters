@@ -2,7 +2,7 @@
 #
 #   repos:
 #     - repo: https://github.com/realsby/sops-git-filters
-#       rev: v2.0.0   # sops-file-permissions exists from v1.1.0 (v1.0.0 ships the guard only)
+#       rev: v2.1.0   # sops-file-permissions exists from v1.1.0 (v1.0.0 ships the guard only)
 #       hooks:
 #         - id: sops-encryption-guard
 #         - id: sops-file-permissions
@@ -19,12 +19,14 @@
   stages: [pre-commit]
 
 # Re-applies mode 0600 to every filter=sops file. install.sh already
-# installs plain post-checkout/post-merge hooks that do this; use this
-# entry instead if you manage all hook types through pre-commit (it
-# needs `pre-commit install -t post-checkout -t post-merge`, or
-# `default_install_hook_types: [pre-commit, post-checkout, post-merge]`
-# in .pre-commit-config.yaml). Running both is harmless — the script is
-# idempotent.
+# installs plain hooks that do this (post-checkout, post-merge,
+# post-rewrite, post-applypatch, post-commit); use this entry instead if
+# you manage all hook types through pre-commit. It needs
+# `pre-commit install -t post-checkout -t post-merge -t post-rewrite -t post-commit`,
+# or `default_install_hook_types: [pre-commit, post-checkout, post-merge,
+# post-rewrite, post-commit]` in .pre-commit-config.yaml. pre-commit has
+# no post-applypatch stage, so `git am` is not covered this way. Running
+# both is harmless — the script is idempotent.
 - id: sops-file-permissions
   name: Tighten permissions on SOPS-managed files (0600)
   entry: harden-permissions.sh
@@ -32,4 +34,4 @@
   language: script
   pass_filenames: false
   always_run: true
-  stages: [post-checkout, post-merge]
+  stages: [post-checkout, post-merge, post-rewrite, post-commit]
