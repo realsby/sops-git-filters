@@ -221,7 +221,10 @@ INSTALL_DIR="${GIT_COMMON_P}/sops-git-filters"
 # shellcheck disable=SC2016  # $(...) must reach git's shell unexpanded
 INSTALLED_Q='"$(git rev-parse --git-common-dir)"/sops-git-filters'
 CLEAN_CMD="${INSTALLED_Q}/clean-filter.sh %f"
-SMUDGE_CMD="${INSTALLED_Q}/smudge-filter.sh %f"
+# The smudge command carries the storage format. The smudge filter cannot
+# read it from .sops-filter.conf: in a new working tree git writes ".env"
+# before that file exists.
+SMUDGE_CMD="${INSTALLED_Q}/smudge-filter.sh ${STORE_FORMAT} %f"
 MERGE_CMD="${INSTALLED_Q}/merge-driver.sh %O %A %B %L %P"
 
 # textconv = cat is NOT a mistake. Git materializes textconv temp files
@@ -311,9 +314,10 @@ if [[ -n "$(git_effective --get filter.sops.process)" ]]; then
 	exit 1
 fi
 
-# Idempotency: write the settings only when one of them differs (a first
-# install, or a setup from before v3.0.0, whose commands named the
-# checkout of the tool).
+# Idempotency: write the settings only when one of them differs: a first
+# install, a setup from before v3.0.0 (its commands named the checkout of
+# the tool), or a changed storage format (it is part of the smudge
+# command).
 CURRENT_CLEAN=$(git_cfg --get filter.sops.clean 2>/dev/null || echo "")
 CURRENT_SMUDGE=$(git_cfg --get filter.sops.smudge 2>/dev/null || echo "")
 CURRENT_TEXTCONV=$(git_cfg --get diff.sops.textconv 2>/dev/null || echo "")

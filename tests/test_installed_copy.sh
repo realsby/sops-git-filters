@@ -115,7 +115,7 @@ test_copy_holds_what_git_needs_and_follows_install() {
 	done
 	assert_contains "$(cat "${dir}/INSTALLED")" "source=${TOOL}" "INSTALLED names the checkout by its path in the repository"
 	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
-	assert_eq "$(git config --local --get filter.sops.smudge)" "${INSTALLED_CMD_PREFIX}/smudge-filter.sh %f" "smudge filter command"
+	assert_eq "$(git config --local --get filter.sops.smudge)" "${INSTALLED_CMD_PREFIX}/smudge-filter.sh json %f" "smudge filter command"
 	assert_eq "$(git config --local --get merge.sops.driver)" \
 		"${INSTALLED_CMD_PREFIX}/merge-driver.sh %O %A %B %L %P" "merge driver command"
 
@@ -151,7 +151,7 @@ test_copy_replaces_a_setup_from_before_v3() {
 	run "${TOOL}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
 	assert_contains "$(git config --local --get filter.sops.clean)" "git rev-parse --git-common-dir" "clean filter command"
-	assert_contains "$(git config --local --get filter.sops.smudge)" "smudge-filter.sh %f" "smudge filter command"
+	assert_contains "$(git config --local --get filter.sops.smudge)" "smudge-filter.sh json %f" "smudge filter command"
 	assert_contains "$(git config --local --get merge.sops.driver)" "git rev-parse --git-common-dir" "merge driver command"
 	assert_contains "$(cat "${hook}")" "git rev-parse --git-common-dir" "the hook"
 	assert_not_contains "$(cat "${hook}")" "${TOOL}" "the hook names nothing in the working tree"
@@ -285,25 +285,62 @@ test_smudge_writes_the_plaintext_byte_for_byte() {
 	cmp bin.secret ../expected || fail "the checked-out file differs from what was encrypted"
 }
 
-# The storage format is read when the filter runs: a clone whose
-# .sops-filter.conf changes needs no new git configuration to check out.
-test_smudge_reads_the_storage_format_when_it_runs() {
+# The storage format is part of the smudge command that install.sh writes.
+# The filter must not read it from .sops-filter.conf: git checks files out
+# in the order of their names, and in a new working tree ".env" is written
+# before ".sops-filter.conf" exists. (A release candidate read the file,
+# and `git worktree add` failed in every repository that stores dotenv.)
+test_smudge_knows_the_storage_format_before_the_conf_is_checked_out() {
+	umask 022
+	new_repo repo dotenv
+	printf 'A=1\n' >.env
+	mkdir stacks
+	printf 'B=2\n' >stacks/.env
+	printf '**/.env filter=sops diff=sops\n.env filter=sops diff=sops\n' >.gitattributes
+	git add .gitattributes .env stacks/.env
+	git commit -q -m "two dotenv secrets"
+	assert_eq "$(git config --local --get filter.sops.smudge)" "${INSTALLED_CMD_PREFIX}/smudge-filter.sh dotenv %f" "smudge filter command"
+
+	run git worktree add -q ../linked -b side
+	assert_eq "${RC}" "0" "git worktree add in a repository that stores dotenv"
+	assert_eq "$(cat ../linked/.env)" "A=1" "working copy in the linked worktree"
+	assert_eq "$(cat ../linked/stacks/.env)" "B=2" "working copy in the linked worktree"
+	assert_eq "$(mode_of ../linked/.env)" "600" "mode in the linked worktree"
+	assert_eq "$(git -C ../linked status --porcelain)" "" "git status in the linked worktree"
+
+	printf 'A=2\n' >../linked/.env
+	run git -C ../linked add .env
+	assert_eq "${RC}" "0" "git add in the linked worktree"
+	assert_eq "$(cd ../linked && plain_of_stored .env dotenv)" "A=2" "plaintext of the staged blob"
+}
+
+# A changed .sops-filter.conf reaches the smudge filter through install.sh,
+# and a blob in the other format is named as such.
+test_smudge_format_follows_install() {
 	new_repo repo dotenv
 	printf 'A=1\n' >.env
 	git add .env
 	git commit -q -m "v1 (dotenv)"
 	printf 'A=2\n' >.env
 	git commit -q -am "v2 (dotenv)"
-	assert_not_contains "$(git config --local --get filter.sops.smudge)" "dotenv" "the smudge command names no format"
 
-	git checkout -q HEAD~1
-	assert_eq "$(cat .env)" "A=1" "working copy in the dotenv format"
-
-	# The conf says json while git holds dotenv: named as such.
+	# The conf says json now, install.sh has not run: checkouts go on as before.
 	printf 'SOPS_STORE_FORMAT=json\n' >.sops-filter.conf
-	run git checkout -q -
-	assert_ne "${RC}" "0" "git checkout with the wrong format in the conf"
-	assert_contains "${OUT}" "in the dotenv format, but .sops-filter.conf says json" "the filter names the format mismatch"
+	rm .env
+	run git checkout -- .env
+	assert_eq "${RC}" "0" "git checkout before install.sh ran again"
+	assert_eq "$(cat .env)" "A=2" "working copy"
+
+	# install.sh takes the new format over (and reports the files still in
+	# the old one, exit status 3).
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status with an unfinished format change"
+	assert_eq "$(git config --local --get filter.sops.smudge)" "${INSTALLED_CMD_PREFIX}/smudge-filter.sh json %f" "smudge filter command"
+	rm .env
+	run git checkout -- .env
+	assert_ne "${RC}" "0" "git checkout of a blob in the other format"
+	assert_contains "${OUT}" "in the dotenv format, but this clone is set up for json" "the filter names the format mismatch"
+	[[ ! -e .env ]] || fail "something was written in place of the secret"
 }
 
 # A blob that was committed in plaintext cannot be checked out silently.

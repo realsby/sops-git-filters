@@ -70,7 +70,7 @@ The pre-commit stash dance is also handled: the clean filter compares against th
 
 Git does not run these scripts from your checkout of the tool. `install.sh` copies the ones git needs (`clean-filter.sh`, `smudge-filter.sh`, `merge-driver.sh`, `harden-permissions.sh` and `lib.sh`) into `sops-git-filters/` inside the git directory, and the filter, the merge driver and the hooks name that copy. **After an update of the tool, nothing changes until `install.sh` has run again**; the installed copy prints a line when it sees a newer version in the checkout. See [Security model](#security-model) for the reason.
 
-`smudge-filter.sh` is one `sops decrypt` (the plaintext goes from `sops` straight to git). When that fails it adds what to check for the kinds of key the file names, and exits non-zero: git stops, and nothing is written in place of the secret.
+`smudge-filter.sh` is one `sops decrypt` (the plaintext goes from `sops` straight to git). When that fails it adds what to check for the kinds of key the file names, and exits non-zero: git stops, and nothing is written in place of the secret. `install.sh` writes the storage format into the smudge command: the filter cannot read `.sops-filter.conf` itself, because in a new working tree git checks `.env` out before that file.
 
 `clean-filter.sh` decision tree on every `git add`:
 
@@ -232,7 +232,7 @@ It also refuses the result if any value came back unencrypted: a creation rule w
 Pick the format **before the first encrypted commit**. Migrating later, on a clone with the files decrypted:
 
 1. Change `SOPS_STORE_FORMAT` in `.sops-filter.conf`.
-2. Re-run `install.sh` (it exits 3 and lists the files still in the old format).
+2. Re-run `install.sh` (it writes the new format into the smudge command; it exits 3 and lists the files still in the old format).
 3. Re-encrypt every managed file: `SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize .`
 4. Commit `.sops-filter.conf` and the files together.
 

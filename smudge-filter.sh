@@ -24,8 +24,11 @@
 # ║  kinds of key THIS file names, and what state git is in now      ║
 # ║  (it removed the working copy before it called the filter).      ║
 # ║                                                                  ║
-# ║  The storage format is read from .sops-filter.conf on every      ║
-# ║  run, so a format change needs no new git configuration.         ║
+# ║  The storage format comes from install.sh, as the first          ║
+# ║  argument in filter.sops.smudge. It is NOT read from             ║
+# ║  .sops-filter.conf here: git checks files out in the order of    ║
+# ║  their names, and in a new working tree (`git worktree add`)     ║
+# ║  ".env" is written before ".sops-filter.conf" exists.            ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -41,12 +44,16 @@ fi
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-# Git passes the filename as %f (configured in filter.sops.smudge).
-if [[ $# -ne 1 ]]; then
-	echo "Usage: $0 <filename>" >&2
+# filter.sops.smudge = <this script> <json|dotenv> %f
+# install.sh writes the storage format into the command; git passes the
+# filename as %f.
+if [[ $# -ne 2 ]]; then
+	echo "Usage: $0 <json|dotenv> <filename>" >&2
+	echo "(If git printed this: run install.sh of sops-git-filters again.)" >&2
 	exit 1
 fi
-FILENAME="$1"
+STORE_FORMAT="$1"
+FILENAME="$2"
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 	echo "ERROR: not inside a git repository" >&2
@@ -58,10 +65,13 @@ if ! command -v sops >/dev/null 2>&1; then
 	exit 1
 fi
 
-STORE_FORMAT="$(sgf_store_format "${PROJECT_ROOT}")" || exit 1
 case "${STORE_FORMAT}" in
 json) DECRYPT_ARGS=(--input-type json --output-type binary) ;;
 dotenv) DECRYPT_ARGS=(--input-type dotenv --output-type dotenv) ;;
+*)
+	echo "ERROR: unknown storage format '${STORE_FORMAT}' in filter.sops.smudge — run install.sh of sops-git-filters again" >&2
+	exit 1
+	;;
 esac
 OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
@@ -95,8 +105,10 @@ fi
 		# shellcheck disable=SC2046  # one word per key type
 		sgf_credential_hint "    " $(printf '%s' "${BLOB}" | sgf_doc_key_types)
 	elif sgf_is_sops_doc "${OTHER_FORMAT}" "${BLOB}"; then
-		echo "  Git holds this file in the ${OTHER_FORMAT} format, but .sops-filter.conf says ${STORE_FORMAT}."
-		echo "  A storage-format change is not finished (see the README, \"Storage formats\")."
+		echo "  Git holds this file in the ${OTHER_FORMAT} format, but this clone is set up for ${STORE_FORMAT}"
+		echo "  (install.sh wrote that into filter.sops.smudge from .sops-filter.conf). Either a"
+		echo "  storage-format change is not finished (README, \"Storage formats\"), or"
+		echo "  .sops-filter.conf changed and install.sh has not run since."
 	else
 		echo "  The version git holds is not an encrypted SOPS document: it was committed"
 		echo "  without the filter. install.sh lists such files and says how to fix them."
