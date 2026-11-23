@@ -88,7 +88,9 @@ esac
 # decrypt it: the key groups in their order, the keys in each of them and
 # the threshold. That is the metadata without the fields that differ from
 # file to file by nature (the encrypted data key, the time stamps, the
-# MAC). Two documents with the same output need the same keys, so one
+# MAC) and without the version of sops that wrote the file, which says
+# nothing about who can read it. Two documents with the same output need
+# the same keys, so one
 # decryption answers for both. Group boundaries count: recipients A and B
 # in one group (either key will do) are not the same as A and B in two
 # groups (both are needed).
@@ -101,6 +103,9 @@ access_of() {
 	json)
 		awk '
 		/^[ \t]*"(enc|created_at|lastmodified)"[ \t]*:/ { next }
+		# The version of sops, X.Y.Z. Not the "version" of an Azure key,
+		# which belongs to the name of the key.
+		/^[ \t]*"version"[ \t]*:[ \t]*"[0-9]+\.[0-9]+\.[0-9]+"/ { next }
 		/^[ \t]*"(data|mac)"[ \t]*:/ { own_line++; next }
 		{ sub(/\r$/, ""); print }
 		END { if (own_line != 2) exit 1 }
@@ -112,7 +117,7 @@ access_of() {
 			key = $0
 			sub(/=.*/, "", key)
 			if (key == "sops_mac") { mac++; next }
-			if (key == "sops_lastmodified" || key ~ /__map_(enc|created_at)$/) next
+			if (key == "sops_lastmodified" || key == "sops_version" || key ~ /__map_(enc|created_at)$/) next
 			sub(/\r$/, "")
 			print
 		}
