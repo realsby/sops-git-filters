@@ -2,7 +2,9 @@
 
 Every release is a tag. The same notes are on the [releases page](https://github.com/realsby/sops-git-filters/releases). After an update, run `install.sh` again in every clone.
 
-## v3.0.0 — not released yet
+## v3.0.0 — 2026-11-24
+
+[All changes since v2.1.0](https://github.com/realsby/sops-git-filters/compare/v2.1.0...v3.0.0)
 
 ### Why this is a major version
 
