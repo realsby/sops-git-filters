@@ -198,3 +198,36 @@ test_preflight_mentions_files_it_did_not_check() {
 	assert_contains "${OUT}" "decryption works (1 set(s) of keys checked)" "preflight.sh output"
 	assert_contains "${OUT}" "1 SOPS-managed file(s) are not encrypted SOPS documents" "preflight.sh output"
 }
+
+# Files that differ only in the version of sops that wrote them are opened
+# by the same keys: one decryption answers for all of them. (A repository
+# with 21 secrets written by four sops releases cost four calls to the key
+# service instead of one.)
+preflight_sops_versions() { # <format>
+	new_repo repo "$1"
+	printf 'A=1\n' >.env
+	printf 'B=2\n' >b.secret
+	git add .env b.secret
+	git commit -q -m "two secrets"
+	run "${TOOL}/preflight.sh"
+	assert_contains "${OUT}" "1 set(s) of keys checked" "two files with the same keys ($1)"
+
+	# The same blob, as an older sops would have stamped it.
+	stored b.secret | sed -e 's/^sops_version=.*/sops_version=3.9.0/' \
+		-e 's/^\([[:space:]]*"version": \)"[0-9.]*"/\1"3.9.0"/' >../b.older
+	if cmp -s ../b.older <(stored b.secret); then
+		fail "the test did not change the version field of the stored blob"
+	fi
+	git update-index --cacheinfo "100644,$(git hash-object -w ../b.older),b.secret"
+	run "${TOOL}/preflight.sh"
+	assert_eq "${RC}" "0" "preflight.sh exit status ($1)"
+	assert_contains "${OUT}" "1 set(s) of keys checked" "the version of sops is not part of the set ($1)"
+}
+
+test_preflight_ignores_the_sops_version() {
+	preflight_sops_versions json
+}
+
+test_preflight_ignores_the_sops_version_in_the_dotenv_format() {
+	preflight_sops_versions dotenv
+}

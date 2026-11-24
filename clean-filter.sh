@@ -98,6 +98,10 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 	exit 1
 }
 
+# Run from the copy under .git/ while the checkout holds a newer version?
+# Then say that install.sh has to run again (one line, see lib.sh).
+sgf_warn_if_outdated "${SCRIPT_DIR}" "${PROJECT_ROOT}"
+
 # ── Guards: fail hard, never pass plaintext through ────
 # Exiting non-zero makes git abort the add/commit
 # (filter.sops.required=true) instead of storing plaintext.

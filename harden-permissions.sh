@@ -121,4 +121,15 @@ if [[ "${QUIET}" -eq 0 ]]; then
 	echo "Permissions: ${hardened} SOPS-managed file(s) set to ${FILE_MODE}."
 fi
 
+# The hooks run this script from the copy under .git/. When the checkout
+# of the tool holds a newer version, say that install.sh has to run again
+# (lib.sh; also with --quiet, because nothing else would tell). The script
+# works without lib.sh, so a copy that came without it stays silent.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -r "${SCRIPT_DIR}/INSTALLED" && -r "${SCRIPT_DIR}/lib.sh" ]]; then
+	# shellcheck source=lib.sh
+	. "${SCRIPT_DIR}/lib.sh"
+	sgf_warn_if_outdated "${SCRIPT_DIR}" "${TARGET_ROOT}"
+fi
+
 [[ "${failed}" -eq 0 && -z "${INVALID_MODE}" ]] || exit 1

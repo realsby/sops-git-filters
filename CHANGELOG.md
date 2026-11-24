@@ -2,6 +2,36 @@
 
 Every release is a tag. The same notes are on the [releases page](https://github.com/realsby/sops-git-filters/releases). After an update, run `install.sh` again in every clone.
 
+## v3.0.0 — 2026-11-24
+
+[All changes since v2.1.0](https://github.com/realsby/sops-git-filters/compare/v2.1.0...v3.0.0)
+
+### Why this is a major version
+
+Git no longer runs the scripts of your checkout of the tool. It runs a copy that `install.sh` puts inside the git directory. **After an update of the tool, a clone keeps running the old code until `install.sh` has run there again.** Before, a submodule bump or a new vendored copy took effect at once.
+
+### Upgrading
+
+1. Check out the tag in the submodule (or replace your vendored copy; it needs the new `smudge-filter.sh` too).
+2. Run `install.sh` in every clone, from a checkout you trust. Once per clone is enough: linked worktrees share the copy.
+
+Until step 2 is done in a clone, that clone works as before with the old settings.
+
+### Behaviour changes
+
+- **Git runs an installed copy.** `install.sh` copies `clean-filter.sh`, `smudge-filter.sh`, `merge-driver.sh`, `harden-permissions.sh` and `lib.sh` into `sops-git-filters/` inside the common git directory. `filter.sops.clean`, `filter.sops.smudge`, `merge.sops.driver` and the five hooks name that copy, with a path that is resolved when the command runs: `"$(git rev-parse --git-common-dir)"/sops-git-filters/...`. Checking out a branch can no longer swap the code that sees the plaintext. Before, with a vendored copy of the tool, a checkout ran the branch's `harden-permissions.sh` through the post-checkout hook, and the next `git status` ran its `clean-filter.sh`.
+- **The installed copy says when it is behind.** When the checkout of the tool holds a newer version than the copy, the clean filter, the smudge filter, the merge driver and the hooks print one line on stderr that names `install.sh`. The version is the `SGF_VERSION` line of `lib.sh`, read as text.
+- **The smudge filter is a script.** `filter.sops.smudge` was a bare `sops decrypt`. It is `smudge-filter.sh` now: the same decryption and the same fail-closed result (git stops, nothing is written in place of the secret), plus lines under the `sops` error that say what to check for the kinds of key the file names. The storage format is part of the command, as before (`smudge-filter.sh dotenv %f`): after a change of `SOPS_STORE_FORMAT`, `install.sh` has to run again.
+- **Linked worktrees need nothing of their own.** With the submodule layout, `git status` and `git add` failed in a new linked worktree until `git submodule update --init` ran there, and secrets stayed `0644`. Now the filter and the hooks work straight after `git worktree add`.
+- **The line for a shared hooks directory changed.** v2.1.0 printed a line that named one repository by its absolute path and ran `harden-permissions.sh` of its working tree. The new line runs the installed copy of whatever repository the hook runs in, and does nothing where `install.sh` never ran. If you added the old line to your hooks, replace it.
+- **The path of the tool is in no git setting any more.** A tool directory with a space or shell syntax in its name, or outside the repository, no longer shows up in `.git/config`, and the warning about a tool outside the repository is gone.
+
+### Added
+
+- `smudge-filter.sh`.
+- `preflight.sh` no longer counts files as different sets of keys because different releases of `sops` wrote them: one decryption answers for all files with the same key groups, keys and threshold.
+- README, "Security model": what runs from where, and that a SOPS document names its own key service, so a blob from someone else can make `sops` contact a key service with your credentials.
+
 ## v2.1.0 — 2026-11-22
 
 [All changes since v2.0.0](https://github.com/realsby/sops-git-filters/compare/v2.0.0...v2.1.0)
@@ -12,7 +42,9 @@ Every release is a tag. The same notes are on the [releases page](https://github
 
   Affected: you ran `install.sh` of v1.1.0 to v2.0.0 while `core.hooksPath` named a directory that other repositories use too. A clone that uses the default `.git/hooks` is not affected.
 
-  Fix: update to v2.1.0 and run `install.sh` again in one of your clones. It removes the two hooks from the shared directory (only files that are byte for byte what `install.sh` wrote; it tells you when it finds one that was changed by hand) and never writes there again. Or delete `post-checkout` and `post-merge` from that directory yourself if they start with the line `# managed by sops-git-filters (secret file permissions)`.
+  Fix: update to v2.1.0 and run `install.sh` again in one of your clones. It removes the two hooks from the shared directory (only files that are byte for byte what `install.sh` wrote; it tells you when it finds one that was changed by hand) and never writes there again. Or delete `post-checkout` and `post-merge` from that directory yourself if their second line is `# managed by sops-git-filters (secret file permissions)`.
+
+  Advisory: [GHSA-h5c9-chvh-476w](https://github.com/realsby/sops-git-filters/security/advisories/GHSA-h5c9-chvh-476w).
 
 ### Behaviour changes
 

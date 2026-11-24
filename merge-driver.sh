@@ -73,6 +73,7 @@ PATHNAME="$5"
 
 command -v sops >/dev/null 2>&1 || fail "sops not found on PATH"
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a git repository"
+sgf_warn_if_outdated "${SCRIPT_DIR}" "${PROJECT_ROOT}"
 STORE_FORMAT="$(sgf_store_format "${PROJECT_ROOT}")" || exit 129
 OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
