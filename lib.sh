@@ -26,8 +26,9 @@
 # The version of these scripts. install.sh records it next to the copy it
 # installs under .git/, and that copy compares it with this line in the
 # checkout to notice an update that was not installed yet (see
-# sgf_warn_if_outdated). Keep it on one line, in exactly this form: it is
-# read as text, never by running the file.
+# sgf_warn_if_outdated). Keep it on one line, in exactly this form, and
+# within the first 8 KiB of this file: it is read as text, never by
+# running the file, and only that much of the file is read.
 # shellcheck disable=SC2034  # read by install.sh
 SGF_VERSION="3.0.0"
 
@@ -657,14 +658,20 @@ sgf_version_ge() {
 # does nothing until install.sh has run again. The installed copy says so.
 
 # sgf_version_of <a lib.sh> : prints the X.Y.Z of its SGF_VERSION line, or
-# nothing. The file is read as text with shell builtins: it may come from
-# a branch nobody reviewed, so it is never sourced and nothing of it is
-# printed unless it is a plain version number.
+# nothing. The file may come from a branch nobody reviewed, and the
+# installed copy reads it on its own at every git command, so:
+#   - it is never sourced, and nothing of it is printed unless it is a
+#     plain version number;
+#   - only a regular file is read, and not through a symlink: a symlink to
+#     /dev/zero or a FIFO in its place would never return;
+#   - only its first 8 KiB are read (the line is near the top), whatever
+#     the file holds and however long its lines are.
+SGF_VERSION_READ_BYTES=8192
 sgf_version_of() {
-	local line n=0 version=""
-	[[ -r "$1" ]] || return 0
-	while IFS= read -r line && [[ "${n}" -lt 80 ]]; do
-		n=$((n + 1))
+	local line text version=""
+	[[ -f "$1" && ! -L "$1" && -r "$1" ]] || return 0
+	text="$(head -c "${SGF_VERSION_READ_BYTES}" -- "$1" 2>/dev/null | tr -d '\000')" || return 0
+	while IFS= read -r line; do
 		case "${line}" in
 		'SGF_VERSION="'*'"')
 			version="${line#SGF_VERSION=\"}"
@@ -672,7 +679,7 @@ sgf_version_of() {
 			break
 			;;
 		esac
-	done <"$1"
+	done <<<"${text}"
 	! sgf_is_version "${version}" || printf '%s\n' "${version}"
 }
 

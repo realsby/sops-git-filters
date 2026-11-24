@@ -312,3 +312,67 @@ test_lib_counts_nul_bytes_and_keeps_the_content() {
 	SGF_CAPTURED=""
 	is_not sgf_split_counted
 }
+
+# ── The version line of a checkout, read as text ────
+# bounded <seconds> <command...> : run the command, kill it when it takes
+# longer. A reader that hangs must fail the test, not the test run.
+bounded() {
+	local limit="$1" pid dog rc=0
+	shift
+	"$@" &
+	pid=$!
+	(
+		sleep "${limit}"
+		kill -9 "${pid}" 2>/dev/null
+	) >/dev/null 2>&1 &
+	dog=$!
+	wait "${pid}" 2>/dev/null || rc=$?
+	kill "${dog}" 2>/dev/null || true
+	wait "${dog}" 2>/dev/null || true
+	return "${rc}"
+}
+
+# The installed copy reads lib.sh of the checkout at every git command,
+# and a checked-out branch decides what is at that path. Whatever it is,
+# the reader returns at once and prints a version number or nothing.
+test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
+	load_lib
+	assert_eq "$(sgf_version_of "${SGF_TOOL_DIR}/lib.sh")" "${SGF_VERSION}" "the version line of the real lib.sh"
+
+	printf '#!/bin/sh\nSGF_VERSION="12.34.56"\n' >plain.sh
+	assert_eq "$(sgf_version_of plain.sh)" "12.34.56" "a plain file"
+	assert_eq "$(sgf_version_of no-such-file)" "" "a file that is not there"
+
+	local out rc
+
+	# A symlink to a device that never ends.
+	ln -s /dev/zero endless.sh
+	rc=0
+	out="$(bounded 10 sgf_version_of endless.sh)" || rc=$?
+	assert_eq "${rc}:${out}" "0:" "a symlink to /dev/zero"
+
+	# A FIFO nobody writes to: opening it would block for ever.
+	mkfifo pipe.sh
+	rc=0
+	out="$(bounded 10 sgf_version_of pipe.sh)" || rc=$?
+	assert_eq "${rc}:${out}" "0:" "a FIFO"
+
+	# A symlink to a real file with a version line: not followed either.
+	ln -s plain.sh link.sh
+	assert_eq "$(sgf_version_of link.sh)" "" "a symlink to a regular file"
+
+	# One endless line, and the version line only after it: not reached.
+	{
+		awk 'BEGIN { for (i = 0; i < 20000; i++) printf "x" }'
+		printf '\nSGF_VERSION="9.9.9"\n'
+	} >long.sh
+	assert_eq "$(sgf_version_of long.sh)" "" "a version line beyond the part that is read"
+
+	# NUL bytes do not get in the way, and nothing but a version is printed.
+	printf 'a\0b\nSGF_VERSION="1.2.3"\n' >nul.sh
+	assert_eq "$(sgf_version_of nul.sh)" "1.2.3" "a file with NUL bytes"
+	# shellcheck disable=SC2016  # must stay unexpanded
+	printf 'SGF_VERSION="$(touch PWNED)"\n' >evil.sh
+	assert_eq "$(sgf_version_of evil.sh)" "" "a version line that is no version"
+	[[ ! -e PWNED ]] || fail "the version line was executed"
+}

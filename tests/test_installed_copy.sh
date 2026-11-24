@@ -203,6 +203,26 @@ test_copy_says_when_the_checkout_is_newer() {
 	assert_not_contains "${OUT}" "install.sh" "git add with a version line that is no version"
 	[[ ! -e PWNED ]] || fail "the version line of the checkout was executed"
 
+	# A branch that puts a symlink in the place of lib.sh gets nothing
+	# read: not a file that never ends, and not another file's version.
+	cp "${TOOL}/lib.sh" ../lib.sh.kept
+	set_version '"99.0.0"'
+	cp "${TOOL}/lib.sh" ../lib.sh.newer
+	rm "${TOOL}/lib.sh"
+	ln -s /dev/zero "${TOOL}/lib.sh"
+	printf 'A=5a\n' >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add with lib.sh of the checkout replaced by a symlink to /dev/zero"
+	assert_not_contains "${OUT}" "install.sh" "git add with such a symlink"
+	rm "${TOOL}/lib.sh"
+	ln -s "${PWD}/../lib.sh.newer" "${TOOL}/lib.sh"
+	printf 'A=5b\n' >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add with lib.sh of the checkout replaced by a symlink to a file"
+	assert_not_contains "${OUT}" "install.sh" "git add with such a symlink"
+	rm "${TOOL}/lib.sh"
+	cp ../lib.sh.kept "${TOOL}/lib.sh"
+
 	# install.sh brings the copy up to date and the notice goes away.
 	set_version '"99.0.0"'
 	"${TOOL}/install.sh"
