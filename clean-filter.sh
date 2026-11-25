@@ -320,6 +320,10 @@ say_key_change() { # <new document>
 	[[ -n "${before}" && -n "${after}" && "${before}" != "${after}" ]] || return 0
 	# The lines are "<key group> TAB <type> <name>" (lib.sh). The group is
 	# named only when a document has more than one.
+	#
+	# No variable name directly before a "(" (`added (x ? ...)`), not even
+	# with a space between: busybox awk up to 1.30 reads that as a call of
+	# a function of that name and fails ("Call to undefined function").
 	SGF_BEFORE="${before}" SGF_AFTER="${after}" SGF_FILE="${FILENAME}" awk '
 	function group(x) { return substr(x, 1, index(x, "\t") - 1) + 0 }
 	function shown(x) {
@@ -330,10 +334,11 @@ say_key_change() { # <new document>
 		na = split(ENVIRON["SGF_AFTER"], a, "\n")
 		for (i = 1; i <= nb; i++) { old[b[i]] = 1; if (group(b[i]) > 1) groups = 1 }
 		for (i = 1; i <= na; i++) { new[a[i]] = 1; if (group(a[i]) > 1) groups = 1 }
-		for (i = 1; i <= na; i++) if (!(a[i] in old)) added = added (added == "" ? "" : ", ") shown(a[i])
-		for (i = 1; i <= nb; i++) if (!(b[i] in new)) removed = removed (removed == "" ? "" : ", ") shown(b[i])
+		for (i = 1; i <= na; i++) if (!(a[i] in old)) added = (added == "" ? "" : added ", ") shown(a[i])
+		for (i = 1; i <= nb; i++) if (!(b[i] in new)) removed = (removed == "" ? "" : removed ", ") shown(b[i])
 		line = "sops clean filter: the keys of " ENVIRON["SGF_FILE"] " change with this version (from .sops.yaml):"
-		if (added != "") line = line " added: " added (removed != "" ? ";" : "")
+		if (added != "") line = line " added: " added
+		if (added != "" && removed != "") line = line ";"
 		if (removed != "") line = line " removed: " removed
 		print line
 	}' >&2
