@@ -51,6 +51,14 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 	root="$(CDPATH='' cd -- "${root}" && pwd -P)"
 	mkdir -p "${root}/home" "${root}/tmp" "${root}/keys" "${root}/work"
 
+	# Windows (Git Bash): what Windows needs to run a program and to find
+	# one on PATH (PATHEXT: git is git.exe there). They hold no setting of
+	# git, sops or anything else the tests look at.
+	windows_env=()
+	for var in SYSTEMROOT WINDIR PATHEXT COMSPEC; do
+		[[ -z "${!var:-}" ]] || windows_env+=("${var}=${!var}")
+	done
+
 	# The global git config is the .gitconfig of that HOME: git before
 	# 2.32 does not know GIT_CONFIG_GLOBAL and reads that file, the same
 	# one newer git reads through the variable.
@@ -72,6 +80,7 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		SGF_NO_SKIP="${SGF_NO_SKIP:-}" \
 		SGF_ALLOW_SKIP="${SGF_ALLOW_SKIP:-}" \
 		SGF_HOOK_RUNNER="${SGF_HOOK_RUNNER:-}" \
+		${windows_env[@]+"${windows_env[@]}"} \
 		bash "${HERE}/run.sh" "$@"
 fi
 
