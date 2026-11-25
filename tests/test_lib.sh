@@ -533,21 +533,11 @@ test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
 
 	local out rc
 
-	# A symlink to a device that never ends.
-	ln -s /dev/zero endless.sh
-	rc=0
-	out="$(bounded 10 sgf_version_of endless.sh)" || rc=$?
-	assert_eq "${rc}:${out}" "0:" "a symlink to /dev/zero"
-
 	# A FIFO nobody writes to: opening it would block for ever.
 	mkfifo pipe.sh
 	rc=0
 	out="$(bounded 10 sgf_version_of pipe.sh)" || rc=$?
 	assert_eq "${rc}:${out}" "0:" "a FIFO"
-
-	# A symlink to a real file with a version line: not followed either.
-	ln -s plain.sh link.sh
-	assert_eq "$(sgf_version_of link.sh)" "" "a symlink to a regular file"
 
 	# One endless line, and the version line only after it: not reached.
 	{
@@ -563,11 +553,23 @@ test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
 	printf 'SGF_VERSION="$(touch PWNED)"\n' >evil.sh
 	assert_eq "$(sgf_version_of evil.sh)" "" "a version line that is no version"
 	[[ ! -e PWNED ]] || fail "the version line was executed"
+
+	needs_symlinks
+	# A symlink to a device that never ends.
+	ln -s /dev/zero endless.sh
+	rc=0
+	out="$(bounded 10 sgf_version_of endless.sh)" || rc=$?
+	assert_eq "${rc}:${out}" "0:" "a symlink to /dev/zero"
+
+	# A symlink to a real file with a version line: not followed either.
+	ln -s plain.sh link.sh
+	assert_eq "$(sgf_version_of link.sh)" "" "a symlink to a regular file"
 }
 
 # A symlink anywhere below the root, in a directory's place or in the
 # file's, is found; one above the root is not looked at (audit A-14).
 test_lib_through_symlink() {
+	needs_symlinks
 	load_lib
 	mkdir -p root/a/b elsewhere/b
 	: >root/a/b/file

@@ -326,6 +326,7 @@ test_install_decrypts_several_dotenv_files() {
 # comes from `git --literal-pathspecs`) must not hide the secrets from
 # install.sh's decrypt pass or from preflight.sh.
 test_install_and_preflight_ignore_pathspec_settings_of_the_caller() {
+	needs_file_name ':(literal)b.secret'
 	new_repo origin
 	printf 'A=1\n' >.env
 	printf 'B=2\n' >':(literal)b.secret'
@@ -455,6 +456,7 @@ test_install_does_not_write_a_file_with_nul_bytes_damaged() {
 # A-14). Git does not follow such a path either. The permission pass
 # does not chmod through a symlinked directory.
 test_install_does_not_write_through_a_link() {
+	needs_symlinks
 	new_repo origin
 	mkdir secrets
 	printf 'A=1\n' >.env
@@ -490,13 +492,13 @@ test_install_does_not_write_through_a_link() {
 	assert_eq "$(git hash-object --no-filters ../outside/target.txt)" "$(blob_id .env)" "the target of the symlink"
 	assert_eq "$(git hash-object --no-filters ../outside/app.secret)" "$(blob_id secrets/app.secret)" "the file in the symlinked directory"
 	assert_eq "$(git hash-object --no-filters ../outside/hard.txt)" "$(blob_id hard.secret)" "the other name of the hard link"
-	assert_eq "$(mode_of ../outside/target.txt)" "644" "mode of the target of the symlink"
-	assert_eq "$(mode_of ../outside/app.secret)" "644" "mode of the file in the symlinked directory"
+	assert_mode ../outside/target.txt "644" "mode of the target of the symlink"
+	assert_mode ../outside/app.secret "644" "mode of the file in the symlinked directory"
 	[[ -L .env && -L secrets ]] || fail "a symlink was replaced"
 	# The secret without a link is decrypted as before.
 	assert_contains "${OUT}" "Re-smudged plain.secret" "install.sh output"
 	assert_eq "$(cat plain.secret)" "D=4" "working copy of the secret without a link"
-	assert_eq "$(mode_of plain.secret)" "600" "mode of the secret without a link"
+	assert_mode plain.secret "600" "mode of the secret without a link"
 }
 
 # cr_bytes <file> : how many CR bytes the file holds
@@ -527,7 +529,7 @@ test_install_decrypts_a_crlf_checkout_of_the_ciphertext() {
 		assert_contains "${OUT}" "Re-smudged .env" "install.sh output (${format})"
 		assert_eq "$(cat .env)" "$(printf 'A=1\nB=2')" "working copy (${format})"
 		assert_eq "$(cr_bytes .env)" "0" "CR bytes in the plaintext (${format})"
-		assert_eq "$(mode_of .env)" "600" "mode (${format})"
+		assert_mode .env "600" "mode (${format})"
 		assert_eq "$(git status --porcelain)" "" "git status (${format})"
 		cd ..
 	done

@@ -420,6 +420,7 @@ test_clean_printed_commands_take_the_path_literally() {
 # the edits in b.secret.
 test_clean_printed_commands_keep_a_trailing_newline() {
 	local file=$'b.secret\n' line
+	needs_file_name "${file}"
 	new_repo repo
 	# *.secret does not match a name that ends in a newline.
 	printf 'b.secret? filter=sops diff=sops\n' >>.gitattributes
@@ -760,6 +761,7 @@ test_clean_empty_file_keeps_its_blob() {
 # re-encrypted, so the file never stops showing as modified.
 test_clean_path_that_looks_like_an_index_stage() {
 	local file id
+	needs_file_name '2:prod.secret'
 	new_repo repo
 	printf '1:x filter=sops diff=sops\n' >>.gitattributes
 	git add .gitattributes

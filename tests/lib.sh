@@ -238,6 +238,102 @@ mode_of() {
 	stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
+# ── What the file system can hold ────
+# Git Bash on Windows (NTFS) keeps no Unix file modes, makes no symbolic
+# links (ln -s copies the target, or fails when there is none) and takes
+# no file name with a colon, a backslash or a control character. A test
+# of such a feature asks first and skips itself where it is missing;
+# tests/run.sh lets the Windows job skip exactly those (SGF_ALLOW_SKIP).
+
+# file_modes_work : true when chmod 600 leaves a file at mode 600
+file_modes_work() {
+	local f rc=0
+	f="$(mktemp)"
+	chmod 600 "${f}"
+	[[ "$(mode_of "${f}")" == "600" ]] || rc=1
+	rm -f "${f}"
+	return "${rc}"
+}
+
+# needs_file_modes : skip the rest of the test where file_modes_work fails
+needs_file_modes() {
+	file_modes_work || skip "this file system keeps no Unix file modes (chmod 600 changes nothing)"
+}
+
+# assert_mode <file> <mode> <what> : the mode of <file>, where the file
+# system keeps modes. Where it keeps none there is no mode to check: the
+# tests of harden-permissions.sh skip themselves there, and a test of
+# something else (a worktree, a merge) goes on.
+assert_mode() {
+	file_modes_work || return 0
+	assert_eq "$(mode_of "$1")" "$2" "$3"
+}
+
+# symlinks_work : true when ln -s makes a symbolic link
+symlinks_work() {
+	local dir rc=0
+	dir="$(mktemp -d)"
+	{ ln -s target "${dir}/link" && [[ -L "${dir}/link" ]]; } 2>/dev/null || rc=1
+	rm -f "${dir}/link"
+	rmdir "${dir}"
+	return "${rc}"
+}
+
+# needs_symlinks : skip the rest of the test where symlinks_work fails
+needs_symlinks() {
+	symlinks_work || skip "this system makes no symbolic links (ln -s)"
+}
+
+# guard_hook : encryption-guard.sh as the pre-commit hook of the
+# repository at hand: a symlink, as the README says. Where ln -s makes
+# none (Git Bash on Windows), a hook that runs it, as the README says
+# for Windows.
+guard_hook() {
+	mkdir -p .git/hooks
+	if symlinks_work; then
+		ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	else
+		printf '#!/bin/sh\nexec %s/encryption-guard.sh\n' "${TOOL}" >.git/hooks/pre-commit
+		chmod +x .git/hooks/pre-commit
+	fi
+}
+
+# file_system_takes <name...> : sort the names into TAKEN and REFUSED:
+# can a file of that name be made here, and does git list it under that
+# very name? Git Bash on Windows makes a file for a name with a colon,
+# but under another name (the colon becomes a private-use character).
+TAKEN=()
+REFUSED=()
+file_system_takes() {
+	local dir name
+	TAKEN=()
+	REFUSED=()
+	dir="$(mktemp -d)"
+	git init -q "${dir}"
+	for name in "$@"; do
+		if (cd "${dir}" && printf 'x\n' >"./${name}") 2>/dev/null &&
+			[[ "$(git -C "${dir}" ls-files -o -z -- ":(literal)${name}" | tr '\0' '/')" == "${name}/" ]]; then
+			TAKEN+=("${name}")
+		else
+			REFUSED+=("${name}")
+		fi
+	done
+	rm -rf "${dir}"
+}
+
+# needs_file_name <name> : skip the rest of the test where the file
+# system does not take that name (file_system_takes)
+needs_file_name() {
+	file_system_takes "$1"
+	[[ ${#REFUSED[@]} -eq 0 ]] || skip "this file system takes no file named $(printf '%q' "$1")"
+}
+
+# skip_if_refused : at the end of a test that ran with the names the file
+# system takes, skip if it refused any (the others passed)
+skip_if_refused() {
+	[[ ${#REFUSED[@]} -eq 0 ]] || skip "this file system takes no file named $(printf '%q ' "${REFUSED[@]}")(the other names passed)"
+}
+
 # add_index_entries <count> : put <count> more files into the index, the
 # way a large repository has them: filler/dNNN/fNNNNNN.txt, spread over
 # 300 directories, all with the same small blob. Only the index gets

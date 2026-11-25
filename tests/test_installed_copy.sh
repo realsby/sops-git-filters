@@ -31,7 +31,7 @@ test_copy_a_branch_cannot_swap_the_code_git_runs() {
 	# Look at their branch, edit a secret there, come back and merge it.
 	chmod 644 .env
 	git checkout -q theirs
-	assert_eq "$(mode_of .env)" "600" "mode after the checkout (the installed hook ran)"
+	assert_mode .env "600" "mode after the checkout (the installed hook ran)"
 	git status >/dev/null
 	git diff >/dev/null
 	printf 'A=1\nB=2\nC=theirs\nD=4\n' >.env
@@ -75,7 +75,7 @@ test_copy_works_in_a_linked_worktree_without_the_tool() {
 	cd ../linked || exit 1
 	[[ ! -e utilities ]] || fail "the tool is in the linked worktree, the test would prove nothing"
 	assert_eq "$(cat .env)" "A=1" "working copy in the linked worktree"
-	assert_eq "$(mode_of .env)" "600" "mode in the linked worktree (the hook ran at worktree add)"
+	assert_mode .env "600" "mode in the linked worktree (the hook ran at worktree add)"
 
 	printf 'A=2\n' >.env
 	run git add .env
@@ -85,7 +85,7 @@ test_copy_works_in_a_linked_worktree_without_the_tool() {
 	chmod 644 .env
 	git checkout -q HEAD~1
 	assert_eq "$(cat .env)" "A=1" "working copy after a checkout in the linked worktree"
-	assert_eq "$(mode_of .env)" "600" "mode after a checkout in the linked worktree"
+	assert_mode .env "600" "mode after a checkout in the linked worktree"
 }
 
 test_copy_survives_a_move_of_the_repository() {
@@ -204,26 +204,6 @@ test_copy_says_when_the_checkout_is_newer() {
 	assert_not_contains "${OUT}" "install.sh" "git add with a version line that is no version"
 	[[ ! -e PWNED ]] || fail "the version line of the checkout was executed"
 
-	# A branch that puts a symlink in the place of lib.sh gets nothing
-	# read: not a file that never ends, and not another file's version.
-	cp "${TOOL}/lib.sh" ../lib.sh.kept
-	set_version '"99.0.0"'
-	cp "${TOOL}/lib.sh" ../lib.sh.newer
-	rm "${TOOL}/lib.sh"
-	ln -s /dev/zero "${TOOL}/lib.sh"
-	printf 'A=5a\n' >.env
-	run git add .env
-	assert_eq "${RC}" "0" "git add with lib.sh of the checkout replaced by a symlink to /dev/zero"
-	assert_not_contains "${OUT}" "install.sh" "git add with such a symlink"
-	rm "${TOOL}/lib.sh"
-	ln -s "${PWD}/../lib.sh.newer" "${TOOL}/lib.sh"
-	printf 'A=5b\n' >.env
-	run git add .env
-	assert_eq "${RC}" "0" "git add with lib.sh of the checkout replaced by a symlink to a file"
-	assert_not_contains "${OUT}" "install.sh" "git add with such a symlink"
-	rm "${TOOL}/lib.sh"
-	cp ../lib.sh.kept "${TOOL}/lib.sh"
-
 	# install.sh brings the copy up to date and the notice goes away.
 	set_version '"99.0.0"'
 	"${TOOL}/install.sh"
@@ -231,6 +211,25 @@ test_copy_says_when_the_checkout_is_newer() {
 	printf 'A=6\n' >.env
 	run git add .env
 	assert_not_contains "${OUT}" "install.sh" "git add after install.sh"
+
+	# A branch that puts a symlink in the place of lib.sh gets nothing
+	# read: not a file that never ends, and not another file's version
+	# (newer than the installed 99.0.0).
+	needs_symlinks
+	set_version '"100.0.0"'
+	cp "${TOOL}/lib.sh" ../lib.sh.newer
+	rm "${TOOL}/lib.sh"
+	ln -s /dev/zero "${TOOL}/lib.sh"
+	printf 'A=7a\n' >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add with lib.sh of the checkout replaced by a symlink to /dev/zero"
+	assert_not_contains "${OUT}" "install.sh" "git add with such a symlink"
+	rm "${TOOL}/lib.sh"
+	ln -s "${PWD}/../lib.sh.newer" "${TOOL}/lib.sh"
+	printf 'A=7b\n' >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add with lib.sh of the checkout replaced by a symlink to a file"
+	assert_not_contains "${OUT}" "install.sh" "git add with such a symlink"
 }
 
 # ── An incomplete copy fails closed ────
@@ -326,7 +325,7 @@ test_smudge_knows_the_storage_format_before_the_conf_is_checked_out() {
 	assert_eq "${RC}" "0" "git worktree add in a repository that stores dotenv"
 	assert_eq "$(cat ../linked/.env)" "A=1" "working copy in the linked worktree"
 	assert_eq "$(cat ../linked/stacks/.env)" "B=2" "working copy in the linked worktree"
-	assert_eq "$(mode_of ../linked/.env)" "600" "mode in the linked worktree"
+	assert_mode ../linked/.env "600" "mode in the linked worktree"
 	assert_eq "$(git -C ../linked status --porcelain)" "" "git status in the linked worktree"
 
 	printf 'A=2\n' >../linked/.env

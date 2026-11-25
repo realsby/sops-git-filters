@@ -189,6 +189,7 @@ test_guard_checks_the_whole_repository_from_a_subdirectory() {
 
 # ":2:prod.secret" is git syntax for "index stage 2 of prod.secret".
 test_guard_checks_files_named_like_an_index_stage() {
+	needs_file_name '2:prod.secret'
 	unfiltered_repo
 	printf 'TOKEN=plaintext\n' >'2:prod.secret'
 	git add './2:prod.secret'
@@ -253,6 +254,7 @@ test_guard_blocks_plaintext_after_a_nul_byte() {
 
 # Git never filters a symlink, so there is nothing to encrypt.
 test_guard_ignores_symlinks() {
+	needs_symlinks
 	unfiltered_repo
 	ln -s ../shared/.env .env
 	git add .env
@@ -300,8 +302,7 @@ test_guard_blocks_a_filter_line_in_info_attributes() {
 	printf 'API_KEY=old\n' >.env
 	git add .env
 	git commit -q -m "encrypted .env"
-	mkdir -p .git/hooks
-	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	guard_hook
 
 	local info
 	info="$(git rev-parse --git-path info/attributes)"
@@ -557,6 +558,7 @@ test_guard_tells_intent_to_add_from_staged_under_awkward_names() {
 	unfiltered_repo
 	local ita=$'ita\t"q" back\\slash \303\251.secret'
 	local staged=$'staged\t"q" back\\slash \303\251.secret'
+	needs_file_name "${ita}"
 	printf 'PW=hunter2\n' >"${ita}"
 	git add -N -- "${ita}"
 	run "${TOOL}/encryption-guard.sh"
@@ -655,6 +657,7 @@ test_guard_blocks_when_sops_yaml_is_missing() {
 
 # README: ln -s ../../utilities/sops-git-filters/encryption-guard.sh .git/hooks/pre-commit
 test_guard_works_as_a_symlinked_hook() {
+	needs_symlinks
 	unfiltered_repo
 	mkdir -p .git/hooks
 	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
@@ -697,8 +700,7 @@ test_guard_names_an_unfinished_format_change() {
 # the hook runs. So it must not block a commit (audit A-05).
 test_guard_passes_while_a_secret_is_intent_to_add() {
 	new_repo repo
-	mkdir -p .git/hooks
-	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	guard_hook
 	printf 'PW=hunter2\n' >a.secret
 	printf 'TOKEN=abc\n' >b.secret
 	git add -N a.secret b.secret
