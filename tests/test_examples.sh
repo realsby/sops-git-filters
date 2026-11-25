@@ -18,11 +18,14 @@ test_examples_gitattributes_covers_the_dotenv_names() {
 		for attr in filter diff merge; do
 			assert_eq "$(git check-attr "${attr}" -- "${name}")" "${name}: ${attr}: sops" "attribute of ${name}"
 		done
+		# -text: no line-ending conversion, which would put CRs into the
+		# ciphertext with core.autocrlf=true (audit A-07).
+		assert_eq "$(git check-attr text -- "${name}")" "${name}: text: unset" "attribute of ${name}"
 	done
-	# The template: no filter, and an ordinary text file for diff and merge
-	# ("unset" would make it binary).
+	# The template: no filter, and an ordinary text file for diff, merge
+	# and line endings ("unset" would make it binary).
 	for name in .env.example deep/.env.example; do
-		for attr in filter diff merge; do
+		for attr in filter diff merge text; do
 			assert_eq "$(git check-attr "${attr}" -- "${name}")" "${name}: ${attr}: unspecified" "attribute of ${name}"
 		done
 	done

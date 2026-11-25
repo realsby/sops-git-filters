@@ -410,7 +410,8 @@ fi
 # managed files land in the working tree as raw ciphertext. Decrypt
 # them in place — but ONLY when the working copy is byte-identical to
 # the blob in the index (proof the smudge never ran and there are no
-# local edits to lose).
+# local edits to lose), or is that blob with a CR before its line ends
+# (core.autocrlf, see below).
 #
 # The same walk answers a second question: is the version git holds
 # encrypted at all? A blob that is not a SOPS document was committed in
@@ -484,7 +485,18 @@ while IFS= read -r -d '' record; do
 
 	[[ -f "${f}" ]] || continue
 	worktree_sha=$(git hash-object --no-filters -- "${f}")
-	[[ "${worktree_sha}" == "${index_sha}" ]] || continue
+	if [[ "${worktree_sha}" != "${index_sha}" ]]; then
+		# core.autocrlf=true (or eol=crlf) on a path without -text: the
+		# checkout before the filters existed put a CR before every LF of
+		# the ciphertext. sops never writes a CR into a document, so a
+		# copy that is the stored blob once its CRs are gone holds nothing
+		# of its own to lose, and it is decrypted like the others. The
+		# clean filter takes such a copy for the stored blob as well.
+		# Before, it stayed ciphertext while this script exited 0 (audit
+		# A-07). What is decrypted is the blob, not this copy.
+		worktree_sha=$(tr -d '\r' <"${f}" | git -C "${TARGET_ROOT}" hash-object --stdin)
+		[[ "${worktree_sha}" == "${index_sha}" ]] || continue
+	fi
 
 	# Working copy == stored ciphertext → smudge never ran. Decrypt it,
 	# but not through a link. The plaintext is written to "${f}", and that
@@ -539,7 +551,7 @@ done < <(sgf_ls_managed "${TARGET_ROOT}")
 
 if [[ "${FOUND_ANY}" -eq 0 ]]; then
 	echo "Note: no tracked files carry 'filter=sops' in .gitattributes yet." >&2
-	echo "Add lines like:  .env filter=sops diff=sops" >&2
+	echo "Add lines like:  .env filter=sops diff=sops -text" >&2
 fi
 
 # ── Tighten permissions on the decrypted files ────

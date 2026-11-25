@@ -164,13 +164,13 @@ creation_rules:
 **3. Mark files in `.gitattributes`** (see [`examples/gitattributes`](examples/gitattributes)):
 
 ```
-.env           filter=sops diff=sops merge=sops
-.env.*         filter=sops diff=sops merge=sops
-*.env          filter=sops diff=sops merge=sops
-.env.example   !filter !diff !merge
+.env           filter=sops diff=sops merge=sops -text
+.env.*         filter=sops diff=sops merge=sops -text
+*.env          filter=sops diff=sops merge=sops -text
+.env.example   !filter !diff !merge !text
 ```
 
-A pattern without a slash matches at every depth. The wildcards also cover `.env.local`, `.env.production` and `prod.env`: a name that a hand-written list misses is committed in plaintext without a word, and that is the mistake to rule out. Their price is the last line, which takes a template without secrets out again (it must come after the others; `!` and not `-`, because `-diff` would make git treat the file as binary). A template you forget to list is stored encrypted, which is harmless. The rule in `.sops.yaml` must match the same names.
+A pattern without a slash matches at every depth. The wildcards also cover `.env.local`, `.env.production` and `prod.env`: a name that a hand-written list misses is committed in plaintext without a word, and that is the mistake to rule out. Their price is the last line, which takes a template without secrets out again (it must come after the others; `!` and not `-`, because `-diff` would make git treat the file as binary). `-text` keeps git from converting line endings, see [`core.autocrlf`](#storage-formats-json-vs-dotenv) below. A template you forget to list is stored encrypted, which is harmless. The rule in `.sops.yaml` must match the same names.
 
 `merge=sops` is optional but you want it as soon as two branches can change the same secret: see [Merging secrets](#merging-secrets).
 
@@ -227,7 +227,7 @@ SOPS_STORE_FORMAT=dotenv
 
 It also refuses the result if any value came back unencrypted: a creation rule with `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`, or a key ending in `_unencrypted` (the `sops` default suffix).
 
-**`core.autocrlf` needs `-text`, for every storage format.** With `core.autocrlf=true` (common on Windows), git adds CRLF line endings to the ciphertext before the smudge filter sees it; `sops` then fails to decrypt the dotenv ciphertext and the checkout stops. Mark the managed paths `-text` in `.gitattributes`, for example `.env filter=sops diff=sops merge=sops -text`. Do this for the json format too: there later checkouts decrypt, but a fresh clone gets CRLF ciphertext in the working tree, and the re-smudge pass in `install.sh` does not recognise that copy as ciphertext. It leaves the file encrypted, prints nothing about it and still exits 0. The same happens to dotenv files on a fresh clone.
+**`core.autocrlf` needs `-text`, for every storage format.** With `core.autocrlf=true` (common on Windows), git adds CRLF line endings to the ciphertext before the smudge filter sees it; `sops` then fails to decrypt the dotenv ciphertext and the checkout stops. Mark the managed paths `-text` in `.gitattributes`, as the walkthrough and [`examples/gitattributes`](examples/gitattributes) do: `.env filter=sops diff=sops merge=sops -text`. Do this for the json format too, where checkouts still decrypt: without `-text` a fresh clone holds the ciphertext with CRLF line endings until `install.sh` runs, and `git add` may warn that LF will be replaced by CRLF. `install.sh` decrypts such a copy all the same, in both formats: without its CRs it is the stored blob. The plaintext it writes has LF line endings, as the smudge filter's has, and `git status` is clean.
 
 Pick the format **before the first encrypted commit**. Migrating later, on a clone with the files decrypted:
 
@@ -288,7 +288,7 @@ Git merges what it stores, and for a SOPS-managed file that is ciphertext. Every
 `merge-driver.sh` merges the **plaintext** instead. It decrypts the three versions (common ancestor, ours, theirs), runs `git merge-file` on them and encrypts the result with the clean filter. Turn it on per path:
 
 ```
-.env   filter=sops diff=sops merge=sops
+.env   filter=sops diff=sops merge=sops -text
 ```
 
 `install.sh` registers the driver (`merge.sops.driver`), so existing clones must run it once more.

@@ -498,3 +498,66 @@ test_install_does_not_write_through_a_link() {
 	assert_eq "$(cat plain.secret)" "D=4" "working copy of the secret without a link"
 	assert_eq "$(mode_of plain.secret)" "600" "mode of the secret without a link"
 }
+
+# cr_bytes <file> : how many CR bytes the file holds
+cr_bytes() {
+	tr -cd '\r' <"$1" | wc -c | tr -d ' '
+}
+
+# core.autocrlf=true and no -text: a clone made before the filters were
+# set up holds the ciphertext with CRLF line endings. Without its CRs it
+# is the stored blob, and install.sh decrypts it, as it decrypts an LF
+# copy (audit A-07); before, it left the ciphertext there and exited 0.
+# install.sh runs from the checkout of the tool here: the clone holds
+# the scripts with CRLF line endings too, and bash cannot run them.
+test_install_decrypts_a_crlf_checkout_of_the_ciphertext() {
+	local format
+	for format in json dotenv; do
+		new_repo "origin-${format}" "${format}"
+		printf 'A=1\nB=2\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+		cd ..
+		git clone -q -c core.autocrlf=true "origin-${format}" "clone-${format}"
+		cd "clone-${format}" || exit 1
+		assert_ne "$(cr_bytes .env)" "0" "CR bytes in the ciphertext of the clone (${format})"
+
+		run "${SGF_TOOL_DIR}/install.sh"
+		assert_eq "${RC}" "0" "install.sh exit status (${format})"
+		assert_contains "${OUT}" "Re-smudged .env" "install.sh output (${format})"
+		assert_eq "$(cat .env)" "$(printf 'A=1\nB=2')" "working copy (${format})"
+		assert_eq "$(cr_bytes .env)" "0" "CR bytes in the plaintext (${format})"
+		assert_eq "$(mode_of .env)" "600" "mode (${format})"
+		assert_eq "$(git status --porcelain)" "" "git status (${format})"
+		cd ..
+	done
+}
+
+# With -text, as examples/gitattributes has it, git converts no line
+# endings: no CR in the ciphertext of a new clone, none in the
+# plaintext, and a later checkout of a dotenv secret decrypts (sops
+# cannot read a dotenv document with CRLF line endings).
+test_install_with_the_example_attributes_and_autocrlf() {
+	new_repo origin dotenv
+	cp "${SGF_TOOL_DIR}/examples/gitattributes" .gitattributes
+	printf 'A=1\n' >.env
+	git add .gitattributes .env
+	git commit -q -m "add .env with the example attributes"
+	printf 'A=2\n' >.env
+	git commit -q -am "change .env"
+	cd ..
+	git clone -q -c core.autocrlf=true origin clone
+	cd clone || exit 1
+	assert_eq "$(cr_bytes .env)" "0" "CR bytes in the ciphertext of the clone"
+
+	run "${SGF_TOOL_DIR}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(cat .env)" "A=2" "working copy"
+	assert_eq "$(cr_bytes .env)" "0" "CR bytes in the plaintext"
+
+	run git checkout -q HEAD~1
+	assert_eq "${RC}" "0" "git checkout of the earlier version"
+	assert_eq "$(cat .env)" "A=1" "working copy after the checkout"
+	assert_eq "$(cr_bytes .env)" "0" "CR bytes after the checkout"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
