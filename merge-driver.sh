@@ -31,7 +31,9 @@
 # ║                   stored. OUR version is kept and the conflict   ║
 # ║                   is reported; take a side with                  ║
 # ║                   `git checkout --theirs|--ours -- <file>` or    ║
-# ║                   use `git mergetool`, then `git add`.           ║
+# ║                   use `git mergetool`, then `git add`. It        ║
+# ║                   writes plaintext files next to the secret;     ║
+# ║                   README, "Merging secrets", says which.         ║
 # ║                                                                  ║
 # ║  Plaintext on disk: the three decrypted versions exist for the   ║
 # ║  length of the merge in a private directory (mode 0700) under    ║
@@ -161,7 +163,11 @@ if [[ "${merge_status}" -ne 0 && "${STORE_FORMAT}" == "dotenv" ]]; then
 	echo "sops merge driver: CONFLICT in ${PATHNAME}: both sides changed the same lines." >&2
 	echo "  Conflict markers cannot be stored in the dotenv format, so OUR version was kept." >&2
 	echo "  Take a side:  git checkout --theirs -- ${PATHNAME}   (or --ours)" >&2
-	echo "  or merge by hand with git mergetool.  Then: git add ${PATHNAME}" >&2
+	echo "  or merge by hand with git mergetool. It writes the three versions in plaintext next to" >&2
+	echo "  the file and leaves a plaintext backup ${PATHNAME}.orig, which git add -A could commit." >&2
+	echo "  Set first:  git config mergetool.writeToTemp true   (its temporary files go elsewhere)" >&2
+	echo "              git config mergetool.keepBackup false   (no backup)" >&2
+	echo "  Then: git add ${PATHNAME}" >&2
 	exit 1
 fi
 
