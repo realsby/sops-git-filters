@@ -27,7 +27,9 @@
 # ║  Usage:                                                          ║
 # ║    preflight.sh [--quiet]                                        ║
 # ║                                                                  ║
-# ║    --quiet   print nothing when decryption works                 ║
+# ║    --quiet   print nothing when decryption works; the warning    ║
+# ║              about managed files that are not SOPS documents     ║
+# ║              (they were not checked) still goes to stderr        ║
 # ║                                                                  ║
 # ║  Exit status:                                                    ║
 # ║    0  decryption works (or no SOPS-managed file is tracked)      ║
@@ -228,7 +230,13 @@ if [[ "${QUIET}" -eq 0 ]]; then
 	else
 		echo "preflight: decryption works (${checked} set(s) of keys checked)."
 	fi
-	if [[ "${not_documents}" -ne 0 ]]; then
-		echo "preflight: ${not_documents} SOPS-managed file(s) are not encrypted SOPS documents in the ${STORE_FORMAT} format and were not checked; run install.sh for the list."
-	fi
+fi
+# A warning, not a report of success: --quiet does not hide it (audit
+# S4). The exit status stays 0: these files (committed without the
+# filter, or in the other storage format) cannot be decrypted with any
+# key, so they say nothing about the access this script asks about.
+# install.sh lists them, and the guard blocks commits while they are
+# tracked.
+if [[ "${not_documents}" -ne 0 ]]; then
+	echo "preflight: ${not_documents} SOPS-managed file(s) are not encrypted SOPS documents in the ${STORE_FORMAT} format and were not checked; run install.sh for the list." >&2
 fi

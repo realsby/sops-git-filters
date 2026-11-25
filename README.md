@@ -330,7 +330,7 @@ Git removes a SOPS-managed file from the working tree *before* it runs the smudg
 ./utilities/sops-git-filters/preflight.sh && git pull
 ```
 
-Exit status 0: decryption works. 1: it does not, so do not pull, check out, merge or rebase now. 2: the check could not run or is incomplete (not a repository, `sops` missing, the index or a stored blob unreadable). It writes nothing and prints no plaintext; `--quiet` prints nothing at all when decryption works. It cannot know the commits you have not fetched yet: they may name other keys. A script or an assistant that runs git for you should call it before any command that changes the working tree.
+Exit status 0: decryption works. 1: it does not, so do not pull, check out, merge or rebase now. 2: the check could not run or is incomplete (not a repository, `sops` missing, the index or a stored blob unreadable). It writes nothing and prints no plaintext; `--quiet` prints nothing when decryption works, except the warning (on stderr) that some SOPS-managed files are not encrypted SOPS documents and were not checked. It cannot know the commits you have not fetched yet: they may name other keys. A script or an assistant that runs git for you should call it before any command that changes the working tree.
 
 **What a stopped command leaves behind** (measured with git 2.54):
 
