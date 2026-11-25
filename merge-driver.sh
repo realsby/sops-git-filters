@@ -31,7 +31,9 @@
 # ║                   stored. OUR version is kept and the conflict   ║
 # ║                   is reported; take a side with                  ║
 # ║                   `git checkout --theirs|--ours -- <file>` or    ║
-# ║                   use `git mergetool`, then `git add`.           ║
+# ║                   use `git mergetool`, then `git add`. It        ║
+# ║                   writes plaintext files next to the secret;     ║
+# ║                   README, "Merging secrets", says which.         ║
 # ║                                                                  ║
 # ║  Plaintext on disk: the three decrypted versions exist for the   ║
 # ║  length of the merge in a private directory (mode 0700) under    ║
@@ -76,6 +78,9 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside 
 sgf_warn_if_outdated "${SCRIPT_DIR}" "${PROJECT_ROOT}"
 STORE_FORMAT="$(sgf_store_format "${PROJECT_ROOT}")" || exit 129
 OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
+# The file in the git commands the messages print (lib.sh): the full
+# path, quoted, taken literally, ready to paste in any directory.
+PASTE_SPEC="$(sgf_paste_pathspec "${PROJECT_ROOT}/${PATHNAME}")"
 
 case "${STORE_FORMAT}" in
 json) DECRYPT_ARGS=(--input-type json --output-type binary) ;;
@@ -160,8 +165,12 @@ fi
 if [[ "${merge_status}" -ne 0 && "${STORE_FORMAT}" == "dotenv" ]]; then
 	echo "sops merge driver: CONFLICT in ${PATHNAME}: both sides changed the same lines." >&2
 	echo "  Conflict markers cannot be stored in the dotenv format, so OUR version was kept." >&2
-	echo "  Take a side:  git checkout --theirs -- ${PATHNAME}   (or --ours)" >&2
-	echo "  or merge by hand with git mergetool.  Then: git add ${PATHNAME}" >&2
+	echo "  Take a side:  git checkout --theirs -- ${PASTE_SPEC}   (or --ours)" >&2
+	echo "  or merge by hand with git mergetool. It writes the three versions in plaintext next to" >&2
+	echo "  the file and leaves a plaintext backup ${PATHNAME}.orig, which git add -A could commit." >&2
+	echo "  Set first:  git config mergetool.writeToTemp true   (its temporary files go elsewhere)" >&2
+	echo "              git config mergetool.keepBackup false   (no backup)" >&2
+	echo "  Then: git add -- ${PASTE_SPEC}" >&2
 	exit 1
 fi
 
@@ -174,7 +183,7 @@ cat "${WORK}/result" >"${OURS}"
 
 if [[ "${merge_status}" -ne 0 ]]; then
 	echo "sops merge driver: CONFLICT in ${PATHNAME}. The working copy has conflict markers, in plaintext." >&2
-	echo "  Edit the file, then: git add ${PATHNAME}" >&2
+	echo "  Edit the file, then: git add -- ${PASTE_SPEC}" >&2
 	exit 1
 fi
 exit 0

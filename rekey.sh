@@ -35,7 +35,8 @@
 # ║                                                                  ║
 # ║    --dry-run   show which files would change, stage nothing      ║
 # ║    <path>      limit to these files (default: every tracked      ║
-# ║                file with filter=sops)                            ║
+# ║                file with filter=sops in the .gitattributes       ║
+# ║                files of the index)                               ║
 # ║                                                                  ║
 # ║  Exit status: 0 done (or nothing to do), 1 at least one file     ║
 # ║  could not be re-keyed.                                          ║
@@ -117,7 +118,7 @@ rekeyed=0
 unchanged=0
 failed=0
 
-# rekey_entries: stdin is the answer of `git check-attr -z filter` for
+# rekey_entries: stdin is the answer of `git check-attr --cached -z filter` for
 # the index entries collected by rekey_index, in the same order.
 #
 # This function runs as the last part of a pipeline whose status is
@@ -216,8 +217,12 @@ rekey_index() {
 		echo "No tracked files match."
 		return 0
 	fi
+	# --cached: the attributes of the .gitattributes files in the index.
+	# rekey.sh stages its result, and the commit that follows carries
+	# those, not an edit of .gitattributes that is not staged; the guard
+	# reads them the same way (audit A-11).
 	printf '%s\0' "${INDEX_PATHS[@]}" |
-		git check-attr --stdin -z filter |
+		git check-attr --cached --stdin -z filter |
 		rekey_entries
 }
 

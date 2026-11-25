@@ -52,7 +52,8 @@
 # ║  checked out BEFORE the filters were configured still hold raw   ║
 # ║  ciphertext in the working tree — they are decrypted in place    ║
 # ║  (only when the working copy is byte-identical to the stored     ║
-# ║  blob, so local edits are never touched).                        ║
+# ║  blob, so local edits are never touched, and never through a     ║
+# ║  symlink or a hard link, which could lead out of the tree).      ║
 # ║                                                                  ║
 # ║  Then permissions are tightened: git cannot store mode 0600, so  ║
 # ║  smudged secrets land with the caller's umask (0644 by default   ║
@@ -68,7 +69,10 @@
 # ║  other repositories use too, nothing is written there (a hook    ║
 # ║  in it runs for every one of them); the line to add by hand is   ║
 # ║  printed instead. Hooks that an older install.sh wrote into      ║
-# ║  such a directory are removed.                                   ║
+# ║  such a directory are removed. In the repository's own           ║
+# ║  directory, an existing hook is replaced only when it is, byte   ║
+# ║  for byte, one that install.sh wrote; for any other the line is  ║
+# ║  printed too.                                                    ║
 # ║                                                                  ║
 # ║  core.trustctime is set to false. The chmod changes a file's     ║
 # ║  inode change time, and git would take the secret for locally    ║
@@ -83,13 +87,21 @@
 # ║                                                                  ║
 # ║  Exit status:                                                    ║
 # ║    0  filters and hooks are in place, nothing left to do         ║
-# ║    1  nothing was installed (not a repo, sops missing or too     ║
-# ║       old, bad .sops-filter.conf, conflicting git config)        ║
+# ║    1  the filters were not set up (not a repo, sops missing or   ║
+# ║       too old, bad .sops-filter.conf, filter.sops.process set    ║
+# ║       outside .git/config). The repository is as it was, except  ║
+# ║       that one set up before gets filter.sops.required=true      ║
+# ║       back, which keeps git fail-closed. One exit 1 comes later: ║
+# ║       when another git config file overrides the filter          ║
+# ║       settings. Then .git/config holds them already, and         ║
+# ║       .git/sops-git-filters/ the scripts, but no hooks were      ║
+# ║       installed and no file was decrypted.                       ║
 # ║    3  filters and hooks are in place, but files need attention:  ║
 # ║       tracked in plaintext, still stored in the other storage    ║
 # ║       format, not decrypted because sops could not (keys or      ║
-# ║       credentials missing), or holding NUL bytes. See the lists  ║
-# ║       printed at the end.                                        ║
+# ║       credentials missing) or because the working copy is        ║
+# ║       reached through a symlink or a hard link, or holding NUL   ║
+# ║       bytes. See the lists printed at the end.                   ║
 # ║                                                                  ║
 # ║  Requires:                                                       ║
 # ║    - sops >= 3.11.0 on PATH                                      ║
@@ -144,7 +156,12 @@ fi
 # Only when a clean or smudge command is set: required=true with no
 # command makes git fail on every SOPS-managed file, and a clone that
 # never had the filters must keep working if this script cannot finish.
-if git -C "${TARGET_ROOT}" config --get-regexp '^filter\.sops\.(clean|smudge)$' >/dev/null 2>&1; then
+# Set in a config file, that is: a command given for this one run
+# (`git -c`, GIT_CONFIG_COUNT) is gone afterwards, the flag would stay.
+if (
+	unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+	git -C "${TARGET_ROOT}" config --get-regexp '^filter\.sops\.(clean|smudge)$' >/dev/null 2>&1
+); then
 	git -C "${TARGET_ROOT}" config --local filter.sops.required true
 fi
 
@@ -235,6 +252,30 @@ MERGE_CMD="${INSTALLED_Q}/merge-driver.sh %O %A %B %L %P"
 # (A `sops decrypt` textconv double-decrypts and errors on plaintext.)
 TEXTCONV_CMD="cat"
 
+# ── git config helpers (local to the target repo only) ────
+git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
+# The value git will really use: a worktree-level or included config can
+# override .git/config.
+git_effective() { git -C "${TARGET_ROOT}" config "$@" 2>/dev/null || true; }
+
+# ── A long-running filter under the same name ────
+# filter.<driver>.process (a long-running filter) wins over clean/smudge.
+# One left behind by another tool under the same driver name would bypass
+# clean-filter.sh completely. One in .git/config is removed further down.
+# One anywhere else (the global config, a worktree's, an included file,
+# `git -c`, GIT_CONFIG_COUNT) is not this script's to change: stop here,
+# before the copy below and before any setting is written, so that this
+# exit leaves the repository as it was (audit A-03). Every value git
+# reads, compared with those of .git/config alone (no includes): any
+# difference is a value from somewhere else.
+if [[ "$(git_effective --get-all filter.sops.process)" != "$(git_cfg --get-all filter.sops.process 2>/dev/null || true)" ]]; then
+	echo "Error: filter.sops.process is set outside this repository's .git/config:" >&2
+	git -C "${TARGET_ROOT}" config --show-origin --get-all filter.sops.process >&2 || true
+	echo "Git prefers it over the clean/smudge filters, so clean-filter.sh would never run." >&2
+	echo "Remove that setting and re-run this script." >&2
+	exit 1
+fi
+
 # ── Install the copy that git runs ────
 # Before any git setting is written: a setting that points at a script
 # which is not there yet would make every git command on a secret fail.
@@ -286,32 +327,25 @@ fi
 HARDEN_SCRIPT="${INSTALL_DIR}/harden-permissions.sh"
 
 # ── Configure git (local to the target repo only) ────
-git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
-# The value git will really use: a worktree-level or included config can
-# override .git/config.
-git_effective() { git -C "${TARGET_ROOT}" config "$@" 2>/dev/null || true; }
-
 # required=true: fail the operation if the filter fails — never silently
-# commit plaintext because sops or the script is broken. Written FIRST
-# and on EVERY run, outside the "already configured" test below: with
-# the two commands in place and this flag missing, git treats a failing
-# filter as no filter at all and stages the plaintext. (An existing
-# setup already got it further up, before the checks that can exit.)
+# commit plaintext because sops or the script is broken. Written on EVERY
+# run, outside the "already configured" test below: with the two
+# commands in place and this flag missing, git treats a failing filter
+# as no filter at all and stages the plaintext. (An existing setup
+# already got it further up, before the checks that can exit.)
+#
+# Not earlier than here: required=true with no command makes git fail on
+# every SOPS-managed file the user edits (`git status`, `git add`: exit
+# 128). From here on nothing stops this script before the commands are
+# in .git/config, so a clone that never had the filters is not left in
+# that state (audit A-03). And before the commands, not after them: in
+# between they would be there without the flag.
 git_cfg filter.sops.required true
 
-# filter.<driver>.process (a long-running filter) wins over clean/smudge.
-# One left behind by another tool under the same driver name would bypass
-# clean-filter.sh completely.
+# The filter.sops.process of .git/config (see above).
 if git_cfg --get filter.sops.process >/dev/null 2>&1; then
 	git_cfg --unset-all filter.sops.process
 	echo "Removed filter.sops.process from .git/config (it overrides the clean/smudge filters)."
-fi
-if [[ -n "$(git_effective --get filter.sops.process)" ]]; then
-	echo "Error: filter.sops.process is set outside this repository's .git/config:" >&2
-	git -C "${TARGET_ROOT}" config --show-origin --get-all filter.sops.process >&2 || true
-	echo "Git prefers it over the clean/smudge filters, so clean-filter.sh would never run." >&2
-	echo "Remove that setting and re-run this script." >&2
-	exit 1
 fi
 
 # Idempotency: write the settings only when one of them differs: a first
@@ -342,12 +376,17 @@ else
 	echo "SOPS git filters configured (format: ${STORE_FORMAT})."
 fi
 
-# Last check: what was just written must be what git will use.
+# Last check: what was just written must be what git will use. The one
+# exit 1 that comes after .git/config was changed: the settings stay
+# there (they are right, and they keep an existing setup fail-closed), and
+# the message says what was not done.
 if [[ "$(git_effective --bool --get filter.sops.required)" != "true" ||
 	"$(git_effective --get filter.sops.clean)" != "${CLEAN_CMD}" ||
 	"$(git_effective --get filter.sops.smudge)" != "${SMUDGE_CMD}" ]]; then
 	echo "Error: another git config file overrides the filter settings written to .git/config:" >&2
 	git -C "${TARGET_ROOT}" config --show-origin --get-regexp '^filter\.sops\.' >&2 || true
+	echo "The settings in .git/config and the scripts under ${INSTALL_DIR} are in place," >&2
+	echo "but git uses the overriding entries. Not done yet: no hooks were installed and no file was decrypted." >&2
 	echo "Remove the overriding entries and re-run this script." >&2
 	exit 1
 fi
@@ -374,7 +413,8 @@ fi
 # managed files land in the working tree as raw ciphertext. Decrypt
 # them in place — but ONLY when the working copy is byte-identical to
 # the blob in the index (proof the smudge never ran and there are no
-# local edits to lose).
+# local edits to lose), or is that blob with a CR before its line ends
+# (core.autocrlf, see below).
 #
 # The same walk answers a second question: is the version git holds
 # encrypted at all? A blob that is not a SOPS document was committed in
@@ -387,17 +427,20 @@ OTHER_FORMAT_IN_GIT=""
 STILL_ENCRYPTED=""
 STILL_ENCRYPTED_KEY_TYPES=""
 HOLDS_NUL_BYTES=""
-while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
+THROUGH_A_LINK=""
+previous_path=""
+while IFS= read -r -d '' record; do
+	# "<mode> <object id> <stage>" TAB <path> (lib.sh). An unmerged path
+	# is listed once per stage; its first entry stands for it.
+	path="${record#*$'\t'}"
+	[[ "${path}" != "${previous_path}" ]] || continue
+	previous_path="${path}"
 	FOUND_ANY=1
 	f="${TARGET_ROOT}/${path}"
 
-	# "<mode> <object id>" of the index entry. GIT_LITERAL_PATHSPECS: the
-	# path is a file name here, not a pattern.
-	index_entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}')
-	index_mode="${index_entry%% *}"
-	index_sha="${index_entry#* }"
-	[[ -n "${index_sha}" ]] || continue
+	index_mode="${record%% *}"
+	index_sha="${record#* }"
+	index_sha="${index_sha%% *}"
 	# A symlink or a submodule: git never runs a filter on these.
 	[[ "${index_mode}" != "120000" && "${index_mode}" != "160000" ]] || continue
 
@@ -445,9 +488,33 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 
 	[[ -f "${f}" ]] || continue
 	worktree_sha=$(git hash-object --no-filters -- "${f}")
-	[[ "${worktree_sha}" == "${index_sha}" ]] || continue
+	if [[ "${worktree_sha}" != "${index_sha}" ]]; then
+		# core.autocrlf=true (or eol=crlf) on a path without -text: the
+		# checkout before the filters existed put a CR before every LF of
+		# the ciphertext. sops never writes a CR into a document, so a
+		# copy that is the stored blob once its CRs are gone holds nothing
+		# of its own to lose, and it is decrypted like the others. The
+		# clean filter takes such a copy for the stored blob as well.
+		# Before, it stayed ciphertext while this script exited 0 (audit
+		# A-07). What is decrypted is the blob, not this copy.
+		worktree_sha=$(tr -d '\r' <"${f}" | git -C "${TARGET_ROOT}" hash-object --stdin)
+		[[ "${worktree_sha}" == "${index_sha}" ]] || continue
+	fi
 
-	# Working copy == stored ciphertext → smudge never ran. Decrypt it.
+	# Working copy == stored ciphertext → smudge never ran. Decrypt it,
+	# but not through a link. The plaintext is written to "${f}", and that
+	# write follows a symlink in its place or on a directory of its path
+	# (a shared or a dotfiles folder, say), and reaches every other name
+	# of a hard link: it would land in a file outside the working tree,
+	# where .gitignore does not reach (audit A-06, A-14). Git does not
+	# write there either (it lists such a path as deleted or as a type
+	# change). The file is left as it is and listed at the end.
+	if sgf_through_symlink "${TARGET_ROOT}" "${path}" ||
+		[[ -n "$(find "${f}" -prune -links +1 2>/dev/null)" ]]; then
+		THROUGH_A_LINK="${THROUGH_A_LINK}   - ${path}"$'\n'
+		continue
+	fi
+
 	# sops' own error is shown for the first file that fails (it says why:
 	# no key, expired session, ...); the files after it are only listed.
 	decrypt_stderr=/dev/stderr
@@ -471,7 +538,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 		# the clean filter (which reuses the identical blob) and records
 		# fresh stat data, so `git status` is clean again.
 		git -C "${TARGET_ROOT}" update-index -- "${path}" 2>/dev/null ||
-			echo "⚠  Could not refresh index stat for ${path}; run: git add ${path}" >&2
+			echo "⚠  Could not refresh index stat for ${path}; run: git add -- $(sgf_paste_pathspec "${TARGET_ROOT}/${path}")" >&2
 		echo "Re-smudged ${path} (was raw ciphertext from a pre-setup checkout)."
 	else
 		STILL_ENCRYPTED="${STILL_ENCRYPTED}   - ${path}"$'\n'
@@ -483,11 +550,11 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 			esac
 		done
 	fi
-done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
+done < <(sgf_ls_managed "${TARGET_ROOT}")
 
 if [[ "${FOUND_ANY}" -eq 0 ]]; then
 	echo "Note: no tracked files carry 'filter=sops' in .gitattributes yet." >&2
-	echo "Add lines like:  .env filter=sops diff=sops" >&2
+	echo "Add lines like:  .env filter=sops diff=sops -text" >&2
 fi
 
 # ── Tighten permissions on the decrypted files ────
@@ -597,7 +664,9 @@ EOF
 # of before v3.0.0 only line 12 may differ, the one that names
 # harden-permissions.sh. A symlink, a file with one more line, or a hook
 # of another tool that merely mentions sops-git-filters is not one. This
-# is the test before a file is removed.
+# is the test before a file is removed, and before one is overwritten
+# (audit S8). When hook_text changes, its text of today must stay here as
+# an earlier release: it is the hook of v3.0.0.
 is_generated_hook() {
 	local file="$1" name="$2" assign content
 	[[ -f "${file}" && ! -L "${file}" ]] || return 1
@@ -771,6 +840,7 @@ else
 	mkdir -p "${HOOKS_DIR}"
 	installed_hooks=""
 	foreign_hooks=""
+	changed_hooks=""
 	for hook_name in ${HOOK_NAMES}; do
 		hook_path="${HOOKS_DIR}/${hook_name}"
 
@@ -781,6 +851,15 @@ else
 		if [[ -L "${hook_path}" ]] ||
 			{ [[ -e "${hook_path}" ]] && ! grep -qF "${HOOK_MARKER}" "${hook_path}" 2>/dev/null; }; then
 			foreign_hooks="${foreign_hooks} ${hook_name}"
+			continue
+		fi
+		# Nor one it wrote that was changed since. The marker line alone
+		# does not make a hook replaceable: only a file that is, byte for
+		# byte, a hook of this script (now or in an earlier release), the
+		# same test as before a hook is taken out of a shared directory
+		# (audit S8). Lines a user added stay.
+		if [[ -e "${hook_path}" ]] && ! is_generated_hook "${hook_path}" "${hook_name}"; then
+			changed_hooks="${changed_hooks} ${hook_name}"
 			continue
 		fi
 
@@ -794,6 +873,12 @@ else
 	if [[ -n "${foreign_hooks}" ]]; then
 		echo "⚠  These hooks exist and are not managed by sops-git-filters:${foreign_hooks}" >&2
 		echo "   Not overwriting. Add this line to each of them by hand:" >&2
+		echo "     ${HARDEN_HINT} --quiet || true" >&2
+	fi
+	if [[ -n "${changed_hooks}" ]]; then
+		echo "⚠  These hooks carry the sops-git-filters marker but were changed by hand:${changed_hooks}" >&2
+		echo "   They differ from every hook install.sh wrote, so they are not overwritten." >&2
+		echo "   Make sure each of them runs this line, or delete it and re-run this script:" >&2
 		echo "     ${HARDEN_HINT} --quiet || true" >&2
 	fi
 fi
@@ -869,7 +954,37 @@ if [[ -n "${STILL_ENCRYPTED}" ]]; then
 		# shellcheck disable=SC2086  # one word per key type
 		sgf_credential_hint "   " ${STILL_ENCRYPTED_KEY_TYPES}
 		echo " Until then git sees those files as unchanged, and nothing is"
-		echo " encrypted a second time."
+		echo " encrypted a second time, as long as each holds what the index"
+		echo " holds. A command that moves only the index (git reset HEAD~1,"
+		echo " git reset <commit> -- <file>, git restore --staged) ends that:"
+		echo " git status, git add and git commit -a then fail on such a file"
+		echo " until your keys are back. Without them, put the version git holds"
+		echo " in its place with the git cat-file line that error prints."
+		echo "========================================================"
+	} >&2
+	ATTENTION=1
+fi
+
+# The working copy of these files is still ciphertext too, on purpose.
+if [[ -n "${THROUGH_A_LINK}" ]]; then
+	{
+		echo ""
+		echo "========================================================"
+		echo " NOT DECRYPTED: REACHED THROUGH A LINK"
+		echo "========================================================"
+		echo ""
+		echo " The working copy of these files holds the ciphertext git holds,"
+		echo " but it is a symbolic link, lies in a directory that is one, or"
+		echo " has a second name (a hard link). The plaintext would land where"
+		echo " the link leads, maybe outside this working tree, so they were"
+		echo " left encrypted:"
+		echo ""
+		printf '%s' "${THROUGH_A_LINK}"
+		echo ""
+		echo " Git does not write through a symbolic link either: git status"
+		echo " lists such a path as deleted or as a type change. Put the file"
+		echo " itself in its place (for a hard link: a copy), or the directory"
+		echo " itself instead of the link, and re-run this script."
 		echo "========================================================"
 	} >&2
 	ATTENTION=1

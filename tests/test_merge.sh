@@ -98,7 +98,14 @@ test_merge_dotenv_conflict_keeps_ours_and_can_take_theirs() {
 	assert_eq "$(cat .env)" $'A=1\nB=2\nC=ours' "working copy keeps our version"
 	assert_contains "${OUT}" "OUR version was kept" "driver message"
 
-	git checkout --theirs -- .env
+	# The command the message prints, pasted in a subdirectory.
+	local line
+	line="$(printf '%s\n' "${OUT}" | grep 'Take a side: ' | head -1)"
+	line="${line#*Take a side: }"
+	line="${line%(or --ours)*}"
+	assert_contains "${line}" "git checkout --theirs -- " "test fixture: the printed line"
+	mkdir -p sub
+	(cd sub && eval "${line}")
 	assert_eq "$(cat .env)" $'A=1\nB=2\nC=theirs' "working copy after checkout --theirs"
 	git add .env
 	git commit -q --no-edit

@@ -187,3 +187,53 @@ test_rekey_fails_when_the_index_cannot_be_written() {
 	assert_contains "${OUT}" "re-keyed  .env" "rekey.sh output"
 	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
 }
+
+# rekey.sh while the working copy still holds the old ciphertext (install.sh
+# ran without the key). That copy is a SOPS document, but no longer the
+# version git holds: git status must not take it for an edit that undoes
+# the re-key. It decrypts to the same plaintext, so the re-keyed blob
+# stays (audit A-13).
+test_rekey_with_the_old_ciphertext_in_the_working_copy() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+	fresh_clone origin clone
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+	assert_contains "$(cat .env)" 'ENC[AES256_GCM' "working copy still holds ciphertext"
+
+	write_sops_yaml "${AGE_PUB_B}"
+	run "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "0" "rekey.sh exit status"
+	assert_eq "$(git status --porcelain -- .env)" "M  .env" "git status of .env"
+	git add -A
+	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob after git add -A"
+	assert_eq "$(stored .env | decrypt_as_b)" "A=1" "key B decrypts the staged blob"
+}
+
+# rekey.sh changes the index, and the commit that follows carries the
+# .gitattributes of the index: which files are SOPS-managed is read from
+# there, as the guard reads it, not from an unstaged edit (audit A-11).
+test_rekey_reads_the_attributes_of_the_index() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	printf 'not a secret\n' >notes.txt
+	git add .env notes.txt
+	git commit -q -m "add .env and notes.txt"
+	write_sops_yaml "${AGE_PUB_B}"
+	git add .sops.yaml
+	git commit -q -m "add recipient B"
+
+	# Unstaged: .env loses filter=sops, notes.txt (plaintext in git) gets it.
+	printf '.env -filter\n*.txt filter=sops diff=sops\n' >>.gitattributes
+	run "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "0" "rekey.sh exit status"
+	assert_contains "${OUT}" "re-keyed  .env" "rekey.sh output"
+	# (git may still run the clean filter on notes.txt to compare it, as
+	# the working tree's attributes say; that stages nothing.)
+	assert_not_contains "${OUT}" "FAILED  notes.txt" "a file the index does not mark is left alone"
+	assert_not_contains "${OUT}" "re-keyed  notes.txt" "a file the index does not mark is left alone"
+	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
+	assert_eq "$(stored notes.txt)" "not a secret" "notes.txt in the index"
+}

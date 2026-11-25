@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# lib.sh: the document checks, without git or sops.
+# lib.sh: the document checks, without sops.
 # shellcheck disable=SC2154  # SGF_TOOL_DIR comes from tests/run.sh
 
-ENC='ENC[AES256_GCM,data:abc+/=,iv:AAAA,tag:BBBB==,type:str]'
-ENC_COMMENT='ENC[AES256_GCM,data:abc,iv:AAAA,tag:BBBB,type:comment]'
+# Encrypted values shaped like the ones sops writes: data in base64, an
+# iv of 32 bytes and a tag of 16 (44 and 24 characters of base64).
+IV='aK0NDUmGF5rgQKERiDsl8ZmCs+7aY6DdOPGhvm21fiw='
+TAG='jZYZLFyNneDOtZnXYZjGaQ=='
+ENC="ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:str]"
+ENC_COMMENT="ENC[AES256_GCM,data:NXZXkGPhZlPbJQ==,iv:${IV},tag:${TAG},type:comment]"
 
 load_lib() {
 	export LC_ALL=C
@@ -24,10 +28,64 @@ test_lib_enc_token() {
 	is sgf_is_sops_doc json "$(envelope "${ENC}")"
 	is sgf_is_sops_doc json "$(envelope "${ENC_COMMENT}")"
 	is_not sgf_is_sops_doc json "$(envelope "${ENC} trailing text")"
-	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:a b,iv:AAAA,tag:BBBB,type:str]')"
-	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:a\nb,iv:AAAA,tag:BBBB,type:str]')"
+	is_not sgf_is_sops_doc json "$(envelope "ENC[AES256_GCM,data:a bc,iv:${IV},tag:${TAG},type:str]")"
+	is_not sgf_is_sops_doc json "$(envelope "ENC[AES256_GCM,data:a\\nb,iv:${IV},tag:${TAG},type:str]")"
 	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:abc]')"
 	is_not sgf_is_sops_doc json "$(envelope 'hunter2')"
+}
+
+# in_every_place <is|is_not> <ENC[...] value> : the value as "data" and as
+# "mac" of a json document, and as a value, a comment and sops_mac of a
+# dotenv document. Everything else in the documents is in order.
+in_every_place() {
+	local verdict="$1" token="$2" meta=$'\nsops_version=3.13.3\n'
+	"${verdict}" sgf_is_sops_doc json "$(envelope "${token}")"
+	"${verdict}" sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{"mac":"'"${token}"'","version":"3.13.3"}}'
+	"${verdict}" sgf_is_sops_doc dotenv "A=${token}"$'\n'"sops_mac=${ENC}${meta}"
+	"${verdict}" sgf_is_sops_doc dotenv "#${token}"$'\n'"A=${ENC}"$'\n'"sops_mac=${ENC}${meta}"
+	"${verdict}" sgf_is_sops_doc dotenv "A=${ENC}"$'\n'"sops_mac=${token}${meta}"
+}
+
+# An ENC[...] value is checked as a whole (audit A-16), not for its
+# alphabet: the fields in the order sops writes them, data in padded
+# base64, an iv of 32 bytes and a tag of 16 (44 and 24 characters), a
+# type sops can decrypt, and nothing after the closing bracket. The first
+# two are the examples from the review of this check: a password in the
+# place of the ciphertext, and a password after a real value.
+test_lib_enc_token_is_checked_as_a_whole() {
+	load_lib
+	local token
+	for token in \
+		'ENC[AES256_GCM,data:MyPassword123,iv:x,tag:y,type:str]' \
+		"${ENC}hunter2]" \
+		"ENC[AES256_GCM,data:MyPassword123,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:hunter2_,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:ab=c,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,tag:${TAG},iv:${IV},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:str,pw:hunter2]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV:1},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV%=}A,tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG:2},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG%=}A,type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:hunter]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:str]${ENC}" \
+		"ENC[AES256_GCM,data:,iv:${IV},tag:${TAG},type:str]"; do
+		in_every_place is_not "${token}"
+	done
+
+	# What sops writes: any length of data (with or without padding), and
+	# the types it encrypts. An empty value is no ENC[...] value at all:
+	# sops writes "" (json) or KEY= and # (dotenv), see the tests above.
+	for token in "${ENC}" "${ENC_COMMENT}" \
+		"ENC[AES256_GCM,data:2NFR,iv:${IV},tag:${TAG},type:float]" \
+		"ENC[AES256_GCM,data:Bl36N6NEn2HbeGo=,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:AQ==,iv:${IV},tag:${TAG},type:int]" \
+		"ENC[AES256_GCM,data:8nzB5Q==,iv:${IV},tag:${TAG},type:bool]" \
+		"ENC[AES256_GCM,data:KJ/kQeEdkF3JdCnQAgY4Xxc1xnE=,iv:${IV},tag:${TAG},type:time]" \
+		"ENC[AES256_GCM,data:AAAA,iv:${IV},tag:${TAG},type:bytes]"; do
+		in_every_place is "${token}"
+	done
 }
 
 test_lib_json_document() {
@@ -145,7 +203,7 @@ test_lib_json_document_check_is_linear() {
 	load_lib
 	local big doc
 	big="$(awk 'BEGIN { for (i = 0; i < 40000; i++) printf "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2" }')"
-	doc="$(envelope "ENC[AES256_GCM,data:${big},iv:AAAA,tag:BBBB,type:str]")"
+	doc="$(envelope "ENC[AES256_GCM,data:${big},iv:${IV},tag:${TAG},type:str]")"
 	assert_eq "$((${#doc} > 2000000))" "1" "the test document is over 2 MB"
 
 	SECONDS=0
@@ -220,6 +278,39 @@ test_lib_version_compare() {
 	assert_ne "$(sgf_sops_version)" "" "version of the sops on PATH"
 }
 
+# The paths in the commands a message prints: quoted for a shell, and,
+# where git would take them as a pattern, marked :(literal).
+test_lib_paste_path_and_pathspec() {
+	load_lib
+	assert_eq "$(sgf_paste_path "/r/a b'c.env")" "'/r/a b'\\''c.env'" "a path with a blank and a quote"
+	assert_eq "$(sgf_paste_pathspec "/r/a b'c.env")" "'/r/a b'\\''c.env'" "no wildcard: the path as it is"
+	assert_eq "$(sgf_paste_pathspec '/r/[ab].env')" "':(literal)/r/[ab].env'" "brackets"
+	assert_eq "$(sgf_paste_pathspec '/r/x*.env')" "':(literal)/r/x*.env'" "a star"
+	assert_eq "$(sgf_paste_pathspec '/r/x?.env')" "':(literal)/r/x?.env'" "a question mark"
+	assert_eq "$(sgf_paste_pathspec '/r/x\y.env')" "':(literal)/r/x\\y.env'" "a backslash"
+
+	# Pasted, the quoted string is the path again, byte for byte. A
+	# trailing newline is part of the name: dropped, `rm '<path>'` would
+	# name another file (".env.prod" for ".env.prod<newline>").
+	local p x
+	# shellcheck disable=SC1003,SC2016  # the backslashes, $(...) and backticks are meant literally
+	for p in "/r/a b'c.env" "/r/'" "/r/''" "/r/\\'" '/r/x\y' '/r/x\\' \
+		$'/r/.env.prod\n' $'/r/.env.prod\n\n' $'/r/a\nb.env' $'\n' \
+		'-rf' '/r/$(touch pwned)' '/r/`touch pwned`' '/r/$HOME' '/r/*?[x]' \
+		'/r/a&b' $'/r/\xff\'' ''; do
+		x=""
+		eval "x=$(sgf_paste_path "${p}")"
+		assert_eq "${x}" "${p}" "sgf_paste_path, pasted back: $(printf '%q' "${p}")"
+		x=""
+		eval "x=$(sgf_paste_pathspec "${p}")"
+		case "${p}" in
+		*[\*\?\[\\]*) assert_eq "${x}" ":(literal)${p}" "sgf_paste_pathspec, pasted back: $(printf '%q' "${p}")" ;;
+		*) assert_eq "${x}" "${p}" "sgf_paste_pathspec, pasted back: $(printf '%q' "${p}")" ;;
+		esac
+	done
+	[[ ! -e pwned ]] || fail "a name was run as a command"
+}
+
 test_lib_store_format() {
 	load_lib
 	mkdir repo
@@ -281,6 +372,49 @@ sops_version=3.13.3"
 	done
 }
 
+# The keys a document names, for the line the clean filter prints when a
+# re-encryption changes them (audit A-15): every kind of key, in key
+# groups too, from json in any layout and from dotenv, the same list.
+test_lib_doc_keys() {
+	load_lib
+	local json dotenv want
+	# One line: sgf_doc_keys must not depend on the layout sops writes.
+	json='{"data": "'"${ENC}"'", "sops": {"key_groups": [{"age": [{"enc": "x", "recipient": "age1aaaa"}], "kms": [{"arn": "arn:aws:kms:eu-central-1:111111111111:key/k1", "role": "", "context": {"Env": "prod"}, "created_at": "t", "enc": "x", "aws_profile": ""}], "gcp_kms": [{"resource_id": "projects/p/locations/global/keyRings/r/cryptoKeys/k", "created_at": "t", "enc": "x"}]}, {"azure_kv": [{"vault_url": "https://v.vault.azure.net", "name": "k", "version": "1", "created_at": "t", "enc": "x"}], "hc_vault": [{"vault_address": "https://vault.example.invalid:8200", "engine_path": "transit", "key_name": "k", "created_at": "t", "enc": "x"}], "pgp": [{"created_at": "t", "enc": "x", "fp": "0123456789ABCDEF"}], "hckms": [{"key_id": "region:id", "created_at": "t", "enc": "x"}], "age": [{"recipient": "age1aaaa", "enc": "x"}]}], "shamir_threshold": 2, "mac": "'"${ENC}"'", "version": "3.13.3"}}'
+	dotenv="A=${ENC}
+sops_key_groups__list_0__map_age__list_0__map_enc=x
+sops_key_groups__list_0__map_age__list_0__map_recipient=age1aaaa
+sops_key_groups__list_0__map_kms__list_0__map_arn=arn:aws:kms:eu-central-1:111111111111:key/k1
+sops_key_groups__list_0__map_kms__list_0__map_context__map_Env=prod
+sops_key_groups__list_0__map_gcp_kms__list_0__map_resource_id=projects/p/locations/global/keyRings/r/cryptoKeys/k
+sops_key_groups__list_1__map_azure_kv__list_0__map_name=k
+sops_key_groups__list_1__map_azure_kv__list_0__map_vault_url=https://v.vault.azure.net
+sops_key_groups__list_1__map_hc_vault__list_0__map_engine_path=transit
+sops_key_groups__list_1__map_hc_vault__list_0__map_key_name=k
+sops_key_groups__list_1__map_hc_vault__list_0__map_vault_address=https://vault.example.invalid:8200
+sops_key_groups__list_1__map_pgp__list_0__map_fp=0123456789ABCDEF
+sops_key_groups__list_1__map_hckms__list_0__map_key_id=region:id
+sops_key_groups__list_1__map_age__list_0__map_recipient=age1aaaa
+sops_mac=${ENC}
+sops_shamir_threshold=2
+sops_version=3.13.3"
+	want=$'1\tage age1aaaa\n1\tgcp_kms projects/p/locations/global/keyRings/r/cryptoKeys/k\n1\tkms arn:aws:kms:eu-central-1:111111111111:key/k1\n2\tage age1aaaa\n2\tazure_kv https://v.vault.azure.net/keys/k\n2\thc_vault https://vault.example.invalid:8200/v1/transit/keys/k\n2\thckms region:id\n2\tpgp 0123456789ABCDEF'
+	is sgf_is_sops_doc json "${json}"
+	is sgf_is_sops_doc dotenv "${dotenv}"$'\n'
+	assert_eq "$(printf '%s\n' "${json}" | sgf_doc_keys json | sort)" "${want}" "keys of a json document"
+	assert_eq "$(printf '%s\n' "${dotenv}" | sgf_doc_keys dotenv | sort)" "${want}" "keys of a dotenv document"
+
+	# Without key_groups: the one group is group 1.
+	assert_eq "$(sops_doc '"age": [{"recipient": "age1bbbb", "enc": "x"}], "mac": "'"${ENC}"'", "version": "3.13.3"' | sgf_doc_keys json)" \
+		$'1\tage age1bbbb' "keys of a json document without key groups"
+	assert_eq "$(printf 'sops_age__list_0__map_recipient=age1bbbb\n' | sgf_doc_keys dotenv)" \
+		$'1\tage age1bbbb' "keys of a dotenv document without key groups"
+	# What is shown is printable: the document can come from anyone.
+	assert_eq "$(printf 'sops_age__list_0__map_recipient=age1\033[2Jx\n' | sgf_doc_keys dotenv)" \
+		$'1\tage age1?[2Jx' "a control character in a recipient"
+	# Not a SOPS document: no list, and a failure.
+	is_not sgf_doc_keys json <<<'{"data": "", "sops": {"age": [{"recipient": "age1", "x": "y"}]}}'
+}
+
 # ── Content with NUL bytes ────
 test_lib_counts_nul_bytes_and_keeps_the_content() {
 	load_lib
@@ -311,6 +445,39 @@ test_lib_counts_nul_bytes_and_keeps_the_content() {
 	is_not sgf_split_counted
 	SGF_CAPTURED=""
 	is_not sgf_split_counted
+}
+
+# A blob with a NUL byte is never a SOPS document: the awk of macOS does
+# not look past a NUL byte on its line (audit A-12). The check of a blob
+# reads it once, and still tells "cannot read" (2) from "not one" (1).
+test_lib_blob_with_a_nul_byte_is_not_a_document() {
+	load_lib
+	git init -q repo
+	cd repo || exit 1
+	local good dotenv status
+	good="$(envelope "${ENC}" | git hash-object -w --stdin)"
+	dotenv="$(printf 'A=%s\nsops_mac=%s\nsops_version=3.13.3\n' "${ENC}" "${ENC}" | git hash-object -w --stdin)"
+	is sgf_blob_is_sops_doc json "${good}"
+	is sgf_blob_is_sops_doc dotenv "${dotenv}"
+	assert_eq "$(sgf_blob_problem json "${good}")" "" "problem of a good blob"
+
+	local nul_json nul_dotenv
+	nul_json="$({
+		envelope "${ENC}"
+		printf '\000"pw": "hunter2"\n'
+	} | git hash-object -w --stdin)"
+	nul_dotenv="$({
+		printf 'A=%s\nsops_mac=%s\nsops_version=3.13.3\n' "${ENC}" "${ENC}"
+		printf 'B=%s\000PW=hunter2\n' "${ENC}"
+	} | git hash-object -w --stdin)"
+	is_not sgf_blob_is_sops_doc json "${nul_json}"
+	is_not sgf_blob_is_sops_doc dotenv "${nul_dotenv}"
+	assert_eq "$(sgf_blob_problem json "${nul_json}")" "it holds NUL bytes (1), which a SOPS document never has" "problem"
+	assert_eq "$(sgf_blob_problem dotenv "${nul_dotenv}")" "it holds NUL bytes (1), which a SOPS document never has" "problem"
+
+	status=0
+	sgf_blob_is_sops_doc json 0123456789abcdef0123456789abcdef01234567 || status=$?
+	assert_eq "${status}" "2" "status for a blob that is not there"
 }
 
 # ── The version line of a checkout, read as text ────
@@ -375,4 +542,26 @@ test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
 	printf 'SGF_VERSION="$(touch PWNED)"\n' >evil.sh
 	assert_eq "$(sgf_version_of evil.sh)" "" "a version line that is no version"
 	[[ ! -e PWNED ]] || fail "the version line was executed"
+}
+
+# A symlink anywhere below the root, in a directory's place or in the
+# file's, is found; one above the root is not looked at (audit A-14).
+test_lib_through_symlink() {
+	load_lib
+	mkdir -p root/a/b elsewhere/b
+	: >root/a/b/file
+	: >root/top
+	: >elsewhere/b/file
+	ln -s ../elsewhere root/linked-dir
+	ln -s ../elsewhere/b/file root/a/linked-file
+	ln -s root via-link
+	is_not sgf_through_symlink root a/b/file
+	is_not sgf_through_symlink root top
+	is_not sgf_through_symlink root a/missing/file
+	is sgf_through_symlink root linked-dir/b/file
+	is sgf_through_symlink root linked-dir
+	is sgf_through_symlink root a/linked-file
+	is_not sgf_through_symlink via-link a/b/file
+	is sgf_through_symlink via-link linked-dir/b/file
+	is sgf_through_symlink "${PWD}/root" 'linked-dir/b/file'
 }

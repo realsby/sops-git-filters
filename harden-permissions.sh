@@ -17,6 +17,8 @@
 # ║  the owner execute bit too (0700), so git sees no mode change.   ║
 # ║  SOPS_FILE_MODE may hold owner and group bits only; a refused    ║
 # ║  value still leaves the files at 0600 (0700) and exits 1.        ║
+# ║  A path that is a symlink, or lies in a symlinked directory, is  ║
+# ║  left alone: git does not follow it either.                      ║
 # ║  It is idempotent and safe to run often —                        ║
 # ║  install.sh runs it, and the hooks it installs (post-checkout,   ║
 # ║  post-merge, post-rewrite, post-applypatch, post-commit) run it  ║
@@ -93,21 +95,54 @@ plain_mode="${FILE_MODE: -3}"
 EXEC_MODE="$((${plain_mode:0:1} | 1))${plain_mode:1}"
 
 # ── Walk every tracked path carrying filter=sops ────
-# check-attr -z emits NUL-separated <path> <attr> <value> triples, so
-# paths with spaces or newlines survive intact.
+# One git call lists them, each with its mode in the index: the pathspec
+# ":(attr:filter=sops)" keeps the entries whose filter attribute is
+# "sops" (git >= 2.13). Git reads the attribute as `git check-attr` does
+# by default: from the .gitattributes files of the working tree, and from
+# the index where the working tree has none. -z keeps paths with spaces
+# or newlines intact. Not a bash loop over every tracked path, which took
+# 1.5 seconds per checkout with 60,000 of them (audit A-01).
+#
+# The pathspec settings of the caller must not change what the pathspec
+# means: with GIT_LITERAL_PATHSPECS=1, which `git --literal-pathspecs`
+# hands to the hooks, git would look for a file named like the pathspec,
+# and every secret would stay at the mode the checkout gave it.
+unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 hardened=0
 failed=0
+previous=""
 
-while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
+# below_a_symlink <path> : true when a directory on <path> (relative to
+# TARGET_ROOT, as git lists it) is a symlink. Git does not follow one: it
+# lists the path as deleted, and the file found there is outside the
+# working tree, maybe one that another program reads at a mode of its
+# own (audit A-14). sgf_through_symlink of lib.sh without the last part:
+# this script runs without lib.sh.
+below_a_symlink() {
+	local dir="${TARGET_ROOT}" rest="$1"
+	while [[ "${rest}" == */* ]]; do
+		dir="${dir}/${rest%%/*}"
+		rest="${rest#*/}"
+		[[ ! -L "${dir}" ]] || return 0
+	done
+	return 1
+}
+
+while IFS= read -r -d '' record; do
+	# "<mode> <object id> <stage>" TAB <path>. An unmerged path is listed
+	# once per stage; the first entry decides.
+	path="${record#*$'\t'}"
+	[[ "${path}" != "${previous}" ]] || continue
+	previous="${path}"
 	f="${TARGET_ROOT}/${path}"
-	# Regular files only: never chmod through a symlink, and skip paths
-	# deleted or not yet checked out.
+	# Regular files only: never chmod through a symlink, in the file's
+	# place or on a directory of its path, and skip paths deleted or not
+	# yet checked out.
 	[[ -f "${f}" && ! -L "${f}" ]] || continue
+	! below_a_symlink "${path}" || continue
 
 	mode="${FILE_MODE}"
-	entry="$(git -C "${TARGET_ROOT}" ls-files -s -- ":(literal)${path}")"
-	[[ "${entry:0:6}" == "100755" ]] && mode="${EXEC_MODE}"
+	[[ "${record:0:6}" == "100755" ]] && mode="${EXEC_MODE}"
 
 	if chmod "${mode}" "${f}" 2>/dev/null; then
 		hardened=$((hardened + 1))
@@ -115,7 +150,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 		failed=$((failed + 1))
 		echo "⚠  Could not chmod ${mode} ${path}" >&2
 	fi
-done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
+done < <(git -C "${TARGET_ROOT}" ls-files -s -z -- ':(attr:filter=sops)')
 
 if [[ "${QUIET}" -eq 0 ]]; then
 	echo "Permissions: ${hardened} SOPS-managed file(s) set to ${FILE_MODE}."

@@ -30,7 +30,7 @@
 # within the first 8 KiB of this file: it is read as text, never by
 # running the file, and only that much of the file is read.
 # shellcheck disable=SC2034  # read by install.sh
-SGF_VERSION="3.0.0"
+SGF_VERSION="3.1.0"
 
 # Oldest sops this tool accepts. Up to 3.10.2, sops applies a creation
 # rule's encrypted_regex / unencrypted_regex / encrypted_suffix /
@@ -74,30 +74,131 @@ sgf_other_format() {
 	esac
 }
 
+# ── The SOPS-managed entries of the index ─────────────────────────
+# sgf_ls_managed <repo root>
+# Prints the index entries whose filter attribute is "sops", as
+# `git ls-files -s -z` does: "<mode> <object id> <stage>" TAB <path> NUL,
+# every stage of an unmerged path. One git call does the selection, the
+# pathspec ":(attr:filter=sops)" (git >= 2.13), not a bash loop over
+# every tracked path, which is slow in a large repository (audit A-01).
+# The attribute is read as `git check-attr` reads it by default: from
+# the .gitattributes files of the working tree, and from the index where
+# the working tree has none. (encryption-guard.sh reads the index's
+# only, and lists the entries its own way.)
+#
+# The pathspec settings of the caller are dropped, in a subshell: with
+# GIT_LITERAL_PATHSPECS=1, which `git --literal-pathspecs` exports, git
+# would look for a file named like the pathspec and list nothing.
+sgf_ls_managed() {
+	(
+		unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+		git -C "$1" ls-files -s -z -- ':(attr:filter=sops)'
+	)
+}
+
+# ── Paths in the commands a message prints ────────────────────────
+# A message that tells the user what to run gives the full path in single
+# quotes, so the line can be pasted as it is, from any directory of the
+# working tree, whatever characters the name holds.
+#
+# sgf_paste_path <absolute path> : the path, quoted for a shell. For
+# what takes a file name: rm, a redirection.
+#
+# Each ' becomes '\'' (close the quotes, a quoted ', open them again).
+# Done in bash, not in a $(... | sed): a command substitution drops the
+# newlines at the end, and they are part of a name: for ".env.prod" with
+# a newline at its end, `rm '<top>/.env.prod'` would remove another file.
+# The pattern and the replacement are unquoted variables: bash 3.2 keeps
+# the quotes of "$q" in the result of "${1//"$q"/"$r"}", and bash 5.2
+# reads an unquoted & in the replacement as the match (there is none).
+sgf_paste_path() {
+	local q="'" r="'\\''"
+	printf "'%s'" "${1//$q/$r}"
+}
+
+# sgf_paste_pathspec <absolute path> : the same, for a git command that
+# takes a pathspec (git add, git checkout --). Git reads a pathspec as a
+# pattern: "[ab].env" names a.env too, and `git checkout -- '[ab].env'`
+# would throw away the edits in a.env. A path with a character that git
+# treats as a wildcard (* ? [ \) gets the :(literal) magic; any other
+# stays as it is, easier to read.
+sgf_paste_pathspec() {
+	case "$1" in
+	*[\*\?\[\\]*) sgf_paste_path ":(literal)$1" ;;
+	*) sgf_paste_path "$1" ;;
+	esac
+}
+
+# ── A path that leads through a symlink ───────────────────────────
+# sgf_through_symlink <repo root> <path>
+# True when <path>, relative to <repo root> as git lists it (no "." or
+# ".." parts), is a symlink itself or lies below a directory that is
+# one. Git does not follow such a path: it lists the entry as deleted or
+# as a type change and writes nothing there. A script that writes to
+# "<root>/<path>" would follow it, to wherever the link leads, out of the
+# working tree too (audit A-06, A-14). Only the parts below <repo root>
+# are looked at: the root itself may be reached any way. Builtins only,
+# one lstat per part. harden-permissions.sh has a copy of it: it runs
+# without this file.
+sgf_through_symlink() {
+	local dir="$1" rest="$2"
+	while [[ "${rest}" == */* ]]; do
+		dir="${dir}/${rest%%/*}"
+		rest="${rest#*/}"
+		[[ ! -L "${dir}" ]] || return 0
+	done
+	[[ -L "${dir}/${rest}" ]]
+}
+
 # ── One encrypted value ───────────────────────────────────────────
 # An awk function shared by the two document checks below. True when
-# the string is exactly one SOPS ciphertext value:
-#   ENC[AES256_GCM,data:<base64>,iv:<base64>,tag:<base64>,type:<word>]
-# and holds no character outside that alphabet.
+# the string is exactly one SOPS ciphertext value, as aes/cipher.go of
+# sops writes it (the same from 3.5.0 to 3.13.3):
+#
+#   ENC[AES256_GCM,data:<base64>,iv:<base64>,tag:<base64>,type:<type>]
+#
+#   data   the ciphertext, as long as the value: padded base64 (Go's
+#          StdEncoding), at least one byte. sops writes no ENC[...] for
+#          an empty value (it writes "" instead), and its own parser
+#          wants at least one character there.
+#   iv     the nonce, 32 bytes: 43 characters and "=" (44)
+#   tag    the GCM tag, 16 bytes: 22 characters and "==" (24)
+#   type   one that sops can decrypt: str int float bool bytes time
+#          comment (str for a value and the MAC, comment for a dotenv
+#          comment; time came with 3.10)
+#
+# The whole string is matched: the fields in that order, nothing before
+# or after them (audit A-16). That narrows what a hand-made value can
+# carry, but cannot rule it out: a short password made of base64
+# characters is valid base64. Only `sops decrypt` checks the MAC.
+#
+# No interval expressions ({43}): not every awk has them (old mawk).
+# The lengths are counted with length() instead.
 #
 # The checks are written in awk, not in bash, for speed: bash pattern
 # matching on a whole document takes time quadratic in its length (a
 # few hundred kilobytes took minutes), awk reads it once.
 SGF_AWK_IS_TOKEN='
-function is_token(s) {
-	if (substr(s, 1, 20) != "ENC[AES256_GCM,data:") return 0
-	if (substr(s, length(s), 1) != "]") return 0
-	if (index(s, ",iv:") == 0 || index(s, ",tag:") == 0 || index(s, ",type:") == 0) return 0
-	return match(s, "[^]A-Za-z0-9+/=,:_[]") == 0
+function is_b64(s) {
+	return length(s) % 4 == 0 && s ~ "^[A-Za-z0-9+/]*=?=?$"
+}
+function is_token(s,    f) {
+	if (substr(s, 1, 20) != "ENC[AES256_GCM,data:" || substr(s, length(s), 1) != "]") return 0
+	# base64 has no comma: the four fields split cleanly
+	if (split(substr(s, 21, length(s) - 21), f, ",") != 4) return 0
+	return f[1] != "" && is_b64(f[1]) &&
+	    length(f[2]) == 47 && substr(f[2], 1, 3) == "iv:" && substr(f[2], 4) ~ "^[A-Za-z0-9+/]*=$" &&
+	    length(f[3]) == 28 && substr(f[3], 1, 4) == "tag:" && substr(f[3], 5) ~ "^[A-Za-z0-9+/]*==$" &&
+	    f[4] ~ "^type:(str|int|float|bool|bytes|time|comment)$"
 }
 '
 
 # ── The metadata sops writes ──────────────────────────────────────
 # A document is accepted only when its metadata holds nothing but the
 # names sops itself writes. Anything else next to them could be a
-# secret in clear, and both the guard and the clean filter (which
-# stores a working copy that already is a SOPS document unchanged)
-# rely on this check.
+# secret in clear, and both the guard and the clean filter (which tells
+# a working copy that holds ciphertext from plaintext with it) rely on
+# this check.
 #
 # The names come from stores/stores.go of sops. No release from 3.5.0 to
 # 3.13.3 writes a name that is not listed here, so documents written
@@ -126,6 +227,28 @@ function meta_keytype(k) {
 }
 function meta_entry(type, k) {
 	return (type ":" k) ~ /^(kms:(arn|role|context|created_at|enc|aws_profile)|gcp_kms:(resource_id|created_at|enc)|hckms:(key_id|created_at|enc)|azure_kv:(vault_url|name|version|created_at|enc)|hc_vault:(vault_address|engine_path|key_name|created_at|enc)|age:(recipient|enc)|pgp:(created_at|enc|fp))$/
+}
+# The key one entry names, from its fields in F: what sops shows for it.
+# A recipient, an ARN, a key URL: public by design, never a secret.
+function key_name(type) {
+	if (type == "age") return F["recipient"]
+	if (type == "kms") return F["arn"]
+	if (type == "gcp_kms") return F["resource_id"]
+	if (type == "azure_kv") return F["vault_url"] "/keys/" F["name"]
+	if (type == "hc_vault") return F["vault_address"] "/v1/" F["engine_path"] "/keys/" F["key_name"]
+	if (type == "pgp") return F["fp"]
+	if (type == "hckms") return F["key_id"]
+	return ""
+}
+# One line per key entry: <group> TAB <type> <name>. Group 1 is the first
+# key group; a document without key_groups has that one group only. The
+# name is cut short and shown in printable ASCII only: a document from
+# someone else can hold anything there.
+function print_key(group, type,    name) {
+	name = key_name(type)
+	gsub(/[^ -~]/, "?", name)
+	if (length(name) > 200) name = substr(name, 1, 200) "..."
+	print group "\t" type " " name
 }
 # A key name is repeated in a message only when it looks like a name.
 function shown(k) {
@@ -218,6 +341,8 @@ function on_string(s,    kind, st, k) {
 		fail("a string where a list belongs" shown(k)); return
 	} else if (kind == "entry" && k == "context") {
 		fail("\"context\" is not an object"); return
+	} else if (kind == "entry" && keys) {
+		F[k] = s
 	}
 	St[depth] = "e"
 }
@@ -259,8 +384,11 @@ function on_open(c,    kind, st, k) {
 		return
 	}
 	if (st != "v0" && st != "v") { fail("it is not valid JSON"); return }
-	if (c == "{" && kind == "list") push("entry", "k0", Type[depth])
-	else if (c == "{" && kind == "groups") push("group", "k0", "")
+	if (c == "{" && kind == "list") {
+		group = K[depth - 1] == "group" ? ngroups : 1
+		split("", F)
+		push("entry", "k0", Type[depth])
+	} else if (c == "{" && kind == "groups") { ngroups++; push("group", "k0", "") }
 	else fail("a list inside a list")
 }
 
@@ -270,6 +398,7 @@ function on_close(c,    kind, st) {
 	if (c == "}") {
 		if (!is_obj(kind) || (st != "k0" && st != "e")) { fail("it is not valid JSON"); return }
 		if (kind == "doc" && ndoc != 2) { fail("\"data\" and \"sops\" are not both there"); return }
+		if (kind == "entry" && keys) print_key(group, Type[depth])
 	} else if (is_obj(kind) || (st != "v0" && st != "e")) {
 		fail("it is not valid JSON"); return
 	}
@@ -358,7 +487,7 @@ END {
 		if (explain) print why
 		exit 1
 	}
-	if (!explain) print datakind
+	if (!explain && !keys) print datakind
 }
 '
 
@@ -440,6 +569,40 @@ END {
 }
 '
 
+# The keys of a dotenv-format document (sgf_doc_keys): the sops_ lines of
+# key entries, such as
+#   sops_age__list_0__map_recipient=age1...
+#   sops_key_groups__list_1__map_kms__list_0__map_arn=arn:aws:kms:...
+# shellcheck disable=SC2016  # $0 and friends belong to awk
+SGF_AWK_DOTENV_KEYS='
+{ sub(/\r$/, "") }
+substr($0, 1, 5) == "sops_" && (eq = index($0, "=")) {
+	r = substr($0, 6, eq - 6)
+	g = 1
+	if (match(r, /^key_groups__list_[0-9]+__map_/)) {
+		g = substr(r, 18, RLENGTH - 23) + 1
+		r = substr(r, RLENGTH + 1)
+	}
+	p = index(r, "__list_")
+	if (p == 0) next
+	type = substr(r, 1, p - 1)
+	r = substr(r, p + 7)
+	if (!meta_keytype(type) || !match(r, /^[0-9]+__map_/)) next
+	id = g SUBSEP type SUBSEP substr(r, 1, RLENGTH - 6)
+	if (!(id in seen)) { seen[id] = 1; order[++n] = id }
+	V[id, substr(r, RLENGTH + 1)] = substr($0, eq + 1)
+}
+END {
+	nf = split("recipient arn resource_id vault_url name vault_address engine_path key_name fp key_id", field, " ")
+	for (i = 1; i <= n; i++) {
+		split(order[i], part, SUBSEP)
+		split("", F)
+		for (j = 1; j <= nf; j++) F[field[j]] = V[order[i], field[j]]
+		print_key(part[1], part[2])
+	}
+}
+'
+
 # sgf_is_sops_dotenv   (document on stdin)
 sgf_is_sops_dotenv() {
 	awk "${SGF_AWK_IS_TOKEN}${SGF_AWK_META}${SGF_AWK_DOTENV}"
@@ -515,19 +678,60 @@ sgf_is_sops_doc() {
 # sgf_blob_is_sops_doc <format> <object id> [git -C dir]
 # Checks a blob straight from the object store. Returns 2 when the blob
 # cannot be read, 1 when it is not a SOPS document.
+#
+# A blob with a NUL byte is never one (audit A-12). sops writes none,
+# and the clean filter refuses content that has any. Above all, the awk
+# of macOS ends a line at a NUL byte and never looks at the rest of it:
+# a complete SOPS document followed by "\0DB_PASSWORD=hunter2" would
+# pass the document check there. So the NUL bytes are counted, in the
+# same single read of the blob: tee hands it to the document check
+# (fd 3) and to tr, which keeps the NUL bytes only, and wc counts them.
+# The verdict is "doc" from the check and the count from wc, in either
+# order; anything else (a read that failed, a check that failed, a count
+# that is not 0) is "not a SOPS document".
 sgf_blob_is_sops_doc() {
-	local format="$1" oid="$2" dir="${3:-.}"
+	local format="$1" oid="$2" dir="${3:-.}" verdict
 	git -C "${dir}" cat-file -e "${oid}" 2>/dev/null || return 2
 	case "${format}" in
-	json) git -C "${dir}" cat-file blob "${oid}" | sgf_json_envelope_kind >/dev/null ;;
-	dotenv) git -C "${dir}" cat-file blob "${oid}" | sgf_is_sops_dotenv ;;
+	json | dotenv) ;;
+	*) return 1 ;;
+	esac
+	verdict="$(
+		{
+			{
+				git -C "${dir}" cat-file blob "${oid}" | tee /dev/fd/3 | tr -cd '\000' | wc -c >&4
+			} 3>&1 | sgf_doc_check "${format}" >/dev/null && echo doc
+		} 4>&1
+	)" || return 1
+	case "${verdict//[[:space:]]/}" in
+	0doc | doc0) return 0 ;;
 	*) return 1 ;;
 	esac
 }
 
+# sgf_doc_check <format>   (document on stdin)
+# sgf_json_envelope_kind or sgf_is_sops_dotenv, by format.
+sgf_doc_check() {
+	case "$1" in
+	json) sgf_json_envelope_kind ;;
+	dotenv) sgf_is_sops_dotenv ;;
+	*) cat >/dev/null && return 1 ;;
+	esac
+}
+
 # sgf_blob_problem <format> <object id> [git -C dir]
-# sgf_doc_problem for a blob in the object store.
+# sgf_doc_problem for a blob in the object store. A blob with NUL bytes
+# is named as such: the document check cannot be trusted with one (see
+# sgf_blob_is_sops_doc). Only called for a blob that failed that check,
+# so reading it twice costs nothing on the common path.
 sgf_blob_problem() {
+	local nuls
+	nuls="$(git -C "${3:-.}" cat-file blob "$2" 2>/dev/null | tr -cd '\000' | wc -c)" || nuls=""
+	nuls="${nuls//[!0-9]/}"
+	if [[ -n "${nuls}" && "${nuls}" != "0" ]]; then
+		echo "it holds NUL bytes (${nuls}), which a SOPS document never has"
+		return 0
+	fi
 	git -C "${3:-.}" cat-file blob "$2" 2>/dev/null | sgf_doc_problem "$1"
 }
 
@@ -602,6 +806,22 @@ sgf_doc_key_types() {
 		for (i = 1; i <= n; i++) if (order[i] in t) print order[i]
 	}
 	'
+}
+
+# sgf_doc_keys <format>   (SOPS document on stdin)
+# Prints the keys the document was encrypted for, one per line, in the
+# order of the document:  <key group> TAB <type> <name>, for example
+#   1	age age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+#   2	kms arn:aws:kms:eu-central-1:111111111111:key/...
+# Key group 1 is the first one (or the only one: a document without
+# key_groups). It reads the metadata sops stores in clear, nothing else.
+# Fails when a json document is not a SOPS document.
+sgf_doc_keys() {
+	case "$1" in
+	json) awk -v keys=1 "${SGF_AWK_IS_TOKEN}${SGF_AWK_META}${SGF_AWK_JSON}" ;;
+	dotenv) awk "${SGF_AWK_META}${SGF_AWK_DOTENV_KEYS}" ;;
+	*) return 1 ;;
+	esac
 }
 
 # sgf_credential_hint <indent> [key type...]

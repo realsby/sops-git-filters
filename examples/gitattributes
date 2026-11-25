@@ -4,23 +4,28 @@
 # merge=sops  → merges, rebases, cherry-picks and stash pops work on the
 #               decrypted content (merge-driver.sh). Without it, two
 #               branches that both changed a secret cannot be merged.
+# -text       → git converts no line endings. With core.autocrlf=true
+#               (common on Windows) it would put CRs into the ciphertext
+#               before the smudge filter sees it, and sops cannot read a
+#               dotenv document with them: the checkout would stop.
 
 # Every dotenv file, whatever it is called: .env, .env.local,
 # .env.production, prod.env. A pattern without a slash matches at every
 # depth, so no "**/" is needed. The wildcards are on purpose: a name
 # nobody thought of (.env.staging, next year) is encrypted too, instead
 # of being committed in plaintext without a word.
-.env                    filter=sops diff=sops merge=sops
-.env.*                  filter=sops diff=sops merge=sops
-*.env                   filter=sops diff=sops merge=sops
+.env                    filter=sops diff=sops merge=sops -text
+.env.*                  filter=sops diff=sops merge=sops -text
+*.env                   filter=sops diff=sops merge=sops -text
 
 # The price of the wildcards: a template without secrets (.env.example)
 # matches as well. Take it out again BELOW the lines above (the last
 # matching line wins), with "!" (back to git's default) and not with "-":
-# "-diff" would make git treat the file as binary. A template you forget
+# "-diff" would make git treat the file as binary, and "!text" gives it
+# the line endings of any other text file again. A template you forget
 # to list here is stored encrypted, which is harmless. .sops.yaml needs a
 # creation rule that matches the same names (see examples/sops.yaml).
-.env.example            !filter !diff !merge
+.env.example            !filter !diff !merge !text
 
-secrets/deploy.key      filter=sops diff=sops merge=sops
-config/credentials.yaml filter=sops diff=sops merge=sops
+secrets/deploy.key      filter=sops diff=sops merge=sops -text
+config/credentials.yaml filter=sops diff=sops merge=sops -text

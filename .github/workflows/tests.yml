@@ -24,6 +24,9 @@ defaults:
 jobs:
   shellcheck:
     runs-on: ubuntu-24.04
+    # It takes seconds; a job that hangs is stopped instead of running
+    # for the default six hours.
+    timeout-minutes: 10
     env:
       # Pinned: the shellcheck on the runner image changes with the image,
       # and its findings change with its version.
@@ -48,6 +51,12 @@ jobs:
   tests:
     name: tests (${{ matrix.os }}, sops ${{ matrix.sops }})
     runs-on: ${{ matrix.os }}
+    # About 1 minute on Linux and 6.5 on macOS, where the suite runs
+    # twice (the second time with bash 3.2), before the tests with
+    # 100,000 tracked files (audit A-01) were added. The limit leaves room
+    # for those and for a slow runner, and stops a hang long before the
+    # default of six hours.
+    timeout-minutes: ${{ matrix.os == 'macos-15' && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,3 +87,53 @@ jobs:
           ln -s /bin/bash "${RUNNER_TEMP}/bash32/bash"
           export PATH="${RUNNER_TEMP}/bash32:${RUNNER_TEMP}/tools:${PATH}"
           tests/run.sh
+
+  # core.autocrlf=true is the default of Git for Windows. Without the
+  # `*.sh text eol=lf` rule in .gitattributes, a checkout made with it
+  # has the scripts with CRLF line endings, and bash cannot run them.
+  # This job makes such a checkout in the layout of installation option
+  # A (a submodule), runs install.sh from it, and commits a secret with
+  # the guard as the pre-commit hook.
+  autocrlf:
+    name: install from a checkout with core.autocrlf=true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOPS_VERSION: "3.13.3"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download sops, age and prek (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "${RUNNER_TEMP}/tools"
+      - name: Install from a submodule checked out with core.autocrlf=true
+        run: |
+          export PATH="${RUNNER_TEMP}/tools:${PATH}"
+          # As Git for Windows sets it for every repository. The runner
+          # is thrown away after the job.
+          git config --global core.autocrlf true
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global protocol.file.allow always
+
+          git init -q "${RUNNER_TEMP}/target"
+          cd "${RUNNER_TEMP}/target"
+          git submodule add -q "${GITHUB_WORKSPACE}" utilities/sops-git-filters
+          tool=utilities/sops-git-filters
+          if grep -l $'\r' "${tool}"/*.sh; then
+            echo "::error::the scripts above were checked out with CRLF line endings"
+            exit 1
+          fi
+
+          export SOPS_AGE_KEY_FILE="${RUNNER_TEMP}/age-key.txt"
+          age-keygen -o "${SOPS_AGE_KEY_FILE}" 2>/dev/null
+          printf 'creation_rules:\n  - age: %s\n' "$(age-keygen -y "${SOPS_AGE_KEY_FILE}")" >.sops.yaml
+          cp "${tool}/examples/gitattributes" .gitattributes
+          "${tool}/install.sh"
+          ln -s ../../utilities/sops-git-filters/encryption-guard.sh .git/hooks/pre-commit
+
+          printf 'A=1\n' >.env
+          git add .sops.yaml .gitattributes .env
+          git commit -q -m "add .env"
+          git cat-file blob HEAD:.env | grep -q 'ENC\[AES256_GCM,'
+          "${tool}/encryption-guard.sh"

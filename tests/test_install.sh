@@ -61,6 +61,70 @@ test_install_that_stops_early_leaves_a_new_clone_unconfigured() {
 	assert_eq "$(git status --porcelain)" "" "git status still works"
 }
 
+# A filter.sops.process that outranks .git/config (GIT_CONFIG_COUNT,
+# `git -c`, a worktree's config) stops install.sh with exit 1. A clone
+# that never had the filters must come out of that unchanged: with
+# filter.sops.required=true and no filter command, the first edit of a
+# secret made `git status` and `git add` fail with exit 128 (audit A-03).
+test_install_stopped_by_an_overriding_process_filter_leaves_a_new_clone_working() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.process GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status"
+	assert_contains "${OUT}" "filter.sops.process is set outside" "install.sh message"
+	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
+	[[ ! -e "$(git rev-parse --git-common-dir)/sops-git-filters" ]] || fail "exit 1 left the scripts under .git/"
+
+	printf 'A=2\n' >>.env
+	run git status --short
+	assert_eq "${RC}" "0" "git status after an edit of the secret"
+	assert_eq "${OUT}" " M .env" "git status after an edit of the secret"
+
+	# The same with a clean or smudge command that is there for this one
+	# run only: it is no setup to keep fail-closed.
+	git checkout -q -- .env
+	run env PATH="$(path_with_only ../nosops git bash dirname)" \
+		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status without sops"
+	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
+}
+
+# The one exit 1 that comes after the settings are written: a filter
+# command in a config file that outranks .git/config. The settings are in
+# .git/config and work; the message says what was left undone.
+test_install_stopped_by_an_overriding_smudge_filter_says_what_it_left() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status"
+	assert_contains "${OUT}" "another git config file overrides" "install.sh message"
+	assert_contains "${OUT}" "no hooks were installed and no file was decrypted" "install.sh message"
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filter.sops.required"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
+	[[ ! -e "$(git rev-parse --git-path hooks)/post-checkout" ]] || fail "a hook was installed"
+
+	printf 'A=2\n' >.env
+	run git status --short
+	assert_eq "${RC}" "0" "git status after an edit of the secret"
+	git add .env
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "index blob"
+	assert_not_contains "$(stored .env)" 'A=2' "index blob"
+
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status without the override"
+	assert_contains "$(cat "$(git rev-parse --git-path hooks)/post-checkout")" 'managed by sops-git-filters' "the hook"
+}
+
 # filter.<driver>.process takes precedence over clean/smudge.
 test_install_removes_local_process_filter() {
 	new_repo repo
@@ -258,6 +322,32 @@ test_install_decrypts_several_dotenv_files() {
 	assert_eq "$(cat .env b.secret c.secret)" "$(printf 'A=1\nB=2\nC=3')" "working copies"
 }
 
+# A pathspec setting the caller exported (GIT_LITERAL_PATHSPECS=1 also
+# comes from `git --literal-pathspecs`) must not hide the secrets from
+# install.sh's decrypt pass or from preflight.sh.
+test_install_and_preflight_ignore_pathspec_settings_of_the_caller() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	printf 'B=2\n' >':(literal)b.secret'
+	git add -- .env './:(literal)b.secret'
+	git commit -q -m "two secrets"
+	cd ..
+
+	fresh_clone origin clone
+	run env GIT_LITERAL_PATHSPECS=1 "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(cat .env ':(literal)b.secret')" "$(printf 'A=1\nB=2')" "working copies"
+	assert_eq "$(git status --porcelain)" "" "git status"
+
+	local setting
+	for setting in GIT_LITERAL_PATHSPECS=1 "GIT_GLOB_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1"; do
+		# shellcheck disable=SC2086  # one or two settings
+		run env ${setting} "${TOOL}/preflight.sh"
+		assert_eq "${RC}" "0" "preflight.sh exit status with ${setting}"
+		assert_contains "${OUT}" "decryption works (1 set(s) of keys checked)" "preflight.sh with ${setting}"
+	done
+}
+
 # The permission hook chmods a secret right after git wrote it. That
 # changes the file's inode change time, and git took the secret for
 # locally modified: a rebase stopped with "Your local changes to the
@@ -355,5 +445,119 @@ test_install_does_not_write_a_file_with_nul_bytes_damaged() {
 	assert_contains "${OUT}" "- bin.secret" "install.sh report"
 	assert_eq "$(cat .env)" "A=1" "the text secret is decrypted"
 	assert_eq "$(git hash-object --no-filters bin.secret)" "$(blob_id bin.secret)" "the binary one is left as ciphertext"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
+
+# The re-smudge pass writes the plaintext where the working copy is. A
+# working copy that is a symlink, that lies in a directory reached
+# through one, or that has a second name (a hard link) leads out of the
+# working tree: there it is left as ciphertext and reported (audit A-06,
+# A-14). Git does not follow such a path either. The permission pass
+# does not chmod through a symlinked directory.
+test_install_does_not_write_through_a_link() {
+	new_repo origin
+	mkdir secrets
+	printf 'A=1\n' >.env
+	printf 'B=2\n' >secrets/app.secret
+	printf 'C=3\n' >hard.secret
+	printf 'D=4\n' >plain.secret
+	git add .env secrets/app.secret hard.secret plain.secret
+	git commit -q -m "four secrets"
+	cd ..
+
+	fresh_clone origin clone
+	mkdir ../outside
+	# The working copy itself is a symlink to a copy of the ciphertext.
+	cp .env ../outside/target.txt
+	rm .env
+	ln -s ../outside/target.txt .env
+	# A directory on the path is a symlink.
+	mv secrets/app.secret ../outside/app.secret
+	rmdir secrets
+	ln -s ../outside secrets
+	# A second name, outside the working tree.
+	ln hard.secret ../outside/hard.txt
+	chmod 644 ../outside/target.txt ../outside/app.secret
+
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status"
+	assert_contains "${OUT}" "REACHED THROUGH A LINK" "install.sh report"
+	local name
+	for name in .env secrets/app.secret hard.secret; do
+		assert_contains "${OUT}" "   - ${name}" "install.sh report"
+		assert_not_contains "${OUT}" "Re-smudged ${name}" "install.sh output"
+	done
+	assert_eq "$(git hash-object --no-filters ../outside/target.txt)" "$(blob_id .env)" "the target of the symlink"
+	assert_eq "$(git hash-object --no-filters ../outside/app.secret)" "$(blob_id secrets/app.secret)" "the file in the symlinked directory"
+	assert_eq "$(git hash-object --no-filters ../outside/hard.txt)" "$(blob_id hard.secret)" "the other name of the hard link"
+	assert_eq "$(mode_of ../outside/target.txt)" "644" "mode of the target of the symlink"
+	assert_eq "$(mode_of ../outside/app.secret)" "644" "mode of the file in the symlinked directory"
+	[[ -L .env && -L secrets ]] || fail "a symlink was replaced"
+	# The secret without a link is decrypted as before.
+	assert_contains "${OUT}" "Re-smudged plain.secret" "install.sh output"
+	assert_eq "$(cat plain.secret)" "D=4" "working copy of the secret without a link"
+	assert_eq "$(mode_of plain.secret)" "600" "mode of the secret without a link"
+}
+
+# cr_bytes <file> : how many CR bytes the file holds
+cr_bytes() {
+	tr -cd '\r' <"$1" | wc -c | tr -d ' '
+}
+
+# core.autocrlf=true and no -text: a clone made before the filters were
+# set up holds the ciphertext with CRLF line endings. Without its CRs it
+# is the stored blob, and install.sh decrypts it, as it decrypts an LF
+# copy (audit A-07); before, it left the ciphertext there and exited 0.
+# install.sh runs from the checkout of the tool here: the clone holds
+# the scripts with CRLF line endings too, and bash cannot run them.
+test_install_decrypts_a_crlf_checkout_of_the_ciphertext() {
+	local format
+	for format in json dotenv; do
+		new_repo "origin-${format}" "${format}"
+		printf 'A=1\nB=2\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+		cd ..
+		git clone -q -c core.autocrlf=true "origin-${format}" "clone-${format}"
+		cd "clone-${format}" || exit 1
+		assert_ne "$(cr_bytes .env)" "0" "CR bytes in the ciphertext of the clone (${format})"
+
+		run "${SGF_TOOL_DIR}/install.sh"
+		assert_eq "${RC}" "0" "install.sh exit status (${format})"
+		assert_contains "${OUT}" "Re-smudged .env" "install.sh output (${format})"
+		assert_eq "$(cat .env)" "$(printf 'A=1\nB=2')" "working copy (${format})"
+		assert_eq "$(cr_bytes .env)" "0" "CR bytes in the plaintext (${format})"
+		assert_eq "$(mode_of .env)" "600" "mode (${format})"
+		assert_eq "$(git status --porcelain)" "" "git status (${format})"
+		cd ..
+	done
+}
+
+# With -text, as examples/gitattributes has it, git converts no line
+# endings: no CR in the ciphertext of a new clone, none in the
+# plaintext, and a later checkout of a dotenv secret decrypts (sops
+# cannot read a dotenv document with CRLF line endings).
+test_install_with_the_example_attributes_and_autocrlf() {
+	new_repo origin dotenv
+	cp "${SGF_TOOL_DIR}/examples/gitattributes" .gitattributes
+	printf 'A=1\n' >.env
+	git add .gitattributes .env
+	git commit -q -m "add .env with the example attributes"
+	printf 'A=2\n' >.env
+	git commit -q -am "change .env"
+	cd ..
+	git clone -q -c core.autocrlf=true origin clone
+	cd clone || exit 1
+	assert_eq "$(cr_bytes .env)" "0" "CR bytes in the ciphertext of the clone"
+
+	run "${SGF_TOOL_DIR}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(cat .env)" "A=2" "working copy"
+	assert_eq "$(cr_bytes .env)" "0" "CR bytes in the plaintext"
+
+	run git checkout -q HEAD~1
+	assert_eq "${RC}" "0" "git checkout of the earlier version"
+	assert_eq "$(cat .env)" "A=1" "working copy after the checkout"
+	assert_eq "$(cr_bytes .env)" "0" "CR bytes after the checkout"
 	assert_eq "$(git status --porcelain)" "" "git status"
 }

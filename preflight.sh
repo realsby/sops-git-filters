@@ -21,13 +21,18 @@
 # ║                                                                  ║
 # ║    ./utilities/sops-git-filters/preflight.sh && git pull         ║
 # ║                                                                  ║
-# ║  What it cannot know: commits you have not fetched yet may name  ║
-# ║  other keys than the files you have now.                         ║
+# ║  It checks the versions in the index, those of the current       ║
+# ║  checkout, and no other commit: not the commits a pull would     ║
+# ║  fetch, and not a local branch, tag or stash you switch to,      ║
+# ║  merge or rebase onto. A file there may name other keys than     ║
+# ║  the files you have now.                                         ║
 # ║                                                                  ║
 # ║  Usage:                                                          ║
 # ║    preflight.sh [--quiet]                                        ║
 # ║                                                                  ║
-# ║    --quiet   print nothing when decryption works                 ║
+# ║    --quiet   print nothing when decryption works; the warning    ║
+# ║              about managed files that are not SOPS documents     ║
+# ║              (they were not checked) still goes to stderr        ║
 # ║                                                                  ║
 # ║  Exit status:                                                    ║
 # ║    0  decryption works (or no SOPS-managed file is tracked)      ║
@@ -132,7 +137,7 @@ access_of() {
 # exit status is lost. A list that is cut short (an index that cannot be
 # read) must not look like "nothing to check": ask once here, where the
 # status counts.
-if ! git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter >/dev/null; then
+if ! sgf_ls_managed "${TARGET_ROOT}" >/dev/null; then
 	echo "preflight: cannot list the tracked files and their attributes (git's message is above)." >&2
 	exit 2
 fi
@@ -148,14 +153,17 @@ unreadable=0
 not_documents=0
 seen_sets=""
 
-while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
+previous_path=""
+while IFS= read -r -d '' record; do
+	# "<mode> <object id> <stage>" TAB <path> (lib.sh). An unmerged path
+	# is listed once per stage; its first entry stands for it.
+	path="${record#*$'\t'}"
+	[[ "${path}" != "${previous_path}" ]] || continue
+	previous_path="${path}"
 
-	# "<mode> <object id>" of the index entry. GIT_LITERAL_PATHSPECS: the
-	# path is a file name here, not a pattern.
-	entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}') || entry=""
-	mode="${entry%% *}"
-	sha="${entry#* }"
+	mode="${record%% *}"
+	sha="${record#* }"
+	sha="${sha%% *}"
 	if [[ -z "${sha}" ]]; then
 		echo "preflight: cannot read the index entry of ${path}." >&2
 		unreadable=$((unreadable + 1))
@@ -203,7 +211,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 		# shellcheck disable=SC2046  # one word per key type
 		sgf_credential_hint "    " $(git -C "${TARGET_ROOT}" cat-file blob "${sha}" | sgf_doc_key_types)
 	} >&2
-done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
+done < <(sgf_ls_managed "${TARGET_ROOT}")
 
 if [[ "${failed}" -ne 0 ]]; then
 	{
@@ -225,7 +233,13 @@ if [[ "${QUIET}" -eq 0 ]]; then
 	else
 		echo "preflight: decryption works (${checked} set(s) of keys checked)."
 	fi
-	if [[ "${not_documents}" -ne 0 ]]; then
-		echo "preflight: ${not_documents} SOPS-managed file(s) are not encrypted SOPS documents in the ${STORE_FORMAT} format and were not checked; run install.sh for the list."
-	fi
+fi
+# A warning, not a report of success: --quiet does not hide it (audit
+# S4). The exit status stays 0: these files (committed without the
+# filter, or in the other storage format) cannot be decrypted with any
+# key, so they say nothing about the access this script asks about.
+# install.sh lists them, and the guard blocks commits while they are
+# tracked.
+if [[ "${not_documents}" -ne 0 ]]; then
+	echo "preflight: ${not_documents} SOPS-managed file(s) are not encrypted SOPS documents in the ${STORE_FORMAT} format and were not checked; run install.sh for the list." >&2
 fi

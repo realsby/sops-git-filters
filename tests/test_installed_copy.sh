@@ -134,7 +134,8 @@ test_copy_holds_what_git_needs_and_follows_install() {
 }
 
 # A setup of before v3.0.0 named the scripts of the checkout in git config
-# and in the hooks. install.sh replaces both.
+# and in the hooks. install.sh replaces both. The hook is the one v2.1.x
+# wrote, byte for byte: install.sh replaces no other (audit S8).
 test_copy_replaces_a_setup_from_before_v3() {
 	new_repo repo
 	git config --local filter.sops.clean "${TOOL}/clean-filter.sh %f"
@@ -142,11 +143,9 @@ test_copy_replaces_a_setup_from_before_v3() {
 	git config --local merge.sops.driver "${TOOL}/merge-driver.sh %O %A %B %L %P"
 	local hook
 	hook="$(git rev-parse --git-path hooks)/post-checkout"
-	{
-		printf '#!/usr/bin/env bash\n# managed by sops-git-filters (secret file permissions)\n'
-		# shellcheck disable=SC2016  # $root belongs to the hook
-		printf 'root="$(git rev-parse --show-toplevel)"\n"$root"/%s/harden-permissions.sh --quiet\n' "${TOOL}"
-	} >"${hook}"
+	# shellcheck disable=SC2016  # $root belongs to the hook
+	hook_of_2_1 post-checkout 'HARDEN="$root"/'"'${TOOL}/harden-permissions.sh'" >"${hook}"
+	assert_contains "$(cat "${hook}")" "${TOOL}/harden-permissions.sh" "the hook of v2.1.x"
 
 	run "${TOOL}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"

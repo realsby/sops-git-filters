@@ -12,7 +12,12 @@
 # ║  What is checked: EVERY entry in the index whose filter          ║
 # ║  attribute is "sops", not only the paths staged for this         ║
 # ║  commit. A secret that was committed in plaintext long ago is    ║
-# ║  reported until it is fixed.                                     ║
+# ║  reported until it is fixed. The attribute is read from the      ║
+# ║  .gitattributes files in the index, the ones the commit          ║
+# ║  carries, not from the working tree. Git also reads attribute    ║
+# ║  files no commit carries ($GIT_DIR/info/attributes above all);   ║
+# ║  the guard blocks while one of them could change the filter      ║
+# ║  attribute of a path, and names the line.                        ║
 # ║                                                                  ║
 # ║  How: each blob is read by object id and must be a completely    ║
 # ║  encrypted SOPS document in the repository's storage format      ║
@@ -62,55 +67,62 @@ STORE_FORMAT="$(sgf_store_format "${PROJECT_ROOT}")" || exit 1
 OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
 # ── Check the entries ────────────────────────────────────────────
-# check_entries reads the answer of `git check-attr -z` on stdin:
-# <path> NUL <attribute> NUL <value> NUL, one triple per index entry and
-# in the same order as the arrays filled by check_index. Exit status:
+# check_entries reads the lines of managed_entries (below) on stdin, one
+# per SOPS-managed index entry, and fills INDEX_MODES, INDEX_OIDS and
+# INDEX_PATHS with them. Exit status:
 #   0 every SOPS-managed blob is an encrypted SOPS document
 #   1 at least one is not (already reported)
 #   2 the check itself could not be completed
+INDEX_MODES=()
+INDEX_OIDS=()
+INDEX_PATHS=()
 check_entries() {
-	local i=0 path attr value status why managed=0
+	local i=0 line meta path status why managed=0
 	local unencrypted="" unreadable="" other_format=""
 
-	while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-		if [[ "${path}" != "${INDEX_PATHS[i]:-}" ]]; then
-			echo "encryption-guard: git check-attr answered out of order — cannot verify the index" >&2
+	while IFS= read -r line; do
+		meta="${line%%$'\t'*}"
+		if ! unquote_path "${line#*$'\t'}"; then
+			echo "encryption-guard: cannot read the name git printed for an index entry — cannot verify the index" >&2
 			return 2
 		fi
-		if [[ "${attr}" == "filter" && "${value}" == "sops" ]]; then
-			case "${INDEX_MODES[i]}" in
-			120000 | 160000)
-				# A symlink or a submodule: git never runs a filter on these.
-				;;
-			*)
-				managed=$((managed + 1))
+		path="${REPLY}"
+		INDEX_MODES[i]="${meta%% *}"
+		meta="${meta#* }"
+		INDEX_OIDS[i]="${meta%% *}"
+		INDEX_PATHS[i]="${path}"
+		case "${INDEX_MODES[i]}" in
+		120000 | 160000)
+			# A symlink or a submodule: git never runs a filter on these.
+			;;
+		*)
+			managed=$((managed + 1))
+			status=0
+			sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}" || status=$?
+			if [[ "${status}" -eq 1 ]] && left_out_of_commit "${i}"; then
+				# Intent to add: not part of this commit, see below.
+				managed=$((managed - 1))
 				status=0
-				sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}" || status=$?
-				case "${status}" in
-				0) ;;
-				2) unreadable="${unreadable}   - ${path}"$'\n' ;;
-				*)
-					# Encrypted, but in the format .sops-filter.conf does not
-					# name: a storage-format change that is not finished.
-					if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}"; then
-						other_format="${other_format}   - ${path}"$'\n'
-					else
-						# Why not: a line number or a key name, never a value.
-						why="$(sgf_blob_problem "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}")"
-						unencrypted="${unencrypted}   - ${path}${why:+  (${why})}"$'\n'
-					fi
-					;;
-				esac
+			fi
+			case "${status}" in
+			0) ;;
+			2) unreadable="${unreadable}   - ${path}"$'\n' ;;
+			*)
+				# Encrypted, but in the format .sops-filter.conf does not
+				# name: a storage-format change that is not finished.
+				if sgf_blob_is_sops_doc "${OTHER_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}"; then
+					other_format="${other_format}   - ${path}"$'\n'
+				else
+					# Why not: a line number or a key name, never a value.
+					why="$(sgf_blob_problem "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}")"
+					unencrypted="${unencrypted}   - ${path}${why:+  (${why})}"$'\n'
+				fi
 				;;
 			esac
-		fi
+			;;
+		esac
 		i=$((i + 1))
 	done
-
-	if [[ "${i}" -ne "${#INDEX_PATHS[@]}" ]]; then
-		echo "encryption-guard: git check-attr answered for ${i} of ${#INDEX_PATHS[@]} index entries — cannot verify the index" >&2
-		return 2
-	fi
 
 	if [[ -n "${unreadable}" ]]; then
 		blocked "cannot read SOPS-managed files from the index"
@@ -133,6 +145,14 @@ check_entries() {
 		echo "      rotate that secret." >&2
 		echo " If the reason names a key that sops does not write and your sops is" >&2
 		echo " newer than this tool, update sops-git-filters instead." >&2
+		# attr.tree (git 2.42) and GIT_ATTR_SOURCE make git add read the
+		# attributes from a tree, not from .gitattributes: where that tree
+		# marks nothing, git add runs no filter, and step 2 changes nothing.
+		if [[ -n "${GIT_ATTR_SOURCE:-}" ]] ||
+			git -C "${PROJECT_ROOT}" config attr.tree >/dev/null 2>&1; then
+			echo " attr.tree or GIT_ATTR_SOURCE is set: git add takes the attributes" >&2
+			echo " from that tree, not from .gitattributes. Unset it before step 2." >&2
+		fi
 		echo "========================================================" >&2
 		return 1
 	fi
@@ -165,44 +185,314 @@ check_entries() {
 	return 0
 }
 
-# check_index reads `git ls-files -s -z` on stdin:
-# "<mode> <object id> <stage>" TAB <path> NUL per entry. Blobs are later
-# read by object id, so no path is ever turned into a revision (a file
-# named like "2:prod.secret" would otherwise be read as index stage 2),
-# and unusual file names need no quoting.
-INDEX_MODES=()
-INDEX_OIDS=()
-INDEX_PATHS=()
-check_index() {
-	local record meta mode oid n=0
-	while IFS= read -r -d '' record; do
-		meta="${record%%$'\t'*}"
-		mode="${meta%% *}"
-		oid="${meta#* }"
-		oid="${oid%% *}"
-		INDEX_MODES[n]="${mode}"
-		INDEX_OIDS[n]="${oid}"
-		INDEX_PATHS[n]="${record#*$'\t'}"
-		n=$((n + 1))
-	done
-	[[ "${n}" -gt 0 ]] || return 0
+# ── Entries this commit leaves out ───────────────────────────────
+# `git add -N <file>` (intent to add) puts the path in the index with
+# the empty blob, to show the file in `git diff`. That blob is no SOPS
+# document, but it never reaches a commit: a plain `git commit` leaves
+# the entry out, and `git commit -a` or `git commit -- <file>` stage the
+# content, through the filter, before this hook runs. Blocking it would
+# block every commit until the file is staged (audit A-05).
+#
+# left_out_of_commit <index position> succeeds only when the entry holds
+# the empty blob AND is missing from the tree git builds from the index
+# for the commit (`git write-tree`, which skips intent-to-add entries;
+# it also writes that tree to the object store, as the commit will).
+# There is no documented way to read the intent-to-add flag itself. Any
+# answer it cannot get or does not expect counts as "in the commit", so
+# the entry is checked as before: it fails closed. A path with a newline
+# cannot be asked about on the one line `git cat-file --batch-check`
+# reads, and is checked as before too.
+COMMIT_TREE=""
+left_out_of_commit() {
+	local path="${INDEX_PATHS[$1]}" size answer
+	[[ "${path}" != *$'\n'* ]] || return 1
+	size="$(git -C "${PROJECT_ROOT}" cat-file -s "${INDEX_OIDS[$1]}" </dev/null 2>/dev/null)" || return 1
+	[[ "${size}" == "0" ]] || return 1
+	if [[ -z "${COMMIT_TREE}" ]]; then
+		# Fails while a path is unmerged: then nothing is left out.
+		COMMIT_TREE="$(git -C "${PROJECT_ROOT}" write-tree </dev/null 2>/dev/null)" || COMMIT_TREE=""
+		[[ -n "${COMMIT_TREE}" ]] || return 1
+	fi
+	answer="$(printf '%s:%s\n' "${COMMIT_TREE}" "${path}" |
+		git -C "${PROJECT_ROOT}" cat-file --batch-check 2>/dev/null)" || return 1
+	[[ "${answer}" == "${COMMIT_TREE}:${path} missing" ]]
+}
 
-	# pipefail: a failing check-attr fails this pipeline even when
-	# check_entries saw nothing wrong in the part it received.
-	printf '%s\0' "${INDEX_PATHS[@]}" |
-		git -C "${PROJECT_ROOT}" check-attr --stdin -z filter |
-		check_entries
+# ── Which entries are SOPS-managed ───────────────────────────────
+# managed_entries prints one line per index entry whose filter attribute
+# is "sops":  "<mode> <object id> <stage>" TAB <path>. Each stage of an
+# unmerged path is an entry of its own. Blobs are later read by object
+# id, so no path is ever turned into a revision (a file named like
+# "2:prod.secret" would otherwise be read as index stage 2).
+#
+# Git lists the index (`git ls-files -s`) and answers for the attribute
+# of every path in it (`git check-attr`); awk puts the two together, and
+# only the managed entries reach bash. Reading every entry in bash took
+# 8 seconds with 60,000 tracked files, on every commit; this takes 0.2
+# (audit A-01). The text output is read, not the -z one: the awk of
+# macOS ends a line at a NUL byte. In text, git prints a path as it is,
+# or in double quotes with C-style escapes when it holds a control
+# character, a double quote or a backslash (unquote_path below). The
+# same path is printed the same way by both commands; core.quotepath=off
+# leaves the bytes above 127 alone, in both.
+#
+# --cached: the attributes come from the .gitattributes files in the
+# index, the ones this commit carries. Without it git reads the working
+# tree, and a local edit that is not staged (".env -filter", left from
+# debugging) would decide which blobs are checked. That same edit keeps
+# `git add` from running the filter, so the plaintext it stages would
+# pass unseen (audit A-11). For the same reason the list does not come
+# from `git ls-files -- ':(attr:filter=sops)'`, one call that is faster
+# still: that pathspec reads the attributes of the working tree.
+#
+# -C: from the top of the working tree. `git ls-files` lists only what
+# is below the current directory, so a guard started in a subdirectory
+# would pass over every secret outside it.
+#
+# The index is listed twice: once for the entries, once for check-attr.
+# Answer number i must be about entry number i, and every entry must get
+# one; anything else (an answer cut short, an index that changed in
+# between) is an error. pipefail: a git command that fails fails the
+# pipeline too.
+managed_entries() {
+	{
+		git -C "${PROJECT_ROOT}" -c core.quotepath=off ls-files -s &&
+			echo &&
+			git -C "${PROJECT_ROOT}" -c core.quotepath=off ls-files -s |
+			awk '{ print substr($0, index($0, "\t") + 1) }' |
+				git -C "${PROJECT_ROOT}" -c core.quotepath=off check-attr --cached --stdin filter
+	} | awk '
+	# Up to the empty line: the entries. After it: one answer per entry,
+	# "<path>: filter: <value>".
+	BEGIN { listing = 1 }
+	listing {
+		if ($0 == "") {
+			listing = 0
+			next
+		}
+		tab = index($0, "\t")
+		n++
+		meta[n] = substr($0, 1, tab - 1)
+		path[n] = substr($0, tab + 1)
+		next
+	}
+	{
+		i++
+		head = path[i] ": filter: "
+		if (i > n || substr($0, 1, length(head)) != head) {
+			print "encryption-guard: git check-attr answered out of order — cannot verify the index" | "cat 1>&2"
+			failed = 1
+			exit
+		}
+		if (substr($0, length(head) + 1) == "sops") print meta[i] "\t" path[i]
+	}
+	END {
+		if (failed) exit 2
+		if (listing) {
+			print "encryption-guard: the list of index entries was cut short — cannot verify the index" | "cat 1>&2"
+			exit 2
+		}
+		if (i != n) {
+			printf "encryption-guard: git check-attr answered for %d of %d index entries — cannot verify the index\n", i, n | "cat 1>&2"
+			exit 2
+		}
+	}'
+}
+
+# unquote_path <path as managed_entries prints it>
+# The path itself, in REPLY. Undoes the quoting of git (quote_c_style):
+# a quoted path is in double quotes, with \a \b \t \n \v \f \r \" \\ and
+# \ooo (three octal digits) for the bytes it escapes. Returns 1 for
+# anything else, which git does not print.
+unquote_path() {
+	local rest="$1" out="" c
+	if [[ "${rest}" != \"* ]]; then
+		REPLY="${rest}"
+		return 0
+	fi
+	[[ "${#rest}" -ge 2 && "${rest}" == *\" ]] || return 1
+	rest="${rest:1:${#rest}-2}"
+	while [[ -n "${rest}" ]]; do
+		c="${rest:0:1}"
+		if [[ "${c}" != "\\" ]]; then
+			out="${out}${c}"
+			rest="${rest:1}"
+			continue
+		fi
+		c="${rest:1:1}"
+		case "${c}" in
+		a) out="${out}"$'\a' ;;
+		b) out="${out}"$'\b' ;;
+		t) out="${out}"$'\t' ;;
+		n) out="${out}"$'\n' ;;
+		v) out="${out}"$'\v' ;;
+		f) out="${out}"$'\f' ;;
+		r) out="${out}"$'\r' ;;
+		'"' | "\\") out="${out}${c}" ;;
+		[0-3])
+			[[ "${rest:1:3}" == [0-3][0-7][0-7] ]] || return 1
+			# shellcheck disable=SC2059  # the format is the escape itself
+			printf -v c "\\${rest:1:3}"
+			out="${out}${c}"
+			rest="${rest:2}"
+			;;
+		*) return 1 ;;
+		esac
+		rest="${rest:2}"
+	done
+	REPLY="${out}"
+}
+
+# ── Attribute files that no commit carries ───────────────────────
+# check-attr --cached replaces the .gitattributes of the working tree by
+# those of the index, but git still reads three files outside the tree:
+#
+#   $GIT_DIR/info/attributes   above every .gitattributes
+#   core.attributesFile        below them all (default
+#                              ~/.config/git/attributes)
+#   the system file            below them all ($(prefix)/etc/gitattributes)
+#
+# A line in info/attributes such as ".env -filter" wins over the
+# "filter=sops" of the commit. `git add` then stages the plaintext, and
+# the guard, which asks git, no longer counted .env as SOPS-managed: the
+# plaintext reached the commit (audit A-11). The two lower files cannot
+# override a .gitattributes with a line of their own, but a macro they
+# define applies wherever its name is used: "[attr]binary -filter"
+# reaches every path a .gitattributes marks "filter=sops binary".
+#
+# Git cannot be asked for the attributes without these files, so the
+# guard reads them and blocks while one of them could change the filter
+# attribute of a path:
+#   - info/attributes: a line that sets filter to anything but "sops"
+#     (filter, -filter, !filter, filter=lfs), sets a macro, or redefines
+#     a macro of the root .gitattributes of the index;
+#   - any of the three: a macro definition that sets filter to anything
+#     but "sops", or sets another macro.
+# A macro is a name an [attr] line defines, in these files or in the
+# root .gitattributes (the only one git takes macros from). The built-in
+# "binary" (-diff -merge -text) counts only once a file redefines it.
+# Only a macro that is set expands: "-name", "!name" and "name=value"
+# do not. Lines with none of this (`*.bin binary`, comments) pass. A
+# quoted pattern with a blank in it is split like the attributes after
+# it: a word of it can only add a false alarm, never hide an attribute.
+#
+# A file that exists but cannot be read fails the check. Git older than
+# 2.42 cannot say where the system file is; it is not read then.
+# attr.tree and GIT_ATTR_SOURCE need nothing here: check-attr --cached
+# ignores them (check_entries names them when plaintext is staged).
+#
+# attribute_overrides prints "<file>:<line number>: <line>" for each
+# such line. Exit status: 0 done (with output or not), 2 cannot tell.
+attribute_overrides() {
+	local info global system file
+	local -a files=()
+
+	info="$(git -C "${PROJECT_ROOT}" rev-parse --git-path info/attributes)" || return 2
+	if ! global="$(git -C "${PROJECT_ROOT}" var GIT_ATTR_GLOBAL 2>/dev/null)"; then
+		# git before 2.42: the same lookup, by hand.
+		global="$(git -C "${PROJECT_ROOT}" config --type=path core.attributesFile 2>/dev/null)" || global=""
+		if [[ -z "${global}" && -n "${XDG_CONFIG_HOME:-}" ]]; then
+			global="${XDG_CONFIG_HOME}/git/attributes"
+		elif [[ -z "${global}" && -n "${HOME:-}" ]]; then
+			global="${HOME}/.config/git/attributes"
+		fi
+	fi
+	# Prints nothing and fails under GIT_ATTR_NOSYSTEM, and before 2.42.
+	system="$(git -C "${PROJECT_ROOT}" var GIT_ATTR_SYSTEM 2>/dev/null)" || system=""
+
+	# awk takes the role of each file from an assignment before it. Every
+	# path is made absolute, so none is taken for an assignment itself.
+	for file in "system=${system}" "global=${global}" "info=${info}"; do
+		[[ -n "${file#*=}" ]] || continue
+		[[ "${file#*=}" == /* ]] || file="${file%%=*}=${PROJECT_ROOT}/${file#*=}"
+		[[ -e "${file#*=}" ]] || continue
+		if [[ -d "${file#*=}" || ! -r "${file#*=}" ]]; then
+			echo "encryption-guard: cannot read ${file#*=}, an attributes file git reads too" >&2
+			return 2
+		fi
+		files+=("role=${file%%=*}" "${file#*=}")
+	done
+	[[ "${#files[@]}" -gt 0 ]] || return 0
+
+	# On stdin: the root .gitattributes of the index (a blob per stage
+	# while it is unmerged), for the names of its macros.
+	{
+		git -C "${PROJECT_ROOT}" ls-files -s -- .gitattributes |
+			awk -F '\t' '$2 == ".gitattributes" { split($1, m, " "); print m[2] }' |
+			while IFS= read -r file; do
+				git -C "${PROJECT_ROOT}" cat-file blob "${file}" </dev/null || exit 2
+				echo
+			done
+	} | awk '
+	{
+		text = $0
+		sub(/\r$/, "", text)
+		gsub(/\r/, " ") # git counts a CR as a blank
+		if (NF == 0 || substr($1, 1, 1) == "#") next
+		n++
+		src[n] = role
+		file[n] = FILENAME
+		num[n] = FNR
+		line[n] = text
+		first = 2
+		if (substr($1, 1, 6) == "[attr]") {
+			name = substr($1, 7)
+			if (name == "") {
+				name = $2
+				first = 3
+			}
+			defines[n] = name
+			macro[name] = 1
+			if (role == "tree") tree_macro[name] = 1
+		}
+		for (i = first; i <= NF; i++) {
+			t = $i
+			c = substr(t, 1, 1)
+			if (c == "-" || c == "!") t = substr(t, 2)
+			eq = index(t, "=")
+			key = eq ? substr(t, 1, eq - 1) : t
+			if (key == "filter" && $i != "filter=sops") touches[n] = 1
+			if (c != "-" && c != "!" && !eq) uses[n] = uses[n] " " key
+		}
+	}
+	END {
+		for (k = 1; k <= n; k++) {
+			if (src[k] == "tree") continue
+			if (src[k] != "info" && defines[k] == "") continue
+			bad = touches[k]
+			m = split(uses[k], used, " ")
+			for (j = 1; j <= m; j++)
+				if (used[j] in macro) bad = 1
+			if (src[k] == "info" && defines[k] != "" && (defines[k] in tree_macro)) bad = 1
+			if (bad) printf "%s:%d: %s\n", file[k], num[k], line[k]
+		}
+	}' role=tree - "${files[@]}" || return 2
 }
 
 # `|| status=$?` keeps errexit from ending the script before the
-# message below. With pipefail, a failing `git ls-files` fails the
-# pipeline too.
-#
-# -C: from the top of the working tree. `git ls-files` lists only what is
-# below the current directory, so a guard started in a subdirectory
-# would pass over every secret outside it.
+# message below. With pipefail, a failing listing fails the pipeline
+# too, even when check_entries saw nothing wrong in the part it got.
 status=0
-git -C "${PROJECT_ROOT}" ls-files -s -z | check_index || status=$?
+overrides="$(attribute_overrides)" || status=$?
+if [[ "${status}" -eq 0 && -n "${overrides}" ]]; then
+	blocked "a local attributes file can change which files are encrypted"
+	echo " These lines set the filter attribute, or a macro that can, in a file" >&2
+	echo " that no commit carries:" >&2
+	echo "" >&2
+	printf '%s\n' "${overrides}" | sed 's/^/   /' >&2
+	echo "" >&2
+	echo " git add obeys them, and may stage a secret in plaintext, while the" >&2
+	echo " guard checks the files the .gitattributes of the commit mark" >&2
+	echo " filter=sops: it cannot verify what the commit will hold." >&2
+	echo "" >&2
+	echo " To fix: remove those lines; what a path needs belongs in .gitattributes," >&2
+	echo " in a commit. Then re-stage the secrets: git add --renormalize -- <files>" >&2
+	echo "========================================================" >&2
+	exit 1
+fi
+if [[ "${status}" -eq 0 ]]; then
+	managed_entries | check_entries || status=$?
+fi
 
 case "${status}" in
 0) exit 0 ;;

@@ -1,0 +1,16 @@
+# Dependabot keeps the actions in .github/workflows current: it opens a
+# pull request when an action has a new release, with the pinned commit
+# and the version comment updated. The tools CI downloads (sops, age,
+# prek, shellcheck) are pinned by version and SHA-256 in the workflow
+# and in tests/ci-install-tools.sh; Dependabot does not read those, so
+# they are updated by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # A release is proposed only once it is a week old: a tag that was
+    # pushed by mistake or by an attacker is usually withdrawn by then.
+    cooldown:
+      default-days: 7

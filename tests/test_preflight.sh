@@ -197,6 +197,16 @@ test_preflight_mentions_files_it_did_not_check() {
 	assert_eq "${RC}" "0" "preflight.sh exit status"
 	assert_contains "${OUT}" "decryption works (1 set(s) of keys checked)" "preflight.sh output"
 	assert_contains "${OUT}" "1 SOPS-managed file(s) are not encrypted SOPS documents" "preflight.sh output"
+
+	# --quiet leaves out the success line, not the note: it is a warning
+	# (audit S4). The exit status stays 0, decryption works.
+	run "${TOOL}/preflight.sh" --quiet
+	assert_eq "${RC}" "0" "preflight.sh --quiet exit status"
+	assert_not_contains "${OUT}" "decryption works" "preflight.sh --quiet output"
+	assert_contains "${OUT}" "1 SOPS-managed file(s) are not encrypted SOPS documents" "preflight.sh --quiet output"
+	local err
+	err="$("${TOOL}/preflight.sh" --quiet 2>&1 >/dev/null)"
+	assert_contains "${err}" "not encrypted SOPS documents" "the note goes to stderr"
 }
 
 # Files that differ only in the version of sops that wrote them are opened
