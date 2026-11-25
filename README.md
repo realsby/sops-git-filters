@@ -53,42 +53,62 @@ The clean filter compares against the index, not HEAD, so the stash/unstash cycl
 
 ## How it works
 
-```
-        ┌────────────────────┐  filter.sops.clean (clean-filter.sh)  ┌──────────────────┐
-        │   Working tree     │ ─────────── git add ────────────────▶ │    Git object    │
-        │   .env (plaintext) │                                       │  store & remote  │
-        │                    │ ◀────────── checkout ──────────────── │   (ciphertext)   │
-        └────────────────────┘  filter.sops.smudge (smudge-filter.sh) └──────────────────┘
-                                                                            │
-                 git diff / git log -p ◀── diff.sops.textconv ──────────────┘
-                 (plaintext diffs)          (routes diffs through smudge)
+Git runs a filter on every file that `.gitattributes` marks `filter=sops`: the clean filter when it reads the file from the working tree to store it, the smudge filter when it writes the file back.
 
-                 git commit ──▶ encryption-guard.sh (pre-commit)
-                                rejects any tracked secret that is not an
-                                encrypted SOPS document
+```mermaid
+flowchart LR
+    WT["Working tree<br/>.env in plaintext"]
+    GIT["Index and object store<br/>.env as SOPS ciphertext"]
+    REMOTE["Remote<br/>ciphertext only"]
+    WT -- "git add: clean-filter.sh" --> GIT
+    GIT -- "checkout, pull: smudge-filter.sh" --> WT
+    GIT -- "git push" --> REMOTE
 ```
+
+`git diff` and `git log -p` show plaintext changes: `diff.sops.textconv` is `cat`, and git passes the blobs it compares through the smudge filter first (see [Troubleshooting](#troubleshooting), "Why is `diff.sops.textconv` set to `cat`?").
 
 Git does not run these scripts from your checkout of the tool. `install.sh` copies the ones git needs (`clean-filter.sh`, `smudge-filter.sh`, `merge-driver.sh`, `harden-permissions.sh` and `lib.sh`) into `sops-git-filters/` inside the git directory, and the filter, the merge driver and the hooks name that copy. **After an update of the tool, nothing changes until `install.sh` has run again**; the installed copy prints a line when it sees a newer version in the checkout. See [Security model](#security-model) for the reason.
 
-`smudge-filter.sh` is one `sops decrypt` (the plaintext goes from `sops` straight to git). When that fails it adds what to check for the kinds of key the file names, and exits non-zero: git stops, and nothing is written in place of the secret. `install.sh` writes the storage format into the smudge command: the filter cannot read `.sops-filter.conf` itself, because in a new working tree git checks `.env` out before that file.
+### The smudge filter
 
-`clean-filter.sh` decision tree on every `git add`:
+`smudge-filter.sh` is one `sops decrypt` (the plaintext goes from `sops` straight to git). When that fails, it adds what to check for the kinds of key the file names and exits non-zero: git stops, and nothing is written in place of the secret. `install.sh` writes the storage format into the smudge command. The filter cannot read `.sops-filter.conf` itself, because in a new working tree git checks `.env` out before that file.
 
-1. No `sops` on PATH, or no `.sops.yaml`? → **exit non-zero, git aborts the add.** Plaintext is never stored.
-2. Input already is a SOPS document? If it is the ciphertext git holds (the stored blob of step 4, byte for byte or with CRLF line endings that `core.autocrlf` added: a working copy that was never decrypted) → store that blob **unchanged**, with no key and no call to `sops`. Any other SOPS document must **decrypt with your keys**, or the add fails: a copy from another project, encrypted for that project's keys, or a forged one. Its plaintext then goes on to step 3 like any edit, so it is encrypted for the recipients in `.sops.yaml`, not kept with its own. Nothing is encrypted twice.
-3. File is new (not in index or HEAD)? → encrypt.
-4. File exists? → decrypt the stored blob, compare plaintexts:
-   - cannot decrypt (no key, expired cloud session) → **exit non-zero** with the `sops` error. No blind re-encryption.
-   - identical → output the **existing** ciphertext (no new IV → no false diff)
-   - different → re-encrypt, for the keys `.sops.yaml` names now. When they are not those of the stored version, one line names the keys added and removed.
-   - a run of the last 10 minutes answered the same question → give its answer again, without `sops` (see [What the clean filter remembers](#what-the-clean-filter-remembers)).
+### The clean filter
+
+```mermaid
+flowchart TD
+    IN["git add .env"] --> A{"sops on PATH and<br/>.sops.yaml present?"}
+    A -- no --> FAIL["exit non-zero:<br/>git aborts"]
+    A -- yes --> C{"same question answered<br/>in the last 10 minutes?"}
+    C -- yes --> AGAIN["the same answer again,<br/>without sops"]
+    C -- no --> S{"stored version in<br/>the index or HEAD?"}
+    S -- no --> ENC["sops encrypt"]
+    S -- yes --> DEC["sops decrypt<br/>the stored blob"]
+    DEC -- fails --> FAIL
+    DEC -- "same plaintext" --> REUSE["the stored blob,<br/>unchanged"]
+    DEC -- "plaintext changed" --> ENC
+    ENC --> CHK{"every value<br/>encrypted?"}
+    CHK -- no --> FAIL
+    CHK -- yes --> NEW["the new ciphertext"]
+```
+
+What `clean-filter.sh` does on every `git add`, step by step:
+
+1. No `sops` on PATH, or no `.sops.yaml`: **exit non-zero, and git aborts the add.** Plaintext is never stored.
+2. The input already is a SOPS document. If it is the ciphertext git holds (the stored blob of step 4, byte for byte or with CRLF line endings that `core.autocrlf` added: a working copy that was never decrypted), the filter stores that blob **unchanged**, with no key and no call to `sops`. Any other SOPS document must **decrypt with your keys**, or the add fails: a copy from another project, encrypted for that project's keys, or a forged one. Its plaintext then goes on to step 3 like any edit, so it is encrypted for the recipients in `.sops.yaml` and does not keep its own. Nothing is encrypted twice.
+3. The file is new (not in the index or HEAD): encrypt it.
+4. The file exists: decrypt the stored blob and compare the plaintexts.
+   - It cannot be decrypted (no key, expired cloud session): **exit non-zero** with the `sops` error. The filter never re-encrypts blindly.
+   - Identical: output the **existing** ciphertext. There is no new IV, so there is no false diff.
+   - Different: re-encrypt, for the keys `.sops.yaml` names now. When they are not those of the stored version, one line names the keys added and removed.
+   - A run of the last 10 minutes answered the same question: give its answer again, without `sops` (see [What the clean filter remembers](#what-the-clean-filter-remembers)).
 5. Whatever `sops` returned is checked before git gets it: it must be a SOPS document with every value encrypted. If it is not, **exit non-zero**. (A creation rule with `encrypted_regex` and the like, or an old `sops`, can leave content in clear inside a valid-looking envelope.)
 
-`SOPS_FILTER_FORCE_REENCRYPT=1` skips the comparison in step 4 and always re-encrypts (storage-format change, fresh data keys). It acts on every run of the filter in the git command it is set on, not only on the file you mean: git runs the filter for each managed file it checks again (one whose timestamp changed, or one it cannot trust its timestamp for). So set it on `git add` and commit without it: `SOPS_FILTER_FORCE_REENCRYPT=1 git add <file>`, then `git commit`. `git add <file>` stages that file only. On `git commit -a` the variable re-encrypts every managed file the commit checks again, and unchanged secrets are committed with new ciphertext: a diff nobody made. On a plain `git commit` it stages nothing new, and the extra runs cost only calls to `sops`.
+`SOPS_FILTER_FORCE_REENCRYPT=1` skips the comparison in step 4 and always re-encrypts (a storage-format change, fresh data keys). It acts on every run of the filter in the git command it is set on, not only on the file you mean: git runs the filter for each managed file it checks again (one whose timestamp changed, or one it cannot trust its timestamp for). So set it on `git add` and commit without it: `SOPS_FILTER_FORCE_REENCRYPT=1 git add <file>`, then `git commit`. `git add <file>` stages that file only. On `git commit -a` the variable re-encrypts every managed file the commit checks again, and unchanged secrets are committed with new ciphertext: a diff nobody made. On a plain `git commit` it stages nothing new, and the extra runs cost only calls to `sops`.
 
 ### What the clean filter remembers
 
-Git cannot tell whether a SOPS-managed file changed without running the clean filter, and it runs it again each time it looks at a secret with uncommitted changes. Each run decrypted the stored version and encrypted the edit: with a key service (AWS KMS, GCP KMS, Azure Key Vault, Vault) two requests, every time, and a new ciphertext every time ([issue #21](https://github.com/realsby/sops-git-filters/issues/21)). So a run now remembers its answer for 10 minutes, and a later run asked the same question gives the same answer without `sops`. Calls to `sops` for one secret with an edit that keeps its size, measured with git 2.54:
+Git cannot tell whether a SOPS-managed file changed without running the clean filter, and it runs the filter again each time it looks at a secret with uncommitted changes. Each run used to decrypt the stored version and encrypt the edit: with a key service (AWS KMS, GCP KMS, Azure Key Vault, Vault) that is two requests every time, and a new ciphertext every time ([issue #21](https://github.com/realsby/sops-git-filters/issues/21)). So a run now remembers its answer for 10 minutes, and a later run asked the same question gives the same answer without `sops`. Calls to `sops` for one secret with an edit that keeps its size, measured with git 2.54:
 
 | Command | Before (decrypt / encrypt) | Now |
 |---|---|---|
@@ -100,13 +120,74 @@ Git cannot tell whether a SOPS-managed file changed without running the clean fi
 
 `git status`, `git diff` and `git add` now see the same ciphertext for the same edit, and `git add` stores it.
 
-- **The question** is everything that decides what the filter returns: the plaintext, the stored version (its object id), the path, the storage format, the text of `.sops.yaml`, the `SOPS_*` variables, the version of this tool. A change to any of them is a new question: a recipient added to `.sops.yaml` takes effect at the next run, as before.
-- **The answers** are two. *Unchanged*: the stored version; remembered only after a decrypt showed it, so a run never skips a decrypt that never worked (a file `git add` encrypted for a rule you are not a recipient of still fails at the next check). *Changed*: a blob this filter encrypted a moment ago. The filter writes it into the object store itself (ciphertext; `git status` does not keep what the filter returns), and before it is given again it must still be there and pass the same check as a new encryption. It is remembered only when `.sops.yaml` still holds the text of the question after `sops` returned: `sops` reads the file itself, a moment later, and an edit or a checkout in between gave the blob the recipients of other rules.
-- **What is on disk**, in `.git/sops-git-filters/cache/` (the common git directory, mode `0700`, files `0600`): a random key made at the first use, and one small file per answer holding an object id and two halves of an HMAC-SHA256 of the question under that key. No plaintext, and no plain hash of it (a hash of a short password can be tested against guesses offline; the HMAC cannot be without the key). An entry is not used after 10 minutes, and the filter removes old ones (it looks once every 10 minutes, when it runs); at most 512 are kept. The encrypted blobs the filter wrote into the object store are unreferenced objects, which `git gc` removes in its time, as it does those of a `git add` that was undone.
-- **It needs** `sha256sum`, `openssl` or `shasum` on PATH (the HMAC is computed from a plain SHA-256, so that its key is never an argument of a process), and `od` and `/dev/urandom` for the key. Without them, and when the directory or the key is a symlink, belongs to someone else or is open to the group or others, the filter works as before, without the cache. So it does with `SOPS_FILTER_FORCE_REENCRYPT=1` (which asks for a new encryption), with `SOPS_CONFIG` set, and when the filter is run by hand outside the top of the working tree (in both cases `sops` would read another `.sops.yaml`).
+- **The question** is everything that decides what the filter returns: the plaintext, the stored version (its object id), the path, the storage format, the text of `.sops.yaml`, the `SOPS_*` variables and the version of this tool. A change to any of them makes a new question, so a recipient added to `.sops.yaml` takes effect at the next run, as before.
+- **There are two answers.** *Unchanged* is the stored version. It is remembered only after a decrypt showed it, so a run never skips a decrypt that never worked (a file `git add` encrypted for a rule you are not a recipient of still fails at the next check). *Changed* is a blob this filter encrypted a moment ago. The filter writes it into the object store itself (ciphertext; `git status` does not keep what the filter returns), and before it is given again it must still be there and pass the same check as a new encryption. It is remembered only when `.sops.yaml` still holds the text of the question after `sops` returned: `sops` reads the file itself a moment later, and an edit or a checkout in between can give the blob the recipients of other rules.
+- **On disk**, in `.git/sops-git-filters/cache/` (the common git directory, mode `0700`, files `0600`), there is a random key made at the first use, and one small file per answer holding an object id and two halves of an HMAC-SHA256 of the question under that key. There is no plaintext, and no plain hash of it (a hash of a short password can be tested against guesses offline; the HMAC cannot be without the key). An entry is not used after 10 minutes, and the filter removes old ones (it looks once every 10 minutes, when it runs); at most 512 are kept. The encrypted blobs the filter wrote into the object store are unreferenced objects, which `git gc` removes in its time, as it does those of a `git add` that was undone.
+- **It needs** `sha256sum`, `openssl` or `shasum` on PATH (the HMAC is computed from a plain SHA-256, so that its key is never an argument of a process), and `od` and `/dev/urandom` for the key. Without them, and when the directory or the key is a symlink, belongs to someone else or is open to the group or others, the filter works as before, without the cache. It does the same with `SOPS_FILTER_FORCE_REENCRYPT=1` (which asks for a new encryption), with `SOPS_CONFIG` set, and when the filter is run by hand outside the top of the working tree (in both of these cases `sops` would read another `.sops.yaml`).
 - **To turn it off**, set `SOPS_FILTER_CACHE=0` in the environment of git (your shell profile, or the environment your editor runs git in). To clear it, delete the directory.
 
-`harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask — `0644` on a default workstation. `install.sh` runs the script once and installs five hooks that re-run it (`post-checkout`, `post-merge`, `post-rewrite`, `post-applypatch`, `post-commit`), so private keys and kubeconfigs are `0600` again after a checkout, pull, merge, rebase, cherry-pick, revert, `git am` and commit. A hook file that is already there is replaced only when it is, byte for byte, one that `install.sh` wrote (this release or an earlier one); any other, also one of these with a line added by hand, is left alone, and `install.sh` prints the line to add to it. A few commands run no hook (`git stash`, `git stash pop`, `git reset --hard`): see [Limitations](#limitations) and [Security model](#security-model).
+### At commit time: the guard
+
+The clean filter is the first check. `encryption-guard.sh`, run as the pre-commit hook, checks the index again on its own, with no keys and without the filter:
+
+```mermaid
+flowchart LR
+    ADD["git add"] -- "clean filter" --> IDX["Index"]
+    IDX --> COMMIT["git commit"]
+    COMMIT --> G{"encryption-guard.sh<br/>pre-commit hook"}
+    G -- "all checks pass" --> OK["commit is made"]
+    G -- "any check fails" --> BLOCK["commit blocked"]
+```
+
+It blocks the commit when:
+
+- a file in the index with `filter=sops` (in the attributes the commit carries) is not a complete SOPS document in the storage format: plaintext, a value in clear, an extra key, a NUL byte;
+- `.sops.yaml` is missing while SOPS-managed files are tracked;
+- `$GIT_DIR/info/attributes` sets `filter` to anything but `sops`, or sets or redefines a macro, or that file, `core.attributesFile` or the system attributes file defines a macro that does;
+- it cannot list the index, read the attributes or read a blob.
+
+`git commit --no-verify` skips it, and so does a merge that needs no manual step: run it in CI too. Details are under [The pre-commit guard](#the-pre-commit-guard).
+
+### When two branches change a secret
+
+With `merge=sops` on a path, git hands the three versions of a conflicting secret to `merge-driver.sh` instead of merging the ciphertext:
+
+```mermaid
+flowchart TD
+    M["merge, rebase, cherry-pick<br/>or stash pop:<br/>both sides changed .env"] --> D["merge-driver.sh decrypts<br/>base, ours and theirs"]
+    D -- "cannot decrypt" --> STOP["merge fails,<br/>nothing changed"]
+    D --> MF["git merge-file<br/>on the plaintext"]
+    MF -- "merged" --> E["clean-filter.sh<br/>encrypts the result"]
+    MF -- "conflict, json format" --> EM["clean-filter.sh encrypts<br/>the result with its markers"]
+    MF -- "conflict, dotenv format" --> KEEP["our version kept,<br/>conflict reported"]
+    E --> DONE["merge goes on"]
+    EM --> CONF["conflict: the working copy<br/>shows the markers in plaintext"]
+```
+
+The decrypted versions sit in a private directory under `.git/` while the driver runs. See [Merging secrets](#merging-secrets).
+
+### What install.sh sets up
+
+```mermaid
+flowchart LR
+    INST["install.sh<br/>in your checkout of the tool"]
+    subgraph gitdir [".git/ (the common git directory)"]
+        COPY["sops-git-filters/<br/>the five scripts git runs"]
+        CFG["config<br/>filter.sops.*, diff.sops.*, merge.sops.*"]
+        HOOKS["hooks/<br/>five permission hooks"]
+    end
+    INST -- copies --> COPY
+    INST -- writes --> CFG
+    INST -- writes --> HOOKS
+    CFG -. "commands run" .-> COPY
+    HOOKS -. "run harden-permissions.sh" .-> COPY
+```
+
+`install.sh` checks `sops` (3.11.0 or newer) and stops on a `filter.sops.process` setting from another git config file. It copies `lib.sh`, `clean-filter.sh`, `smudge-filter.sh`, `merge-driver.sh` and `harden-permissions.sh` into `.git/sops-git-filters/`, and writes the filter, diff and merge settings into `.git/config` (`filter.sops.clean`, `filter.sops.smudge`, `filter.sops.required=true`, `diff.sops.textconv=cat`, `merge.sops.driver` and others), plus `core.trustctime=false` unless you set that yourself. Then it decrypts the working copies that still hold the ciphertext git holds (a fresh clone), runs `harden-permissions.sh` once and writes the five permission hooks (see [File modes](#file-modes)). It exits 3 when something is left to do (see [Setup walkthrough](#setup-walkthrough)).
+
+### File modes
+
+`harden-permissions.sh` closes the mode gap the smudge filter leaves. Git stores only the executable bit, so a decrypted secret lands with your umask: `0644` on a default workstation. `install.sh` runs the script once and installs five hooks that re-run it (`post-checkout`, `post-merge`, `post-rewrite`, `post-applypatch`, `post-commit`), so private keys and kubeconfigs are `0600` again after a checkout, pull, merge, rebase, cherry-pick, revert, `git am` and commit. A hook file that is already there is replaced only when it is, byte for byte, one that `install.sh` wrote (this release or an earlier one). Any other, including one of these with a line added by hand, is left alone, and `install.sh` prints the line to add to it. A few commands run no hook (`git stash`, `git stash pop`, `git reset --hard`): see [Limitations](#limitations) and [Security model](#security-model).
 
 ## Requirements
 
