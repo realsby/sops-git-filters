@@ -171,7 +171,7 @@ test_merge_cherry_pick_combines_changes() {
 }
 
 # git stash --keep-index, then pop: a three-way merge of two versions of the
-# secret. It used to die whenever a secret had staged AND unstaged changes.
+# secret. It used to die whenever a secret had both staged and unstaged changes.
 test_merge_stash_keep_index_then_pop() {
 	merge_repo json
 	git checkout -q main

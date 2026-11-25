@@ -86,7 +86,7 @@ test_hooks_keep_0600_after_cherry_pick_and_revert() {
 
 # ── A hooks directory shared with other repositories (audit N8) ────
 # With a machine-wide core.hooksPath, install.sh wrote its hooks into
-# that directory. They ran in EVERY repository of the user and called
+# that directory. They ran in every repository of the user and called
 # "$root"/utilities/sops-git-filters/harden-permissions.sh there: cloning
 # any repository that ships a file at that path executed it.
 
@@ -233,7 +233,7 @@ test_hooks_line_for_a_shared_directory_acts_in_one_repository_only() {
 	assert_mode .env "600" "mode after the checkout, through the shared hook"
 }
 
-# A machine-wide hooks directory can lie INSIDE the repository that is
+# A machine-wide hooks directory can lie inside the repository that is
 # being configured (a dotfiles repository that holds ~/.githooks). It is
 # shared all the same.
 test_hooks_machine_wide_directory_inside_the_repository_is_shared() {

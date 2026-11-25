@@ -631,7 +631,7 @@ STUB
 }
 
 # An answer of git check-attr that does not fit the listing (cut short,
-# or in another order) is not an answer: the commit is blocked.
+# or in another order) blocks the commit.
 test_guard_fails_closed_when_check_attr_answers_wrong() {
 	unfiltered_repo
 	printf 'PW=hunter2\n' >.env

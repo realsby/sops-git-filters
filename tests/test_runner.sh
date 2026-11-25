@@ -28,7 +28,7 @@ MINI
 	assert_eq "${RC}" "2" "runner exit status when SGF_TOOL_DIR does not exist"
 }
 
-# A filter that matches nothing ran nothing. That is not a pass.
+# A filter that matches nothing ran nothing, which must not count as a pass.
 test_runner_fails_when_no_test_is_selected() {
 	mini_runner mini <<'MINI'
 test_mini_passes() { :; }

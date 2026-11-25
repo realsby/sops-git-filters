@@ -14,7 +14,7 @@ test_basics_json_add_encrypts_and_reuses_blob() {
 	assert_eq "$(plain_of_stored .env)" "$(cat .env)" "decrypted blob"
 	git commit -q -m "add .env"
 
-	# Same plaintext → the very same blob, so no false diff.
+	# The same plaintext gives the very same blob, so there is no false diff.
 	local id
 	id="$(blob_id .env)"
 	touch .env

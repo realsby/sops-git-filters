@@ -101,7 +101,8 @@ STUB
 }
 
 # With a real sops and a rule that does not select the "data" key: either
-# the file is encrypted in full or the add fails. Never plaintext.
+# the file is encrypted in full or the add fails, and plaintext is never
+# stored.
 test_clean_json_partial_rule_never_stores_plaintext() {
 	new_repo repo
 	cat >.sops.yaml <<YAML
@@ -615,7 +616,7 @@ test_clean_stops_when_stored_version_cannot_be_decrypted() {
 	run env SOPS_AGE_KEY_FILE="${NO_KEY}" git commit -q -am "no real change"
 	assert_ne "${RC}" "0" "git commit -a without the decryption key"
 
-	# With the key the file is simply unchanged.
+	# With the key the file is unchanged.
 	assert_eq "$(git status --porcelain)" "" "git status with the key"
 }
 
@@ -972,7 +973,7 @@ plain_of_stored_blob() {
 }
 
 # What is on disk: MACs and object ids, in a directory of mode 0700 with
-# files of mode 0600. Not the plaintext, not a plain hash of it.
+# files of mode 0600, and neither the plaintext nor a plain hash of it.
 test_clean_cache_holds_no_plaintext() {
 	local dir file secret='hunter2-S3cr3t' sum
 	needs_cache
