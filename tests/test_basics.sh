@@ -157,7 +157,8 @@ STUB
 	printf 'A=2\n' >.env
 	git add .env
 	assert_eq "$(plain_of_stored .env)" "A=2" "the stored version after an edit"
-	printf 'A=3\n' | sops encrypt --input-type binary --output-type json --filename-override .env >.env
+	printf 'A=3\n' | sops encrypt --input-type binary --output-type json --filename-override .env >../doc.json
+	cp ../doc.json .env
 	git add .env
 	assert_eq "$(plain_of_stored .env)" "A=3" "the stored version after a SOPS document was added"
 	git commit -q -m "change .env"
