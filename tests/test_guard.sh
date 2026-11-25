@@ -308,6 +308,10 @@ test_guard_blocks_a_filter_line_in_info_attributes() {
 	mkdir -p "$(dirname "${info}")"
 	printf '# local\n.env -filter\n' >>"${info}"
 	printf 'API_KEY=hunter2\n' >.env
+	# An old mtime: git takes the index entry as clean, as it does on a
+	# slow machine, where a second has passed since the index was written
+	# (in the same second, git hashes the file again to be sure).
+	touch -t 202001010000 .env
 	git add .env
 	assert_contains "$(stored .env)" "hunter2" "test fixture: plaintext in the index"
 	run "${TOOL}/encryption-guard.sh"
@@ -318,9 +322,11 @@ test_guard_blocks_a_filter_line_in_info_attributes() {
 	assert_ne "${RC}" "0" "commit exit status"
 	assert_contains "$(git cat-file blob HEAD:.env)" "ENC[" "HEAD keeps the encrypted .env"
 
-	# Without the line, .env is staged through the filter again.
+	# Without the line, .env is staged through the filter again. Its
+	# content and stat data did not change, so a plain `git add` may keep
+	# the plaintext entry without running the filter: --renormalize does.
 	: >"${info}"
-	git add .env
+	git add --renormalize -- .env
 	run "${TOOL}/encryption-guard.sh"
 	assert_eq "${RC}" "0" "guard exit status with an empty file"
 
