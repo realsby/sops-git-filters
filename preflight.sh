@@ -95,10 +95,9 @@ esac
 # file to file by nature (the encrypted data key, the time stamps, the
 # MAC) and without the version of sops that wrote the file, which says
 # nothing about who can read it. Two documents with the same output need
-# the same keys, so one
-# decryption answers for both. Group boundaries count: recipients A and B
-# in one group (either key will do) are not the same as A and B in two
-# groups (both are needed).
+# the same keys, so one decryption answers for both. Group boundaries
+# count: recipients A and B in one group (either key will do) are not
+# the same as A and B in two groups (both are needed).
 #
 # Only metadata that sops stores in clear is read. Returns 1 when the
 # document does not have the layout sops writes (one field per line): the

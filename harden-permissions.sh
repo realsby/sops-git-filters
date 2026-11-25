@@ -4,12 +4,12 @@
 # ║  Tighten permissions on SOPS-managed working-tree files          ║
 # ║                                                                  ║
 # ║  Git stores only the executable bit, so it cannot round-trip     ║
-# ║  0600. Every smudge — clone, checkout, merge, the re-smudge      ║
-# ║  pass in install.sh — recreates decrypted secrets with the       ║
-# ║  caller's umask, which is 0644 on a default workstation. A       ║
-# ║  deploy key, an API key, a kubeconfig or a Talos secrets bundle  ║
-# ║  then sits world-readable in the working tree, and OpenSSH will  ║
-# ║  refuse a 0644 private key outright.                             ║
+# ║  0600. Every smudge (clone, checkout, merge, the re-smudge pass  ║
+# ║  in install.sh) recreates decrypted secrets with the caller's    ║
+# ║  umask, which is 0644 on a default workstation. A deploy key, an ║
+# ║  API key, a kubeconfig or a Talos secrets bundle then sits       ║
+# ║  world-readable in the working tree, and OpenSSH refuses a 0644  ║
+# ║  private key outright.                                           ║
 # ║                                                                  ║
 # ║  This script chmods every tracked file whose git attribute is    ║
 # ║  filter=sops to 0600 (override with SOPS_FILE_MODE in            ║
@@ -19,10 +19,10 @@
 # ║  value still leaves the files at 0600 (0700) and exits 1.        ║
 # ║  A path that is a symlink, or lies in a symlinked directory, is  ║
 # ║  left alone: git does not follow it either.                      ║
-# ║  It is idempotent and safe to run often —                        ║
-# ║  install.sh runs it, and the hooks it installs (post-checkout,   ║
-# ║  post-merge, post-rewrite, post-applypatch, post-commit) run it  ║
-# ║  again after a checkout, merge, rebase, `git am` and commit.     ║
+# ║  It is idempotent and safe to run often: install.sh runs it,     ║
+# ║  and the hooks it installs (post-checkout, post-merge,           ║
+# ║  post-rewrite, post-applypatch, post-commit) run it again after  ║
+# ║  a checkout, merge, rebase, `git am` and commit.                 ║
 # ║                                                                  ║
 # ║  Usage:                                                          ║
 # ║    harden-permissions.sh [--root <repo>] [--quiet]               ║
@@ -67,8 +67,8 @@ fi
 
 # ── Target mode (override in .sops-filter.conf) ────
 # Default 0600. A repo whose decrypted files must be readable by a
-# second local account (a deploy daemon, say) can widen it — but that
-# is the exception, and it is recorded in a tracked file.
+# second local account (a deploy daemon, say) can widen it. That is the
+# exception, and it is recorded in a tracked file.
 FILE_MODE="600"
 if [[ -f "${TARGET_ROOT}/.sops-filter.conf" ]]; then
 	conf_mode=$({ grep -E '^SOPS_FILE_MODE=' "${TARGET_ROOT}/.sops-filter.conf" || true; } |

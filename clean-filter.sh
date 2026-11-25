@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  SOPS Clean Filter for Git                                       ║
+# ║  SOPS clean filter for git                                       ║
 # ║                                                                  ║
 # ║  Git calls this script automatically during `git add` for any    ║
 # ║  file matched by the "sops" filter in .gitattributes.            ║
@@ -14,14 +14,15 @@
 # ║  This is the "clean" side: it receives plaintext on stdin and    ║
 # ║  must output the encrypted version for git to store.             ║
 # ║                                                                  ║
-# ║  The problem: SOPS encryption is non-deterministic — encrypting  ║
-# ║  the same plaintext twice produces different ciphertext (new IV  ║
-# ║  each time). This means git would see every file as "changed"    ║
-# ║  on every checkout, even if nothing actually changed.            ║
+# ║  SOPS encryption is not deterministic: encrypting the same       ║
+# ║  plaintext twice gives different ciphertext (a new IV each       ║
+# ║  time), so git would see every file as "changed" on every        ║
+# ║  checkout, even when nothing changed.                            ║
 # ║                                                                  ║
-# ║  The fix: before encrypting, we decrypt what's already in the    ║
-# ║  index (or HEAD) and compare it to the new content. If it is     ║
-# ║  identical, we reuse the existing ciphertext — no false diff.    ║
+# ║  Before encrypting, the filter decrypts what is already in       ║
+# ║  the index (or HEAD) and compares it with the new content. If    ║
+# ║  it is identical, it reuses the existing ciphertext, and git     ║
+# ║  sees no change.                                                 ║
 # ║                                                                  ║
 # ║  That comparison needs the stored version to decrypt. When it    ║
 # ║  does not (keys or cloud credentials missing) the filter stops   ║
@@ -550,7 +551,7 @@ if [[ "${SOPS_FILTER_CACHE:-}" != "0" && "${SOPS_FILTER_FORCE_REENCRYPT:-}" != "
 fi
 
 # ── New file: no previous version in the index or HEAD ────────
-# For new files there is nothing to compare — just encrypt and exit.
+# A new file has nothing to compare with: encrypt it and exit.
 if [[ -z "${STORED_ID}" ]]; then
 	if replay_encryption "new file"; then
 		exit 0
@@ -652,7 +653,7 @@ EXISTING_DECRYPTED="${SGF_CONTENT}"
 # A stored version with NUL bytes (written by another tool) can never
 # equal the input, which has none: the variable only looks the same.
 if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; then
-	# Content unchanged — reuse the existing ciphertext verbatim.
+	# Content unchanged: reuse the existing ciphertext verbatim.
 	# Same plaintext → same stored blob → no false diff. (This holds for
 	# an empty file too: what counts is that the decryption worked.)
 	echo "sops clean filter: content unchanged, reusing existing encrypted blob for ${FILENAME}" >&2
@@ -663,7 +664,7 @@ if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; the
 	printf '%s' "${EXISTING_ENCRYPTED}"
 	remember "${STORED_ID}"
 else
-	# Content actually changed — encrypt the new version.
+	# Content changed: encrypt the new version.
 	echo "sops clean filter: content changed, re-encrypting ${FILENAME}" >&2
 	KEYS_BEFORE="${EXISTING_ENCRYPTED}"
 	KEYS_BEFORE_FORMAT="${STORE_FORMAT}"

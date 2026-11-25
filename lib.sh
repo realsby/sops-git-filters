@@ -1035,8 +1035,9 @@ sgf_version_ge() {
 # or wherever the tool lives). install.sh copies the ones git needs into
 # <git common dir>/sops-git-filters/ and points the filter, the merge
 # driver and the hooks there, so that checking out a branch cannot swap
-# the code that sees the plaintext. The price: an update of the checkout
-# does nothing until install.sh has run again. The installed copy says so.
+# the code that sees the plaintext. It also means that an update of the
+# checkout does nothing until install.sh has run again; the installed
+# copy says so.
 
 # sgf_version_of <a lib.sh> : prints the X.Y.Z of its SGF_VERSION line, or
 # nothing. The file may come from a branch nobody reviewed, and the

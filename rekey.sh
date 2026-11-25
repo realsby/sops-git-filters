@@ -217,9 +217,8 @@ if [[ "${#ENTRY_PATHS[@]}" -eq 0 && -z "$(git ls-files -- ${SPEC[@]+"${SPEC[@]}"
 	exit 0
 fi
 
-# `|| true`: errexit stays off inside rekey_entry, as it was in the loop
-# this replaces. A command that fails there is reported and counted, and
-# the next file is still tried.
+# `|| true`: errexit stays off inside rekey_entry. A command that fails
+# there is reported and counted, and the next file is still tried.
 for ((i = 0; i < ${#ENTRY_PATHS[@]}; i++)); do
 	rekey_entry "${ENTRY_MODES[i]}" "${ENTRY_OIDS[i]}" "${ENTRY_STAGES[i]}" "${ENTRY_PATHS[i]}" || true
 done

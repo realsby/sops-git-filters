@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  SOPS Smudge Filter for Git                                      ║
+# ║  SOPS smudge filter for git                                      ║
 # ║                                                                  ║
 # ║  Git calls this script on checkout for any file matched by the   ║
 # ║  "sops" filter in .gitattributes:                                ║

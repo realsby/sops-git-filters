@@ -170,7 +170,7 @@ check_entries() {
 		return 1
 	fi
 
-	# SOPS-managed files are tracked — encryption must be possible at all.
+	# SOPS-managed files are tracked, so encryption must be possible at all.
 	if [[ "${managed}" -gt 0 && ! -f "${PROJECT_ROOT}/.sops.yaml" ]]; then
 		blocked "SOPS not configured"
 		echo " ${managed} tracked file(s) require SOPS encryption but" >&2
