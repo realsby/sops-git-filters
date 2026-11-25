@@ -160,3 +160,28 @@ INSTALLED_CMD_PREFIX='"$(git rev-parse --git-common-dir)"/sops-git-filters'
 mode_of() {
 	stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
+
+# add_index_entries <count> : put <count> more files into the index, the
+# way a large repository has them: filler/dNNN/fNNNNNN.txt, spread over
+# 300 directories, all with the same small blob. Only the index gets
+# them, no file is written to disk: enough for what lists the index.
+add_index_entries() {
+	local oid
+	oid="$(printf 'filler\n' | git hash-object -w --stdin)"
+	awk -v n="$1" -v oid="${oid}" 'BEGIN {
+		for (i = 0; i < n; i++) printf "100644 %s\tfiller/d%03d/f%06d.txt\n", oid, i % 300, i
+	}' | git update-index --index-info
+}
+
+# timed <command...> : never fails; runs the command with its output
+# discarded, sets RC and SECS (wall-clock seconds, e.g. 0.123)
+timed() {
+	local TIMEFORMAT=%R
+	RC=0
+	SECS="$({ time "$@" >/dev/null 2>&1; } 2>&1)" || RC=$?
+}
+
+# faster_than <seconds> <limit> : true when <seconds> < <limit>
+faster_than() {
+	awk -v s="$1" -v limit="$2" 'BEGIN { exit !(s + 0 < limit + 0) }'
+}

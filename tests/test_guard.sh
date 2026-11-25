@@ -217,6 +217,199 @@ test_guard_reads_the_attributes_of_the_index() {
 	assert_not_contains "${OUT}" "hunter2" "guard output"
 }
 
+# The guard runs on every commit. Its time must follow the number of
+# SOPS-managed files, not the number of tracked files: a bash loop over
+# every tracked path took 8.5 seconds with 60,000 of them (audit A-01),
+# 19 seconds with the 100,000 here. The guard needs 0.4 seconds on a
+# laptop: the limit leaves a slow CI runner seven times that.
+test_guard_is_fast_with_many_tracked_files() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	printf 'TOKEN=abc\n' >deploy.secret
+	git add .env deploy.secret
+	local before
+	before="$(git ls-files | wc -l)"
+	add_index_entries 100000
+	assert_eq "$(git ls-files | wc -l | tr -d " ")" "$((before + 100000))" "test fixture: tracked files"
+
+	timed "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status"
+	faster_than "${SECS}" 3 || fail "the guard took ${SECS} s for 100,000 tracked files"
+
+	# Among them, a plaintext secret is still found.
+	stage_raw plain.secret .env
+	timed "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "1" "guard exit status with a plaintext secret"
+	faster_than "${SECS}" 3 || fail "the guard took ${SECS} s for 100,000 tracked files"
+	run "${TOOL}/encryption-guard.sh"
+	assert_contains "${OUT}" "- plain.secret" "guard names the file"
+	assert_not_contains "${OUT}" "- .env" "guard output"
+}
+
+# Names that need quoting in git's text output, or that look like
+# pathspec magic or an index stage. Each one must be found and named
+# byte for byte, and nothing else. Staged straight into the index, so
+# names a file system refuses can be tested too.
+test_guard_names_plaintext_files_with_awkward_names() {
+	unfiltered_repo
+	local names=(
+		'with space.secret'
+		$'tab\there.secret'
+		$'new\nline.secret'
+		'quote"double.secret'
+		"quote'single.secret"
+		'back\slash.secret'
+		'back\\two\"slashes.secret'
+		$'ctrl\001char.secret'
+		$'esc\033[31mred.secret'
+		$'del\177char.secret'
+		$'cr\rchar.secret'
+		$'caf\303\251.secret'
+		$'latin\351.secret'
+		'glob*star[1]?.secret'
+		':colon.secret'
+		'!bang.secret'
+		'-dash.secret'
+		'2:stage.secret'
+		':(literal)magic.secret'
+		'"starts with a quote.secret'
+		'sub dir/"quoted" dir/x.secret'
+	)
+	local name oid i=0
+	for name in "${names[@]}"; do
+		i=$((i + 1))
+		oid="$(printf 'PW=hunter%s\n' "${i}" | git hash-object -w --stdin)"
+		git update-index --add --cacheinfo "100644,${oid},${name}"
+	done
+	oid="$(printf 'not a secret\n' | git hash-object -w --stdin)"
+	git update-index --add --cacheinfo "100644,${oid},plain.txt"
+	git update-index --add --cacheinfo "100644,${oid},"$'tab\tplain.txt'
+	git update-index --add --cacheinfo "100644,${oid},"$'caf\303\251.txt'
+
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	for name in "${names[@]}"; do
+		assert_contains "${OUT}" $'\n'"   - ${name}  (" "guard names [${name}]"
+	done
+	assert_not_contains "${OUT}" "plain.txt" "guard output"
+	assert_not_contains "${OUT}" $'caf\303\251.txt' "guard output"
+	assert_not_contains "${OUT}" "hunter" "guard output"
+	assert_eq "$(printf '%s\n' "${OUT}" | grep -c '^   - ')" "${#names[@]}" "lines that name a file"
+}
+
+# sops_blob <text> : write an encrypted SOPS document (json) of <text>
+# to the object store and print its object id
+sops_blob() {
+	printf '%s\n' "$1" |
+		sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		git hash-object -w --stdin
+}
+
+# set_stage <path> <stage> <object id> : put one stage of a conflict
+# into the index (or replace it)
+set_stage() {
+	printf '100644 %s %s\t%s\n' "$3" "$2" "$1" | git update-index --index-info
+}
+
+# All three stages of an unmerged path are checked, also under a name
+# git quotes.
+test_guard_checks_every_stage_of_an_unmerged_path() {
+	unfiltered_repo
+	local name stage plain
+	for name in c.secret $'tab\t"q".secret'; do
+		for stage in 1 2 3; do
+			set_stage "${name}" "${stage}" "$(sops_blob "stage ${stage}")"
+		done
+	done
+	assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "6" "test fixture: unmerged entries"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status when every stage is encrypted"
+
+	plain="$(printf 'PW=hunter2\n' | git hash-object -w --stdin)"
+	for name in c.secret $'tab\t"q".secret'; do
+		for stage in 1 2 3; do
+			set_stage "${name}" "${stage}" "${plain}"
+			assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "6" "test fixture: unmerged entries"
+			run "${TOOL}/encryption-guard.sh"
+			assert_ne "${RC}" "0" "guard exit status with plaintext in stage ${stage} of [${name}]"
+			assert_contains "${OUT}" $'\n'"   - ${name}  (" "guard names [${name}] (stage ${stage})"
+			set_stage "${name}" "${stage}" "$(sops_blob "stage ${stage}")"
+		done
+	done
+}
+
+# Intent to add is told from a staged empty file under names git quotes:
+# a wrong name would look like "left out of the commit" and let the
+# staged empty file through.
+test_guard_tells_intent_to_add_from_staged_under_awkward_names() {
+	unfiltered_repo
+	local ita=$'ita\t"q" back\\slash \303\251.secret'
+	local staged=$'staged\t"q" back\\slash \303\251.secret'
+	printf 'PW=hunter2\n' >"${ita}"
+	git add -N -- "${ita}"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status with an intent-to-add entry"
+
+	: >"${staged}"
+	git add -- "${staged}"
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status with a staged empty file"
+	assert_contains "${OUT}" "- ${staged}" "guard names the staged file"
+	assert_not_contains "${OUT}" "- ${ita}" "guard output"
+}
+
+# If the guard cannot list the index it must not wave the commit through.
+test_guard_fails_closed_when_ls_files_fails() {
+	unfiltered_repo
+	printf 'PW=hunter2\n' >.env
+	git add .env
+	stub ../fakebin git <<'STUB'
+case " $* " in
+*" ls-files "*)
+	echo "fatal: simulated ls-files failure" >&2
+	exit 128
+	;;
+esac
+exec "${REAL}" "$@"
+STUB
+	run env PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "COMMIT BLOCKED" "guard message"
+}
+
+# An answer of git check-attr that does not fit the listing (cut short,
+# or in another order) is not an answer: the commit is blocked.
+test_guard_fails_closed_when_check_attr_answers_wrong() {
+	unfiltered_repo
+	printf 'PW=hunter2\n' >.env
+	printf 'TOKEN=abc\n' >b.secret
+	echo docs >c.txt
+	git add .env b.secret c.txt
+	stub ../fakebin git <<'STUB'
+case " $* " in
+*" check-attr "*)
+	case "${SGF_STUB_MODE}" in
+	short) "${REAL}" "$@" </dev/null ;;
+	reversed)
+		case " $* " in
+		*" -z "*) tr '\0\n' '\n\0' | sort -r | tr '\0\n' '\n\0' | "${REAL}" "$@" ;;
+		*) sort -r | "${REAL}" "$@" ;;
+		esac
+		;;
+	esac
+	exit $?
+	;;
+esac
+exec "${REAL}" "$@"
+STUB
+	local mode
+	for mode in short reversed; do
+		run env SGF_STUB_MODE="${mode}" PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/encryption-guard.sh"
+		assert_ne "${RC}" "0" "guard exit status (${mode})"
+		assert_contains "${OUT}" "COMMIT BLOCKED: the encryption guard could not finish" "guard message (${mode})"
+	done
+}
+
 # If the guard cannot read the attributes it must not wave the commit through.
 test_guard_fails_closed_when_check_attr_fails() {
 	unfiltered_repo
