@@ -98,19 +98,44 @@ sgf_ls_managed() {
 
 # ── One encrypted value ───────────────────────────────────────────
 # An awk function shared by the two document checks below. True when
-# the string is exactly one SOPS ciphertext value:
-#   ENC[AES256_GCM,data:<base64>,iv:<base64>,tag:<base64>,type:<word>]
-# and holds no character outside that alphabet.
+# the string is exactly one SOPS ciphertext value, as aes/cipher.go of
+# sops writes it (the same from 3.5.0 to 3.13.3):
+#
+#   ENC[AES256_GCM,data:<base64>,iv:<base64>,tag:<base64>,type:<type>]
+#
+#   data   the ciphertext, as long as the value: padded base64 (Go's
+#          StdEncoding), at least one byte. sops writes no ENC[...] for
+#          an empty value (it writes "" instead), and its own parser
+#          wants at least one character there.
+#   iv     the nonce, 32 bytes: 43 characters and "=" (44)
+#   tag    the GCM tag, 16 bytes: 22 characters and "==" (24)
+#   type   one that sops can decrypt: str int float bool bytes time
+#          comment (str for a value and the MAC, comment for a dotenv
+#          comment; time came with 3.10)
+#
+# The whole string is matched: the fields in that order, nothing before
+# or after them (audit A-16). That narrows what a hand-made value can
+# carry, but cannot rule it out: a short password made of base64
+# characters is valid base64. Only `sops decrypt` checks the MAC.
+#
+# No interval expressions ({43}): not every awk has them (old mawk).
+# The lengths are counted with length() instead.
 #
 # The checks are written in awk, not in bash, for speed: bash pattern
 # matching on a whole document takes time quadratic in its length (a
 # few hundred kilobytes took minutes), awk reads it once.
 SGF_AWK_IS_TOKEN='
-function is_token(s) {
-	if (substr(s, 1, 20) != "ENC[AES256_GCM,data:") return 0
-	if (substr(s, length(s), 1) != "]") return 0
-	if (index(s, ",iv:") == 0 || index(s, ",tag:") == 0 || index(s, ",type:") == 0) return 0
-	return match(s, "[^]A-Za-z0-9+/=,:_[]") == 0
+function is_b64(s) {
+	return length(s) % 4 == 0 && s ~ "^[A-Za-z0-9+/]*=?=?$"
+}
+function is_token(s,    f) {
+	if (substr(s, 1, 20) != "ENC[AES256_GCM,data:" || substr(s, length(s), 1) != "]") return 0
+	# base64 has no comma: the four fields split cleanly
+	if (split(substr(s, 21, length(s) - 21), f, ",") != 4) return 0
+	return f[1] != "" && is_b64(f[1]) &&
+	    length(f[2]) == 47 && substr(f[2], 1, 3) == "iv:" && substr(f[2], 4) ~ "^[A-Za-z0-9+/]*=$" &&
+	    length(f[3]) == 28 && substr(f[3], 1, 4) == "tag:" && substr(f[3], 5) ~ "^[A-Za-z0-9+/]*==$" &&
+	    f[4] ~ "^type:(str|int|float|bool|bytes|time|comment)$"
 }
 '
 

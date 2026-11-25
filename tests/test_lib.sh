@@ -2,8 +2,12 @@
 # lib.sh: the document checks, without sops.
 # shellcheck disable=SC2154  # SGF_TOOL_DIR comes from tests/run.sh
 
-ENC='ENC[AES256_GCM,data:abc+/=,iv:AAAA,tag:BBBB==,type:str]'
-ENC_COMMENT='ENC[AES256_GCM,data:abc,iv:AAAA,tag:BBBB,type:comment]'
+# Encrypted values shaped like the ones sops writes: data in base64, an
+# iv of 32 bytes and a tag of 16 (44 and 24 characters of base64).
+IV='aK0NDUmGF5rgQKERiDsl8ZmCs+7aY6DdOPGhvm21fiw='
+TAG='jZYZLFyNneDOtZnXYZjGaQ=='
+ENC="ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:str]"
+ENC_COMMENT="ENC[AES256_GCM,data:NXZXkGPhZlPbJQ==,iv:${IV},tag:${TAG},type:comment]"
 
 load_lib() {
 	export LC_ALL=C
@@ -24,10 +28,64 @@ test_lib_enc_token() {
 	is sgf_is_sops_doc json "$(envelope "${ENC}")"
 	is sgf_is_sops_doc json "$(envelope "${ENC_COMMENT}")"
 	is_not sgf_is_sops_doc json "$(envelope "${ENC} trailing text")"
-	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:a b,iv:AAAA,tag:BBBB,type:str]')"
-	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:a\nb,iv:AAAA,tag:BBBB,type:str]')"
+	is_not sgf_is_sops_doc json "$(envelope "ENC[AES256_GCM,data:a bc,iv:${IV},tag:${TAG},type:str]")"
+	is_not sgf_is_sops_doc json "$(envelope "ENC[AES256_GCM,data:a\\nb,iv:${IV},tag:${TAG},type:str]")"
 	is_not sgf_is_sops_doc json "$(envelope 'ENC[AES256_GCM,data:abc]')"
 	is_not sgf_is_sops_doc json "$(envelope 'hunter2')"
+}
+
+# in_every_place <is|is_not> <ENC[...] value> : the value as "data" and as
+# "mac" of a json document, and as a value, a comment and sops_mac of a
+# dotenv document. Everything else in the documents is in order.
+in_every_place() {
+	local verdict="$1" token="$2" meta=$'\nsops_version=3.13.3\n'
+	"${verdict}" sgf_is_sops_doc json "$(envelope "${token}")"
+	"${verdict}" sgf_is_sops_doc json '{"data":"'"${ENC}"'","sops":{"mac":"'"${token}"'","version":"3.13.3"}}'
+	"${verdict}" sgf_is_sops_doc dotenv "A=${token}"$'\n'"sops_mac=${ENC}${meta}"
+	"${verdict}" sgf_is_sops_doc dotenv "#${token}"$'\n'"A=${ENC}"$'\n'"sops_mac=${ENC}${meta}"
+	"${verdict}" sgf_is_sops_doc dotenv "A=${ENC}"$'\n'"sops_mac=${token}${meta}"
+}
+
+# An ENC[...] value is checked as a whole (audit A-16), not for its
+# alphabet: the fields in the order sops writes them, data in padded
+# base64, an iv of 32 bytes and a tag of 16 (44 and 24 characters), a
+# type sops can decrypt, and nothing after the closing bracket. The first
+# two are the examples from the review of this check: a password in the
+# place of the ciphertext, and a password after a real value.
+test_lib_enc_token_is_checked_as_a_whole() {
+	load_lib
+	local token
+	for token in \
+		'ENC[AES256_GCM,data:MyPassword123,iv:x,tag:y,type:str]' \
+		"${ENC}hunter2]" \
+		"ENC[AES256_GCM,data:MyPassword123,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:hunter2_,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:ab=c,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,tag:${TAG},iv:${IV},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:str,pw:hunter2]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV:1},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV%=}A,tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG:2},type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG%=}A,type:str]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:hunter]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:]" \
+		"ENC[AES256_GCM,data:abc+/w==,iv:${IV},tag:${TAG},type:str]${ENC}" \
+		"ENC[AES256_GCM,data:,iv:${IV},tag:${TAG},type:str]"; do
+		in_every_place is_not "${token}"
+	done
+
+	# What sops writes: any length of data (with or without padding), and
+	# the types it encrypts. An empty value is no ENC[...] value at all:
+	# sops writes "" (json) or KEY= and # (dotenv), see the tests above.
+	for token in "${ENC}" "${ENC_COMMENT}" \
+		"ENC[AES256_GCM,data:2NFR,iv:${IV},tag:${TAG},type:float]" \
+		"ENC[AES256_GCM,data:Bl36N6NEn2HbeGo=,iv:${IV},tag:${TAG},type:str]" \
+		"ENC[AES256_GCM,data:AQ==,iv:${IV},tag:${TAG},type:int]" \
+		"ENC[AES256_GCM,data:8nzB5Q==,iv:${IV},tag:${TAG},type:bool]" \
+		"ENC[AES256_GCM,data:KJ/kQeEdkF3JdCnQAgY4Xxc1xnE=,iv:${IV},tag:${TAG},type:time]" \
+		"ENC[AES256_GCM,data:AAAA,iv:${IV},tag:${TAG},type:bytes]"; do
+		in_every_place is "${token}"
+	done
 }
 
 test_lib_json_document() {
@@ -145,7 +203,7 @@ test_lib_json_document_check_is_linear() {
 	load_lib
 	local big doc
 	big="$(awk 'BEGIN { for (i = 0; i < 40000; i++) printf "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2" }')"
-	doc="$(envelope "ENC[AES256_GCM,data:${big},iv:AAAA,tag:BBBB,type:str]")"
+	doc="$(envelope "ENC[AES256_GCM,data:${big},iv:${IV},tag:${TAG},type:str]")"
 	assert_eq "$((${#doc} > 2000000))" "1" "the test document is over 2 MB"
 
 	SECONDS=0

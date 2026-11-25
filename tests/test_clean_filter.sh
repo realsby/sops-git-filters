@@ -38,7 +38,7 @@ test_clean_refuses_envelope_with_plaintext_data() {
 	stub ../fakebin sops <<'STUB'
 if [[ "$1" == "encrypt" ]]; then
 	plain="$(cat)"
-	printf '{\n\t"data": "%s",\n\t"sops": {\n\t\t"mac": "ENC[AES256_GCM,data:AAAA,iv:AAAA,tag:AAAA,type:str]",\n\t\t"version": "3.10.2"\n\t}\n}\n' "${plain}"
+	printf '{\n\t"data": "%s",\n\t"sops": {\n\t\t"mac": "ENC[AES256_GCM,data:AAAA,iv:aK0NDUmGF5rgQKERiDsl8ZmCs+7aY6DdOPGhvm21fiw=,tag:jZYZLFyNneDOtZnXYZjGaQ==,type:str]",\n\t\t"version": "3.10.2"\n\t}\n}\n' "${plain}"
 	exit 0
 fi
 exec "${REAL}" "$@"
@@ -47,6 +47,7 @@ STUB
 	run env PATH="${PWD}/../fakebin:${PATH}" git add deploy.secret
 	assert_ne "${RC}" "0" "git add exit status"
 	assert_contains "${OUT}" "did not encrypt deploy.secret completely" "filter message"
+	assert_contains "${OUT}" 'Found: "data" is not encrypted.' "what the check found"
 	assert_eq "$(git ls-files -s -- deploy.secret)" "" "nothing staged"
 }
 

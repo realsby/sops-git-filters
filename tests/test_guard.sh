@@ -65,6 +65,89 @@ test_guard_blocks_envelope_with_plaintext_data() {
 	assert_ne "${RC}" "0" "guard exit status"
 }
 
+# swap <old> <new>   (text on stdin) : the first <old> becomes <new>, as text
+swap() {
+	awk -v old="$1" -v new="$2" '!done && (i = index($0, old)) {
+		$0 = substr($0, 1, i - 1) new substr($0, i + length(old))
+		done = 1
+	}
+	{ print }'
+}
+
+# A hand-made ENC[...] value in a real document (audit A-16): a password
+# in the place of the ciphertext, or after a real value. Every value the
+# check reads is tried: "data" and "mac" (json); a value, a comment and
+# sops_mac (dotenv). The documents sops wrote, unchanged, pass.
+test_guard_blocks_hand_made_encrypted_values() {
+	local fake_short='ENC[AES256_GCM,data:MyPassword123,iv:x,tag:y,type:str]'
+	local doc token name
+
+	unfiltered_repo
+	doc="$(printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin)"
+	printf '%s\n' "${doc}" >real.secret
+	for name in data mac; do
+		token="$(printf '%s\n' "${doc}" | sed -n 's/^[[:space:]]*"'"${name}"'": "\(ENC\[[^"]*\]\)".*/\1/p')"
+		assert_contains "${token}" "ENC[AES256_GCM,data:" "test fixture: the ${name} value"
+		printf '%s\n' "${doc}" | swap "${token}" "${fake_short}" >"${name}-short.secret"
+		printf '%s\n' "${doc}" | swap "${token}" "${token}hunter2]" >"${name}-after.secret"
+	done
+	git add ./*.secret
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status (json)"
+	for name in data-short data-after mac-short mac-after; do
+		assert_contains "${OUT}" "- ${name}.secret" "guard names the file (json)"
+	done
+	assert_not_contains "${OUT}" "- real.secret" "guard output (json)"
+	assert_not_contains "${OUT}" "hunter2" "guard output (json)"
+	assert_not_contains "${OUT}" "MyPassword" "guard output (json)"
+	cd ..
+
+	mkdir dotenv && cd dotenv || exit 1
+	unfiltered_repo dotenv
+	doc="$(printf '# note\nA=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin)"
+	printf '%s\n' "${doc}" >real.secret
+	for name in comment value sops_mac; do
+		case "${name}" in
+		comment) token="$(printf '%s\n' "${doc}" | sed -n 's/^#\(ENC\[.*\]\)$/\1/p')" ;;
+		value) token="$(printf '%s\n' "${doc}" | sed -n 's/^A=\(ENC\[.*\]\)$/\1/p')" ;;
+		sops_mac) token="$(printf '%s\n' "${doc}" | sed -n 's/^sops_mac=\(ENC\[.*\]\)$/\1/p')" ;;
+		esac
+		assert_contains "${token}" "ENC[AES256_GCM,data:" "test fixture: the ${name} value"
+		printf '%s\n' "${doc}" | swap "${token}" "${fake_short}" >"${name}-short.secret"
+		printf '%s\n' "${doc}" | swap "${token}" "${token}hunter2]" >"${name}-after.secret"
+	done
+	git add ./*.secret
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status (dotenv)"
+	for name in comment-short comment-after value-short value-after sops_mac-short sops_mac-after; do
+		assert_contains "${OUT}" "- ${name}.secret" "guard names the file (dotenv)"
+	done
+	assert_not_contains "${OUT}" "- real.secret" "guard output (dotenv)"
+	assert_not_contains "${OUT}" "hunter2" "guard output (dotenv)"
+	assert_not_contains "${OUT}" "MyPassword" "guard output (dotenv)"
+}
+
+# What sops writes for empty content passes the stricter check of the
+# encrypted values (audit A-16): an empty file in either format, an empty
+# value and an empty comment. sops writes no ENC[...] for those.
+test_guard_passes_what_sops_writes_for_empty_content() {
+	new_repo repo
+	: >empty.secret
+	git add empty.secret
+	assert_contains "$(stored empty.secret)" '"data": ""' "test fixture: an empty file (json)"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status (json)"
+	cd ..
+
+	new_repo repo2 dotenv
+	: >empty.secret
+	printf '#\nEMPTY=\nA=1\n' >.env
+	git add empty.secret .env
+	assert_contains "$(stored .env)" $'#\nEMPTY=\n' "test fixture: an empty comment and an empty value"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status (dotenv)"
+}
+
 # A complete SOPS document with a secret in clear next to it: after the
 # metadata, or in a line named like metadata. These are the examples
 # from the review of the document check.
