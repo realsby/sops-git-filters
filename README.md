@@ -89,7 +89,7 @@ Git does not run these scripts from your checkout of the tool. `install.sh` copi
 
 ## Requirements
 
-- `git` ≥ 2.18, `bash` ≥ 3.2 (macOS stock bash is fine)
+- `git` ≥ 2.18, `bash` ≥ 3.2 (macOS stock bash is fine). The git minimum comes from reading the scripts, not from a test run: the newest git feature they use is `git config --type=path` (2.18); the `attr:` pathspec and `git rev-parse --absolute-git-dir` need 2.13, and `git add --renormalize`, which the messages tell you to run, 2.16. CI runs the git of its Ubuntu and macOS runner images, a current release, and no older one.
 - [`sops`](https://github.com/getsops/sops) ≥ 3.11.0 on PATH. `install.sh` refuses older versions: up to 3.10.2, `sops` stores the whole file in clear when the matching `.sops.yaml` rule uses `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`. Tested up to 3.13.3. The checks accept only the metadata fields `sops` writes up to that release: if a later `sops` adds a field, its documents are refused (never let through) and the message names the field. Update this tool then.
 - A SOPS key backend: [age](https://github.com/FiloSottile/age) (simplest), or any KMS SOPS supports
 
