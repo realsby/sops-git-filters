@@ -14,7 +14,10 @@
 # ║  commit. A secret that was committed in plaintext long ago is    ║
 # ║  reported until it is fixed. The attribute is read from the      ║
 # ║  .gitattributes files in the index, the ones the commit          ║
-# ║  carries, not from the working tree.                             ║
+# ║  carries, not from the working tree. Git also reads attribute    ║
+# ║  files no commit carries ($GIT_DIR/info/attributes above all);   ║
+# ║  the guard blocks while one of them could change the filter      ║
+# ║  attribute of a path, and names the line.                        ║
 # ║                                                                  ║
 # ║  How: each blob is read by object id and must be a completely    ║
 # ║  encrypted SOPS document in the repository's storage format      ║
@@ -142,6 +145,14 @@ check_entries() {
 		echo "      rotate that secret." >&2
 		echo " If the reason names a key that sops does not write and your sops is" >&2
 		echo " newer than this tool, update sops-git-filters instead." >&2
+		# attr.tree (git 2.42) and GIT_ATTR_SOURCE make git add read the
+		# attributes from a tree, not from .gitattributes: where that tree
+		# marks nothing, git add runs no filter, and step 2 changes nothing.
+		if [[ -n "${GIT_ATTR_SOURCE:-}" ]] ||
+			git -C "${PROJECT_ROOT}" config attr.tree >/dev/null 2>&1; then
+			echo " attr.tree or GIT_ATTR_SOURCE is set: git add takes the attributes" >&2
+			echo " from that tree, not from .gitattributes. Unset it before step 2." >&2
+		fi
 		echo "========================================================" >&2
 		return 1
 	fi
@@ -332,11 +343,156 @@ unquote_path() {
 	REPLY="${out}"
 }
 
+# ── Attribute files that no commit carries ───────────────────────
+# check-attr --cached replaces the .gitattributes of the working tree by
+# those of the index, but git still reads three files outside the tree:
+#
+#   $GIT_DIR/info/attributes   above every .gitattributes
+#   core.attributesFile        below them all (default
+#                              ~/.config/git/attributes)
+#   the system file            below them all ($(prefix)/etc/gitattributes)
+#
+# A line in info/attributes such as ".env -filter" wins over the
+# "filter=sops" of the commit. `git add` then stages the plaintext, and
+# the guard, which asks git, no longer counted .env as SOPS-managed: the
+# plaintext reached the commit (audit A-11). The two lower files cannot
+# override a .gitattributes with a line of their own, but a macro they
+# define applies wherever its name is used: "[attr]binary -filter"
+# reaches every path a .gitattributes marks "filter=sops binary".
+#
+# Git cannot be asked for the attributes without these files, so the
+# guard reads them and blocks while one of them could change the filter
+# attribute of a path:
+#   - info/attributes: a line that sets filter to anything but "sops"
+#     (filter, -filter, !filter, filter=lfs), sets a macro, or redefines
+#     a macro of the root .gitattributes of the index;
+#   - any of the three: a macro definition that sets filter to anything
+#     but "sops", or sets another macro.
+# A macro is a name an [attr] line defines, in these files or in the
+# root .gitattributes (the only one git takes macros from). The built-in
+# "binary" (-diff -merge -text) counts only once a file redefines it.
+# Only a macro that is set expands: "-name", "!name" and "name=value"
+# do not. Lines with none of this (`*.bin binary`, comments) pass. A
+# quoted pattern with a blank in it is split like the attributes after
+# it: a word of it can only add a false alarm, never hide an attribute.
+#
+# A file that exists but cannot be read fails the check. Git older than
+# 2.42 cannot say where the system file is; it is not read then.
+# attr.tree and GIT_ATTR_SOURCE need nothing here: check-attr --cached
+# ignores them (check_entries names them when plaintext is staged).
+#
+# attribute_overrides prints "<file>:<line number>: <line>" for each
+# such line. Exit status: 0 done (with output or not), 2 cannot tell.
+attribute_overrides() {
+	local info global system file
+	local -a files=()
+
+	info="$(git -C "${PROJECT_ROOT}" rev-parse --git-path info/attributes)" || return 2
+	if ! global="$(git -C "${PROJECT_ROOT}" var GIT_ATTR_GLOBAL 2>/dev/null)"; then
+		# git before 2.42: the same lookup, by hand.
+		global="$(git -C "${PROJECT_ROOT}" config --type=path core.attributesFile 2>/dev/null)" || global=""
+		if [[ -z "${global}" && -n "${XDG_CONFIG_HOME:-}" ]]; then
+			global="${XDG_CONFIG_HOME}/git/attributes"
+		elif [[ -z "${global}" && -n "${HOME:-}" ]]; then
+			global="${HOME}/.config/git/attributes"
+		fi
+	fi
+	# Prints nothing and fails under GIT_ATTR_NOSYSTEM, and before 2.42.
+	system="$(git -C "${PROJECT_ROOT}" var GIT_ATTR_SYSTEM 2>/dev/null)" || system=""
+
+	# awk takes the role of each file from an assignment before it. Every
+	# path is made absolute, so none is taken for an assignment itself.
+	for file in "system=${system}" "global=${global}" "info=${info}"; do
+		[[ -n "${file#*=}" ]] || continue
+		[[ "${file#*=}" == /* ]] || file="${file%%=*}=${PROJECT_ROOT}/${file#*=}"
+		[[ -e "${file#*=}" ]] || continue
+		if [[ -d "${file#*=}" || ! -r "${file#*=}" ]]; then
+			echo "encryption-guard: cannot read ${file#*=}, an attributes file git reads too" >&2
+			return 2
+		fi
+		files+=("role=${file%%=*}" "${file#*=}")
+	done
+	[[ "${#files[@]}" -gt 0 ]] || return 0
+
+	# On stdin: the root .gitattributes of the index (a blob per stage
+	# while it is unmerged), for the names of its macros.
+	{
+		git -C "${PROJECT_ROOT}" ls-files -s -- .gitattributes |
+			awk -F '\t' '$2 == ".gitattributes" { split($1, m, " "); print m[2] }' |
+			while IFS= read -r file; do
+				git -C "${PROJECT_ROOT}" cat-file blob "${file}" </dev/null || exit 2
+				echo
+			done
+	} | awk '
+	{
+		text = $0
+		sub(/\r$/, "", text)
+		gsub(/\r/, " ") # git counts a CR as a blank
+		if (NF == 0 || substr($1, 1, 1) == "#") next
+		n++
+		src[n] = role
+		file[n] = FILENAME
+		num[n] = FNR
+		line[n] = text
+		first = 2
+		if (substr($1, 1, 6) == "[attr]") {
+			name = substr($1, 7)
+			if (name == "") {
+				name = $2
+				first = 3
+			}
+			defines[n] = name
+			macro[name] = 1
+			if (role == "tree") tree_macro[name] = 1
+		}
+		for (i = first; i <= NF; i++) {
+			t = $i
+			c = substr(t, 1, 1)
+			if (c == "-" || c == "!") t = substr(t, 2)
+			eq = index(t, "=")
+			key = eq ? substr(t, 1, eq - 1) : t
+			if (key == "filter" && $i != "filter=sops") touches[n] = 1
+			if (c != "-" && c != "!" && !eq) uses[n] = uses[n] " " key
+		}
+	}
+	END {
+		for (k = 1; k <= n; k++) {
+			if (src[k] == "tree") continue
+			if (src[k] != "info" && defines[k] == "") continue
+			bad = touches[k]
+			m = split(uses[k], used, " ")
+			for (j = 1; j <= m; j++)
+				if (used[j] in macro) bad = 1
+			if (src[k] == "info" && defines[k] != "" && (defines[k] in tree_macro)) bad = 1
+			if (bad) printf "%s:%d: %s\n", file[k], num[k], line[k]
+		}
+	}' role=tree - "${files[@]}" || return 2
+}
+
 # `|| status=$?` keeps errexit from ending the script before the
 # message below. With pipefail, a failing listing fails the pipeline
 # too, even when check_entries saw nothing wrong in the part it got.
 status=0
-managed_entries | check_entries || status=$?
+overrides="$(attribute_overrides)" || status=$?
+if [[ "${status}" -eq 0 && -n "${overrides}" ]]; then
+	blocked "a local attributes file can change which files are encrypted"
+	echo " These lines set the filter attribute, or a macro that can, in a file" >&2
+	echo " that no commit carries:" >&2
+	echo "" >&2
+	printf '%s\n' "${overrides}" | sed 's/^/   /' >&2
+	echo "" >&2
+	echo " git add obeys them, and may stage a secret in plaintext, while the" >&2
+	echo " guard checks the files the .gitattributes of the commit mark" >&2
+	echo " filter=sops: it cannot verify what the commit will hold." >&2
+	echo "" >&2
+	echo " To fix: remove those lines; what a path needs belongs in .gitattributes," >&2
+	echo " in a commit. Then re-stage the secrets: git add --renormalize -- <files>" >&2
+	echo "========================================================" >&2
+	exit 1
+fi
+if [[ "${status}" -eq 0 ]]; then
+	managed_entries | check_entries || status=$?
+fi
 
 case "${status}" in
 0) exit 0 ;;

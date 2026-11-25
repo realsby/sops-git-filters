@@ -291,6 +291,138 @@ test_guard_reads_the_attributes_of_the_index() {
 	assert_not_contains "${OUT}" "hunter2" "guard output"
 }
 
+# $GIT_DIR/info/attributes outranks every .gitattributes, and no commit
+# carries it. A local ".env -filter" there keeps `git add` from running
+# the filter and, read by check-attr --cached all the same, took .env
+# out of the guard's view: the plaintext reached HEAD (audit A-11).
+test_guard_blocks_a_filter_line_in_info_attributes() {
+	new_repo repo dotenv
+	printf 'API_KEY=old\n' >.env
+	git add .env
+	git commit -q -m "encrypted .env"
+	mkdir -p .git/hooks
+	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+
+	local info
+	info="$(git rev-parse --git-path info/attributes)"
+	mkdir -p "$(dirname "${info}")"
+	printf '# local\n.env -filter\n' >>"${info}"
+	printf 'API_KEY=hunter2\n' >.env
+	git add .env
+	assert_contains "$(stored .env)" "hunter2" "test fixture: plaintext in the index"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "1" "guard exit status"
+	assert_contains "${OUT}" "info/attributes:2: .env -filter" "guard names the file and the line"
+	assert_not_contains "${OUT}" "hunter2" "guard output"
+	run git commit -q -m "plaintext through info/attributes"
+	assert_ne "${RC}" "0" "commit exit status"
+	assert_contains "$(git cat-file blob HEAD:.env)" "ENC[" "HEAD keeps the encrypted .env"
+
+	# Without the line, .env is staged through the filter again.
+	: >"${info}"
+	git add .env
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status with an empty file"
+
+	# Every way of naming the attribute, and macros: one that unsets it,
+	# defined there; one from the .gitattributes the commit carries; and a
+	# redefinition of that one.
+	printf '[attr]public -filter\n' >.gitattributes.new
+	cat .gitattributes >>.gitattributes.new
+	mv .gitattributes.new .gitattributes
+	git add .gitattributes
+	local line
+	for line in '.env !filter' '.env filter' '.env filter=lfs' '"\056env"	-filter' \
+		'[attr]plain -filter' '.env public' '[attr]public -diff'; do
+		printf '%s\n' "${line}" >"${info}"
+		run "${TOOL}/encryption-guard.sh"
+		assert_eq "${RC}" "1" "guard exit status with [${line}]"
+		assert_contains "${OUT}" "info/attributes:1: ${line}" "guard names the line [${line}]"
+	done
+}
+
+# core.attributesFile ranks below every .gitattributes, so its own lines
+# cannot take filter=sops off a path. A macro defined there applies
+# wherever its name is used, though: redefining the built-in "binary"
+# reaches a path that the .gitattributes of the commit marks
+# "filter=sops binary".
+test_guard_blocks_a_filter_macro_in_core_attributesfile() {
+	new_repo repo
+	printf '.env filter=sops diff=sops binary\n' >.gitattributes
+	git add .gitattributes
+	printf '*.env -filter\n' >../global-attributes
+	git config core.attributesFile "${PWD}/../global-attributes"
+	printf 'A=1\n' >.env
+	git add .env
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status with a plain line, which ranks below"
+
+	printf '[attr]binary -diff -merge -text -filter\n' >>../global-attributes
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "1" "guard exit status with a macro that unsets filter"
+	assert_contains "${OUT}" "global-attributes:2: [attr]binary -diff -merge -text -filter" "guard names the file and the line"
+}
+
+# Lines that cannot change the filter attribute of a path do not block,
+# nor does a missing file.
+test_guard_passes_unrelated_info_attributes() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	local info
+	info="$(git rev-parse --git-path info/attributes)"
+	[[ ! -e "${info}" ]] || fail "test fixture: ${info} exists"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status without the file"
+
+	mkdir -p "$(dirname "${info}")"
+	printf '# filter: comments do not count\n\n*.bin binary\n*.md diff=markdown -text\n.env.local filter=sops diff=sops\n*.txt public\n' >"${info}"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status with unrelated lines"
+
+	printf '[attr]local-diff diff=sops\n' >>"${info}"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status with a macro that leaves filter alone"
+}
+
+# A file the guard cannot read may say anything: it fails closed.
+test_guard_fails_closed_when_info_attributes_is_unreadable() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	local info
+	info="$(git rev-parse --git-path info/attributes)"
+	mkdir -p "$(dirname "${info}")"
+	printf '*.bin binary\n' >"${info}"
+	chmod 000 "${info}"
+	if [[ -r "${info}" ]]; then
+		chmod 644 "${info}"
+		skip "running as a user who can read a file of mode 000"
+	fi
+	run "${TOOL}/encryption-guard.sh"
+	chmod 644 "${info}"
+	assert_eq "${RC}" "1" "guard exit status"
+	assert_contains "${OUT}" "info/attributes" "guard names the file"
+}
+
+# attr.tree (git 2.42) makes `git add` read the attributes from a tree
+# instead of .gitattributes. The guard keeps reading the index, so the
+# plaintext such a `git add` stages is blocked, and the message names
+# the setting.
+test_guard_names_attr_tree_when_plaintext_is_staged() {
+	new_repo repo
+	git config attr.tree "$(git mktree </dev/null)"
+	printf 'PW=hunter2\n' >.env
+	git add .env
+	if ! stored .env | grep -q hunter2; then
+		skip "git $(git --version | awk '{print $3}') does not know attr.tree"
+	fi
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "1" "guard exit status"
+	assert_contains "${OUT}" "- .env" "guard names the file"
+	assert_contains "${OUT}" "attr.tree" "guard names the setting"
+}
+
 # The guard runs on every commit. Its time must follow the number of
 # SOPS-managed files, not the number of tracked files: a bash loop over
 # every tracked path took 8.5 seconds with 60,000 of them (audit A-01),
