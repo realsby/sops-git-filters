@@ -139,9 +139,9 @@ stored() {
 # plain_of_stored <path> [format] : decrypt the index blob of <path>
 plain_of_stored() {
 	if [[ "${2:-json}" == "dotenv" ]]; then
-		stored "$1" | sops decrypt --input-type dotenv --output-type dotenv /dev/stdin
+		stored "$1" | sops decrypt --input-type dotenv --output-type dotenv
 	else
-		stored "$1" | sops decrypt --input-type json --output-type binary /dev/stdin
+		stored "$1" | sops decrypt --input-type json --output-type binary
 	fi
 }
 

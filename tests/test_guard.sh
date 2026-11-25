@@ -45,7 +45,7 @@ test_guard_blocks_plaintext_that_mentions_the_marker() {
 test_guard_blocks_partly_encrypted_dotenv() {
 	unfiltered_repo dotenv
 	{
-		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env
 		printf 'API_TOKEN=this-value-is-not-encrypted\n'
 	} >.env
 	git add .env
@@ -56,7 +56,7 @@ test_guard_blocks_partly_encrypted_dotenv() {
 # A SOPS envelope whose content is in clear. Its MAC is ENC[...] all the same.
 test_guard_blocks_envelope_with_plaintext_data() {
 	unfiltered_repo
-	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret |
 		sed 's/"data": "ENC[^"]*"/"data": "key material in clear"/' >key.secret
 	assert_contains "$(cat key.secret)" '"data": "key material in clear"' "test fixture"
 	assert_contains "$(cat key.secret)" 'ENC[AES256_GCM' "test fixture keeps an encrypted MAC"
@@ -74,7 +74,7 @@ test_guard_blocks_hand_made_encrypted_values() {
 	local doc token name
 
 	unfiltered_repo
-	doc="$(printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin)"
+	doc="$(printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret)"
 	printf '%s\n' "${doc}" >real.secret
 	for name in data mac; do
 		token="$(printf '%s\n' "${doc}" | sed -n 's/^[[:space:]]*"'"${name}"'": "\(ENC\[[^"]*\]\)".*/\1/p')"
@@ -95,7 +95,7 @@ test_guard_blocks_hand_made_encrypted_values() {
 
 	mkdir dotenv && cd dotenv || exit 1
 	unfiltered_repo dotenv
-	doc="$(printf '# note\nA=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin)"
+	doc="$(printf '# note\nA=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env)"
 	printf '%s\n' "${doc}" >real.secret
 	for name in comment value sops_mac; do
 		case "${name}" in
@@ -145,7 +145,7 @@ test_guard_passes_what_sops_writes_for_empty_content() {
 test_guard_blocks_plaintext_next_to_the_envelope() {
 	unfiltered_repo
 	printf '{"data":"","sops":{},"credentials":{"password":"hunter2"}}\n' >one.secret
-	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret |
 		sed '$d' >two.secret
 	printf ',\n\t"credentials": {"password": "hunter2"}\n}\n' >>two.secret
 	assert_contains "$(cat two.secret)" '"data": "ENC[AES256_GCM' "test fixture: a real envelope"
@@ -160,7 +160,7 @@ test_guard_blocks_plaintext_next_to_the_envelope() {
 test_guard_blocks_plaintext_in_a_sops_prefixed_line() {
 	unfiltered_repo dotenv
 	{
-		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env
 		printf 'sops_API_TOKEN=hunter2\n'
 	} >.env
 	git add .env
@@ -212,7 +212,7 @@ stage_raw() {
 test_guard_blocks_plaintext_after_a_nul_byte() {
 	unfiltered_repo dotenv
 	{
-		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env
 		printf '\000DB_PASSWORD=hunter2\n'
 	} >../dotenv.blob
 	stage_raw .env ../dotenv.blob
@@ -231,7 +231,7 @@ test_guard_blocks_plaintext_after_a_nul_byte() {
 	printf '*.secret filter=sops diff=sops\n' >.gitattributes
 	git add -A
 	git commit -q -m scaffold
-	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin >../doc.json
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret >../doc.json
 	assert_contains "$(sed -n 2p ../doc.json)" '"data": "ENC[AES256_GCM' "test fixture: line 2 holds the data"
 	{
 		sed -n 1p ../doc.json
@@ -513,7 +513,7 @@ test_guard_names_plaintext_files_with_awkward_names() {
 # to the object store and print its object id
 sops_blob() {
 	printf '%s\n' "$1" |
-		sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		sops encrypt --input-type binary --output-type json --filename-override any.secret |
 		git hash-object -w --stdin
 }
 

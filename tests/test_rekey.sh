@@ -3,7 +3,7 @@
 # shellcheck disable=SC2154  # OUT/RC/TOOL/AGE_* come from tests/lib.sh
 
 decrypt_as_b() { # stdin: a json-format blob; decrypt with key B only
-	SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary /dev/stdin
+	SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary
 }
 
 test_rekey_adds_a_recipient() {

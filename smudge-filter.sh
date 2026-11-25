@@ -90,7 +90,7 @@ fi
 
 status=0
 printf '%s' "${BLOB}" | sops decrypt "${DECRYPT_ARGS[@]}" \
-	--filename-override "${FILENAME}" /dev/stdin || status=$?
+	--filename-override "${FILENAME}" || status=$?
 
 if [[ "${status}" -eq 0 ]]; then
 	sgf_warn_if_outdated "${SCRIPT_DIR}" "${PROJECT_ROOT}"

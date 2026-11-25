@@ -525,7 +525,7 @@ while IFS= read -r -d '' record; do
 	# (pipefail: the status of the pipeline is that of sops.)
 	# shellcheck disable=SC2086  # DECRYPT_ARGS is a flag list
 	if SGF_CAPTURED=$(git -C "${TARGET_ROOT}" cat-file blob "${index_sha}" |
-		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" /dev/stdin 2>"${decrypt_stderr}" |
+		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" 2>"${decrypt_stderr}" |
 		sgf_cat_counting_nuls) && sgf_split_counted; then
 		if [[ "${SGF_NUL_COUNT}" != "0" ]]; then
 			HOLDS_NUL_BYTES="${HOLDS_NUL_BYTES}   - ${path}"$'\n'

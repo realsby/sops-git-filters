@@ -201,7 +201,7 @@ while IFS= read -r -d '' record; do
 	checked=$((checked + 1))
 	# sops' own message is the reason, so its stderr is left alone.
 	if git -C "${TARGET_ROOT}" cat-file blob "${sha}" |
-		sops decrypt "${DECRYPT_ARGS[@]}" --filename-override "${path}" /dev/stdin >/dev/null; then
+		sops decrypt "${DECRYPT_ARGS[@]}" --filename-override "${path}" >/dev/null; then
 		continue
 	fi
 	failed=$((failed + 1))

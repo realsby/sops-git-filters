@@ -277,7 +277,7 @@ encrypt_for() {
 		type=dotenv
 		out=dotenv
 	fi
-	sops encrypt --age "$2" --input-type "${type}" --output-type "${out}" --filename-override any.secret /dev/stdin
+	sops encrypt --age "$2" --input-type "${type}" --output-type "${out}" --filename-override any.secret
 }
 
 # A file copied from another project, encrypted for that project's key
@@ -411,7 +411,7 @@ test_clean_printed_commands_take_the_path_literally() {
 	assert_contains "${line}" "git add " "test fixture: the printed line"
 	(export SOPS_AGE_KEY_FILE="${NO_KEY}" && cd sub && eval "${line}")
 	assert_eq "$(git diff --cached --name-only)" "${file}" "what the printed line staged"
-	assert_eq "$(git cat-file blob ":${file}" | sops decrypt --input-type json --output-type binary /dev/stdin)" "B=3" "the staged blob"
+	assert_eq "$(git cat-file blob ":${file}" | sops decrypt --input-type json --output-type binary)" "B=3" "the staged blob"
 }
 
 # A newline at the end of a name is part of it. The quoted path in the
@@ -647,7 +647,7 @@ test_clean_names_a_rule_that_does_not_list_your_key() {
 	run env SOPS_FILTER_FORCE_REENCRYPT=1 git commit -q -m "add the deploy key"
 	assert_eq "${RC}" "0" "git commit as the message says"
 	assert_eq "$(git cat-file blob HEAD:prod/deploy.env |
-		SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary /dev/stdin)" \
+		SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary)" \
 		"TOKEN=1" "key B decrypts the committed blob"
 
 	# The README's way to stop the checks that fail while the plaintext is
@@ -732,7 +732,7 @@ test_clean_format_change_needs_the_override() {
 
 test_clean_refuses_ciphertext_in_the_other_format() {
 	new_repo repo
-	printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin >x.secret
+	printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env >x.secret
 	run git add x.secret
 	assert_ne "${RC}" "0" "git add exit status"
 	assert_contains "${OUT}" "in the dotenv format" "filter message"
@@ -841,7 +841,7 @@ test_clean_dotenv_refuses_content_with_nul_bytes() {
 test_clean_does_not_reuse_a_stored_blob_with_nul_bytes() {
 	new_repo repo
 	printf 'a\0b\n' | sops encrypt --input-type binary --output-type json \
-		--filename-override bin.secret /dev/stdin >../bin.enc
+		--filename-override bin.secret >../bin.enc
 	git update-index --add --cacheinfo "100644,$(git hash-object -w ../bin.enc),bin.secret"
 	git commit -q -m "a binary secret stored without the filter"
 	local before

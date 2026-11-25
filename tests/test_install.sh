@@ -433,7 +433,7 @@ test_install_does_not_write_a_file_with_nul_bytes_damaged() {
 	printf 'A=1\n' >.env
 	git add .env
 	printf 'a\0b\n' | sops encrypt --input-type binary --output-type json \
-		--filename-override bin.secret /dev/stdin >../bin.enc
+		--filename-override bin.secret >../bin.enc
 	git update-index --add --cacheinfo "100644,$(git hash-object -w ../bin.enc),bin.secret"
 	git commit -q -m "a text secret and a binary one"
 	cd ..

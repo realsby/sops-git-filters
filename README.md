@@ -458,7 +458,7 @@ The working copy holds ciphertext, but not the version git holds, and `sops` can
 With dotenv format, check for blank lines (not representable — the round-trip comparison then never matches; use `#` separator lines) and for a missing newline at the end of the file. Otherwise you are likely running an older clean filter: update, re-run `install.sh` and re-add the file once.
 
 **A file got double-encrypted (ciphertext inside ciphertext)**
-Older versions of the clean filter did this when ciphertext sitting in the working tree was `git add`-ed after the filters were configured. The current filter never encrypts a SOPS document again: it stores the ciphertext git holds unchanged, and decrypts any other SOPS document first. To repair a blob from before: `git show :file | sops decrypt --input-type <fmt> --output-type <fmt2> --filename-override file /dev/stdin` repeatedly until you see actual plaintext, write that to the working tree, `git add`.
+Older versions of the clean filter did this when ciphertext sitting in the working tree was `git add`-ed after the filters were configured. The current filter never encrypts a SOPS document again: it stores the ciphertext git holds unchanged, and decrypts any other SOPS document first. To repair a blob from before: `git show :file | sops decrypt --input-type <fmt> --output-type <fmt2> --filename-override file` repeatedly until you see actual plaintext, write that to the working tree, `git add`.
 
 **Repo directory moved/renamed and filters broke**
 With this version, they don't — the commands in `.git/config` hold no path to the repository or to the tool; they find the installed copy when they run. If you migrated from an older setup, run `install.sh` once to rewrite them.

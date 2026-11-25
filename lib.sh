@@ -38,6 +38,11 @@ SGF_VERSION="3.1.0"
 # when the rule does not select that key the whole file is stored in
 # clear inside a SOPS envelope. 3.11.0 ignores those options for the
 # binary store.
+#
+# The scripts call `sops encrypt` and `sops decrypt` with no file: sops
+# reads stdin then (every version from this one on). Not with /dev/stdin
+# as the file: on Windows sops is a Windows program, and Git Bash hands
+# it that path as C:\proc\self\fd\0, which does not exist there.
 # shellcheck disable=SC2034  # read by install.sh and clean-filter.sh
 SGF_MIN_SOPS_VERSION="3.11.0"
 

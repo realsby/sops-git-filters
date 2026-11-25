@@ -233,8 +233,8 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 	# (pipefail: the status of the pipeline is that of sops.)
 	if ! SGF_CAPTURED=$(printf '%s' "${INPUT}" | sops decrypt \
 		"${DECRYPT_ARGS[@]}" \
-		--filename-override "${FILENAME}" \
-		/dev/stdin | sgf_cat_counting_nuls) || ! sgf_split_counted; then
+		--filename-override "${FILENAME}" |
+		sgf_cat_counting_nuls) || ! sgf_split_counted; then
 		echo "ERROR: ${FILENAME} is a SOPS document that does not decrypt with your keys, and not" >&2
 		echo "       the version git holds (sops' message is above). Refusing to stage it: nobody" >&2
 		echo "       could check it, and it would stop the checkout of everyone who cannot decrypt it." >&2
@@ -352,10 +352,10 @@ encrypt_input() {
 	# --filename-override tells SOPS which .sops.yaml creation rule to
 	# match (stdin has no filename of its own). The result is held back
 	# until it has been checked; the trailing x keeps its final newline.
+	# No file argument: sops reads stdin then (lib.sh, SGF_MIN_SOPS_VERSION).
 	encrypted="$(printf '%s' "${INPUT}" | sops encrypt \
 		"${ENCRYPT_ARGS[@]}" \
-		--filename-override "${FILENAME}" \
-		/dev/stdin && printf x)" || return 1
+		--filename-override "${FILENAME}" && printf x)" || return 1
 	encrypted="${encrypted%x}"
 
 	# ── Never trust the output unseen ────
@@ -631,8 +631,8 @@ KEYS_BEFORE_FORMAT=""
 # (pipefail: the status of the pipeline is that of sops.)
 if ! SGF_CAPTURED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
 	"${DECRYPT_ARGS[@]}" \
-	--filename-override "${FILENAME}" \
-	/dev/stdin | sgf_cat_counting_nuls) || ! sgf_split_counted; then
+	--filename-override "${FILENAME}" |
+	sgf_cat_counting_nuls) || ! sgf_split_counted; then
 	echo "ERROR: cannot decrypt the version of ${FILENAME} that git holds (sops' message is above)." >&2
 	echo "       Without it this filter cannot tell whether the file changed, and it does not" >&2
 	echo "       re-encrypt blindly. Are your keys or credentials available?" >&2
