@@ -546,6 +546,49 @@ test_clean_stops_when_stored_version_cannot_be_decrypted() {
 	assert_eq "$(git status --porcelain)" "" "git status with the key"
 }
 
+# A rule you can encrypt for but not decrypt (audit A-04): the prod/ rule
+# lists key B only, the user holds key A. git add encrypts (public keys
+# are enough); git commit checks the file again and cannot decrypt what
+# was staged. The keys are fine: the message must name the rule, and the
+# way it gives to commit must work.
+test_clean_names_a_rule_that_does_not_list_your_key() {
+	new_repo repo
+	printf 'creation_rules:\n  - path_regex: ^prod/\n    age: %s\n  - path_regex: .*\n    age: %s\n' \
+		"${AGE_PUB_B}" "${AGE_PUB_A}" >.sops.yaml
+	printf 'prod/*.env filter=sops diff=sops\n' >>.gitattributes
+	git add .sops.yaml .gitattributes
+	git commit -q -m "a rule for prod/"
+	mkdir prod
+	printf 'TOKEN=1\n' >prod/deploy.env
+	run git add prod/deploy.env
+	assert_eq "${RC}" "0" "git add for a rule without your key"
+
+	# git commit checks the file again when its timestamp leaves it in
+	# doubt; touch makes that certain.
+	touch prod/deploy.env
+	run git commit -q -m "add the deploy key"
+	assert_ne "${RC}" "0" "git commit"
+	assert_contains "${OUT}" "cannot decrypt the version of prod/deploy.env that git holds" "filter message"
+	assert_contains "${OUT}" "rule for it in .sops.yaml may not list your key" "the message names the rule"
+	assert_contains "${OUT}" "SOPS_FILTER_FORCE_REENCRYPT=1 git commit" "the message gives a way to commit"
+
+	run env SOPS_FILTER_FORCE_REENCRYPT=1 git commit -q -m "add the deploy key"
+	assert_eq "${RC}" "0" "git commit as the message says"
+	assert_eq "$(git cat-file blob HEAD:prod/deploy.env |
+		SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary /dev/stdin)" \
+		"TOKEN=1" "key B decrypts the committed blob"
+
+	# The README's way to stop the checks that fail while the plaintext is
+	# in the working tree: the ciphertext git holds in its place.
+	git cat-file blob :0:prod/deploy.env >prod/deploy.env
+	run git add prod/deploy.env
+	assert_eq "${RC}" "0" "git add of the ciphertext git holds"
+	touch prod/deploy.env
+	run git status --porcelain
+	assert_eq "${RC}" "0" "git status with the ciphertext in the working tree"
+	assert_eq "$(git status --porcelain 2>/dev/null)" "" "git status"
+}
+
 test_clean_force_reencrypt_gives_a_new_blob() {
 	new_repo repo
 	printf 'A=1\n' >.env

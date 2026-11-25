@@ -417,7 +417,13 @@ if ! SGF_CAPTURED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
 	echo "       re-encrypt blindly. Are your keys or credentials available?" >&2
 	# shellcheck disable=SC2046  # one word per key type
 	sgf_credential_hint "         " $(printf '%s' "${EXISTING_ENCRYPTED}" | sgf_doc_key_types) >&2
-	echo "       To re-encrypt regardless: SOPS_FILTER_FORCE_REENCRYPT=1 git add ${FILENAME}" >&2
+	# Encrypting needs the public keys of the rule only, so git add works
+	# for a path whose rule lists none of your keys, and the next check of
+	# the file (git commit, git status) fails here (audit A-04).
+	echo "       Or are you not one of its recipients? The rule for it in .sops.yaml may not list your key:" >&2
+	echo "       you can encrypt for keys you do not hold, not decrypt. Then have a recipient add the" >&2
+	echo "       file, or commit what is staged (not with -a):  SOPS_FILTER_FORCE_REENCRYPT=1 git commit" >&2
+	echo "       To re-encrypt regardless: SOPS_FILTER_FORCE_REENCRYPT=1 git add ${PASTE_PATH}" >&2
 	exit 1
 fi
 EXISTING_DECRYPTED="${SGF_CONTENT}"
