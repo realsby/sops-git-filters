@@ -487,7 +487,10 @@ while IFS= read -r -d '' record; do
 	fi
 
 	[[ -f "${f}" ]] || continue
-	worktree_sha=$(git hash-object --no-filters -- "${f}")
+	# The path from the top of the working tree, not "${f}": on Windows
+	# Git Bash turns an absolute /c/... path into C:/... for git, but not
+	# one with a character such as ` in it, and git then cannot open it.
+	worktree_sha=$(git -C "${TARGET_ROOT}" hash-object --no-filters -- "${path}")
 	if [[ "${worktree_sha}" != "${index_sha}" ]]; then
 		# core.autocrlf=true (or eol=crlf) on a path without -text: the
 		# checkout before the filters existed put a CR before every LF of
