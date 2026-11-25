@@ -30,7 +30,7 @@
 # within the first 8 KiB of this file: it is read as text, never by
 # running the file, and only that much of the file is read.
 # shellcheck disable=SC2034  # read by install.sh
-SGF_VERSION="3.0.0"
+SGF_VERSION="3.1.0"
 
 # Oldest sops this tool accepts. Up to 3.10.2, sops applies a creation
 # rule's encrypted_regex / unencrypted_regex / encrypted_suffix /

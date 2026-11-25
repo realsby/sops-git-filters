@@ -2,6 +2,68 @@
 
 Every release is a tag. The same notes are on the [releases page](https://github.com/realsby/sops-git-filters/releases). After an update, run `install.sh` again in every clone.
 
+## v3.1.0 — unreleased
+
+[All changes since v3.0.0](https://github.com/realsby/sops-git-filters/compare/v3.0.0...main)
+
+After the update, run `install.sh` again in every clone: git runs the copy under the git directory, and that copy stays at v3.0.0 until `install.sh` replaces it. The clean filter, the smudge filter, the merge driver and the hooks say so on stderr until then.
+
+### Security
+
+- **The guard let plaintext through in three local states.** Each needs the clean filter to have been bypassed first, which is the case the guard is there for. The guard now blocks all three.
+  - It read `.gitattributes` from the working tree. A local `-filter` line that was not staged let a plaintext secret into a commit whose own `.gitattributes` still marked it `filter=sops`. It now reads the attributes of the index, the ones the commit carries.
+  - A line in `.git/info/attributes` that sets or unsets `filter` overrides every `.gitattributes`, with the same result. So does a macro (`[attr]…`) that turns `filter` off, defined in that file, in the global attributes file (`core.attributesFile`) or in the system one, when a committed `.gitattributes` uses it. The guard now blocks while one of these files can change the filter of a path, and prints the lines to remove. A local `filter=lfs` line in `.git/info/attributes` blocks too: on a secret's path it would be the same bypass. A fresh checkout, as in CI, has none of these files.
+  - On macOS, the awk that checks a blob ends a line at a NUL byte, so plaintext after a NUL byte was never looked at. A blob with a NUL byte is now refused: a SOPS document never has one.
+- **The `ENC[...]` check looks at the whole value.** It was an alphabet test, so `ENC[AES256_GCM,data:MyPassword123,iv:x,tag:y,type:str]` passed as ciphertext. It now checks the field order, the base64 shape, the iv and tag lengths that every sops release writes, and the type.
+- **`install.sh` no longer writes plaintext through a link.** The re-smudge pass followed a symlink in place of a secret, a symlinked directory on its path, and a hard link, and wrote the plaintext outside the working tree. Such a file is now left encrypted and reported (exit status 3). `harden-permissions.sh` no longer changes the mode of a file reached through a symlinked directory.
+
+### Behaviour changes
+
+- **A SOPS document is stored unchanged only when it is the stored version.** Before, any input that looked like a SOPS document was stored as it was. A `.env` copied from another project (encrypted for its keys) or an edited one went into git with exit status 0 and broke every teammate's checkout. Now:
+  - the ciphertext of the stored version (a clone where `install.sh` could not decrypt) is still stored unchanged, without a key, also with CRLF line endings;
+  - any other SOPS document must decrypt with your keys, and is then encrypted for the keys of `.sops.yaml` like any other plaintext (unchanged content reuses the stored blob);
+  - one that does not decrypt is refused, with two ways back: one that needs no key and one that does.
+
+  A clone without keys meets this after a command that moves the index but not the working tree (`git reset HEAD~1`, `git restore --staged --source=…`): the working copy then holds ciphertext that is no longer the stored version, and `git status` stops with that message instead of showing the file as modified. The README has the way back.
+- **A change of keys is named.** When the clean filter re-encrypts a file for other keys than the stored version had (after a change to `.sops.yaml`), it prints the keys added and removed.
+- **The guard lets a commit pass while a secret has an intent-to-add entry** (`git add -N`). Such an entry never reaches a commit as an empty file; before, it blocked every commit.
+- **`install.sh` keeps a hook that was changed by hand.** It replaces only a hook that is byte for byte one it wrote, and names the others with the line to add.
+- **`install.sh` stops on a `filter.sops.process` from another git config file before it writes anything**, and writes `filter.sops.required` only once the filter commands follow. A stopped run no longer leaves a new clone where every edit of a secret fails.
+- **`install.sh` decrypts a checkout with CRLF line endings** (`core.autocrlf=true` without `-text`), instead of leaving the ciphertext and exiting 0.
+- **`preflight.sh --quiet`** still prints the warning about managed files that are not SOPS documents, on stderr.
+- **`rekey.sh`** reads the attributes of the index, like the guard.
+- **The permission hook counts an unmerged path once** in its "Permissions: N" line.
+
+### Fixed
+
+- **Speed in large repositories.** The guard and the permission hooks walked every tracked file in a bash loop. With 60,000 files and 11 secrets: guard 8.5 s → 0.4 s, permission hook 1.5 s → 0.04 s, `git commit` with both 10 s → 0.5 s, `install.sh` 3.7 s → 0.8 s, `preflight.sh` 1.9 s → 0.35 s.
+- **The scripts run in a checkout with CRLF line endings.** A `.gitattributes` keeps `*.sh` at LF. With `core.autocrlf=true` (the default of Git for Windows) they failed at their first line. A vendored copy needs the same file next to the scripts (README, option B).
+- **A secret named like an index stage** (`2:prod.secret`) was compared with the wrong version and re-encrypted at every check.
+- **`GIT_LITERAL_PATHSPECS` and the other `GIT_*_PATHSPECS` variables** of the caller no longer make the permission hook, `install.sh` or `preflight.sh` miss or fail on the managed files.
+- **Commands printed for you to paste** take the path literally, not as a pattern: for a secret named `[ab].env`, `git checkout -- …` no longer also restores `a.env`. They name the file by its full path, so they work from any directory; the merge driver's hints did not.
+
+### Documentation
+
+- `-text` in `examples/gitattributes` and in the walkthrough.
+- The guard checks the structure of every managed blob; in CI, run `encryption-guard.sh` instead of a grep.
+- Copies of a secret that the wildcards miss (`.env~`, `#.env#`, `.env-2026-11-24`, …), and `.gitignore` lines for them.
+- The plaintext files `git mergetool` writes and leaves; `mergetool.writeToTemp true` and `mergetool.keepBackup false`.
+- Review every change to `.sops.yaml`: it decides who can read every secret edited after it.
+- A rule in `.sops.yaml` that does not list your key: `git add` works, `git commit` fails, and what to do.
+- `SOPS_FILTER_FORCE_REENCRYPT=1` reaches every file git checks: set it on `git add`, commit without it.
+- `preflight.sh` checks the index only.
+- What the git minimum (2.18) rests on, and which git CI runs.
+- With `core.hooksPath` inside the working tree the permission hooks show as untracked files.
+- Limitations: a commit that takes `filter=sops` off a path passes the guard with that file in plaintext.
+- `git status` may also contact the key service that a SOPS document in a managed path names.
+
+### CI
+
+- A job checks out the tool with `core.autocrlf=true` and runs `install.sh` and the guard from it.
+- Time limits per job.
+- Dependabot proposes updates of the pinned actions, weekly.
+- Greptile reviews only when asked (`greptile.json`).
+
 ## v3.0.0 — 2026-11-24
 
 [All changes since v2.1.0](https://github.com/realsby/sops-git-filters/compare/v2.1.0...v3.0.0)
