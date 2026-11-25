@@ -113,6 +113,24 @@ path_with_only() {
 	(CDPATH='' cd -- "${dir}" && pwd)
 }
 
+# path_without <dir> <command...> : link every command on PATH into <dir>
+# except the ones named, and print its path. As PATH it is the same PATH
+# without those commands (the first of each name wins, as for PATH).
+path_without() {
+	local dir="$1" entry IFS=:
+	shift
+	mkdir -p "${dir}"
+	for entry in ${PATH}; do
+		[[ -d "${entry}" ]] || continue
+		# One ln per directory; names that are already there fail and stay.
+		ln -s "${entry}"/* "${dir}/" 2>/dev/null || true
+	done
+	for entry in "$@"; do
+		rm -f "${dir:?}/${entry}"
+	done
+	(CDPATH='' cd -- "${dir}" && pwd)
+}
+
 # stored <path> : the blob git holds for <path> in the index
 stored() {
 	git cat-file blob "$(git ls-files -s -- "$1" | awk '{print $2}')"

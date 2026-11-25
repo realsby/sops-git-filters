@@ -565,3 +565,105 @@ test_lib_through_symlink() {
 	is sgf_through_symlink via-link linked-dir/b/file
 	is sgf_through_symlink "${PWD}/root" 'linked-dir/b/file'
 }
+
+# ── What the clean filter remembers (issue #21) ────
+# The HMAC is computed from a plain SHA-256, as RFC 2104 says, so that
+# the key is never an argument of a process. It must give the HMAC-SHA256
+# of the test vectors of RFC 4231 (cases 1, 2 and 4) with every tool it
+# can use.
+test_lib_hmac_sha256_matches_rfc_4231() {
+	load_lib
+	local tool tested=""
+	for tool in sha256sum openssl shasum; do
+		command -v "${tool}" >/dev/null 2>&1 || continue
+		SGF_SHA256_TOOL="${tool}"
+		tested="${tested} ${tool}"
+		sgf_hmac_init 0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+		assert_eq "$(sgf_hmac_sha256 printf 'Hi There')" \
+			b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7 "case 1 (${tool})"
+		sgf_hmac_init 4a656665
+		assert_eq "$(sgf_hmac_sha256 printf '%s' 'what do ya want for nothing?')" \
+			5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843 "case 2 (${tool})"
+		sgf_hmac_init 0102030405060708090a0b0c0d0e0f10111213141516171819
+		assert_eq "$(sgf_hmac_sha256 awk 'BEGIN { for (i = 0; i < 50; i++) printf "%c", 205 }')" \
+			82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b "case 4 (${tool})"
+	done
+	[[ -n "${tested}" ]] || skip "no sha256sum, openssl or shasum on PATH"
+	echo "tested with:${tested}"
+
+	# A key that is not hex, or longer than a block, is refused.
+	is_not sgf_hmac_init "not hex"
+	is_not sgf_hmac_init "$(printf '%0130d' 0)"
+	is_not sgf_hmac_init ""
+}
+
+# The cache directory and its key must be the user's own, not a symlink,
+# and closed to the group and others. (A directory of another user can
+# only be had from the system: the root directory stands in for it.)
+test_lib_cache_private() {
+	load_lib
+	mkdir -m 700 own
+	is sgf_private own
+	chmod 750 own
+	is_not sgf_private own
+	chmod 701 own
+	is_not sgf_private own
+	chmod 700 own
+	(umask 077 && : >own/key)
+	is sgf_private own own/key
+	chmod 640 own/key
+	is_not sgf_private own own/key
+	chmod 600 own/key
+	ln -s own link
+	is_not sgf_private link
+	ln -s key own/link
+	is_not sgf_private own/link
+	if [[ "${EUID}" -ne 0 ]]; then
+		is_not sgf_private /
+	fi
+}
+
+# Entries older than SGF_CACHE_TTL are not given and are removed; so are
+# temporary files left behind. More than SGF_CACHE_MAX entries: all go.
+test_lib_cache_sweeps_old_and_surplus_entries() {
+	load_lib
+	local check=0123456789abcdef0123456789abcdef oid=0123456789012345678901234567890123456789 i n
+	mkdir -p common
+	(
+		sgf_cache_open common || fail "the cache cannot be opened"
+		sgf_cache_put aaaa "${check}" "${oid}" || fail "sgf_cache_put"
+		assert_eq "$(sgf_cache_get aaaa "${check}")" "${oid} 0" "a fresh entry"
+		is_not sgf_cache_get aaaa ffffffffffffffffffffffffffffffff
+		[[ ! -e "${SGF_CACHE_DIR}/e-aaaa" ]] || fail "an entry of another question is kept"
+
+		sgf_cache_put aaaa "${check}" "${oid}"
+		printf 'sgf-cache 1 %s %s %s\n' "${check}" "$((SGF_CACHE_NOW - SGF_CACHE_TTL))" "${oid}" >"${SGF_CACHE_DIR}/e-old"
+		printf 'garbage\n' >"${SGF_CACHE_DIR}/e-bad"
+		: >"${SGF_CACHE_DIR}/tmp.$((SGF_CACHE_NOW - SGF_CACHE_TTL)).1.2"
+		: >"${SGF_CACHE_DIR}/tmp.${SGF_CACHE_NOW}.1.2"
+		is_not sgf_cache_get old "${check}"
+		[[ ! -e "${SGF_CACHE_DIR}/e-old" ]] || fail "an old entry is kept after a read"
+		printf 'sgf-cache 1 %s %s %s\n' "${check}" "$((SGF_CACHE_NOW - SGF_CACHE_TTL))" "${oid}" >"${SGF_CACHE_DIR}/e-old"
+		sgf_cache_sweep
+		assert_eq "$(cd "${SGF_CACHE_DIR}" && echo e-* tmp.*)" "e-aaaa tmp.${SGF_CACHE_NOW}.1.2" "what the sweep keeps"
+
+		SGF_CACHE_MAX=5
+		for ((i = 0; i < 9; i++)); do
+			sgf_cache_put "n${i}" "${check}" "${oid}" || fail "sgf_cache_put n${i}"
+		done
+		n="$(cd "${SGF_CACHE_DIR}" && set -- e-* && echo $#)"
+		[[ "${n}" -le 6 ]] || fail "${n} entries kept with SGF_CACHE_MAX=5"
+	) || exit 1
+
+	# The sweep runs on its own once per SGF_CACHE_TTL, when the cache is
+	# opened.
+	(
+		sgf_cache_open common
+		printf 'sgf-cache 1 %s %s %s\n' "${check}" "$((SGF_CACHE_NOW - SGF_CACHE_TTL))" "${oid}" >"${SGF_CACHE_DIR}/e-old"
+		printf '%s\n' "$((SGF_CACHE_NOW - SGF_CACHE_TTL))" >"${SGF_CACHE_DIR}/swept"
+	)
+	(
+		sgf_cache_open common
+		[[ ! -e "${SGF_CACHE_DIR}/e-old" ]] || fail "the old entry is still there after the next open"
+	) || exit 1
+}
