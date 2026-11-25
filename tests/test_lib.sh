@@ -311,6 +311,31 @@ test_lib_paste_path_and_pathspec() {
 	[[ ! -e pwned ]] || fail "a name was run as a command"
 }
 
+# On Windows git prints an absolute path with a drive letter, C:/Users/...
+# Taken for a relative path, a machine-wide core.hooksPath of ~/.githooks
+# became a directory inside the repository: install.sh wrote the hooks
+# there, where git never runs them, instead of leaving that shared
+# directory alone (and the guard skipped the global attributes file).
+test_lib_absolute_path() {
+	load_lib
+	is sgf_is_absolute /home/me/.githooks
+	is_not sgf_is_absolute .git/hooks
+	is_not sgf_is_absolute ./hooks
+	is_not sgf_is_absolute ''
+	OSTYPE=msys
+	is sgf_is_absolute C:/Users/me/.githooks
+	is sgf_is_absolute 'C:\Users\me\.githooks'
+	is sgf_is_absolute /c/Users/me/.githooks
+	is_not sgf_is_absolute .git/hooks
+	is_not sgf_is_absolute C:hooks
+	is sgf_is_absolute '\\server\share\attributes'
+	is sgf_is_absolute //server/share/attributes
+	is_not sgf_is_absolute '\hooks'
+	OSTYPE=linux-gnu
+	is_not sgf_is_absolute C:/Users/me/.githooks
+	is_not sgf_is_absolute '\\server\share\attributes'
+}
+
 test_lib_store_format() {
 	load_lib
 	mkdir repo
@@ -452,7 +477,7 @@ test_lib_counts_nul_bytes_and_keeps_the_content() {
 # reads it once, and still tells "cannot read" (2) from "not one" (1).
 test_lib_blob_with_a_nul_byte_is_not_a_document() {
 	load_lib
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	local good dotenv status
 	good="$(envelope "${ENC}" | git hash-object -w --stdin)"
@@ -512,21 +537,11 @@ test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
 
 	local out rc
 
-	# A symlink to a device that never ends.
-	ln -s /dev/zero endless.sh
-	rc=0
-	out="$(bounded 10 sgf_version_of endless.sh)" || rc=$?
-	assert_eq "${rc}:${out}" "0:" "a symlink to /dev/zero"
-
 	# A FIFO nobody writes to: opening it would block for ever.
 	mkfifo pipe.sh
 	rc=0
 	out="$(bounded 10 sgf_version_of pipe.sh)" || rc=$?
 	assert_eq "${rc}:${out}" "0:" "a FIFO"
-
-	# A symlink to a real file with a version line: not followed either.
-	ln -s plain.sh link.sh
-	assert_eq "$(sgf_version_of link.sh)" "" "a symlink to a regular file"
 
 	# One endless line, and the version line only after it: not reached.
 	{
@@ -542,11 +557,23 @@ test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
 	printf 'SGF_VERSION="$(touch PWNED)"\n' >evil.sh
 	assert_eq "$(sgf_version_of evil.sh)" "" "a version line that is no version"
 	[[ ! -e PWNED ]] || fail "the version line was executed"
+
+	needs_symlinks
+	# A symlink to a device that never ends.
+	ln -s /dev/zero endless.sh
+	rc=0
+	out="$(bounded 10 sgf_version_of endless.sh)" || rc=$?
+	assert_eq "${rc}:${out}" "0:" "a symlink to /dev/zero"
+
+	# A symlink to a real file with a version line: not followed either.
+	ln -s plain.sh link.sh
+	assert_eq "$(sgf_version_of link.sh)" "" "a symlink to a regular file"
 }
 
 # A symlink anywhere below the root, in a directory's place or in the
 # file's, is found; one above the root is not looked at (audit A-14).
 test_lib_through_symlink() {
+	needs_symlinks
 	load_lib
 	mkdir -p root/a/b elsewhere/b
 	: >root/a/b/file
@@ -601,6 +628,9 @@ test_lib_hmac_sha256_matches_rfc_4231() {
 # and closed to the group and others. (A directory of another user can
 # only be had from the system: the root directory stands in for it.)
 test_lib_cache_private() {
+	# chmod is the test: where the file system keeps no modes (Windows)
+	# there is nothing to test.
+	needs_file_modes
 	load_lib
 	mkdir -m 700 own
 	is sgf_private own
@@ -626,6 +656,7 @@ test_lib_cache_private() {
 # Entries older than SGF_CACHE_TTL are not given and are removed; so are
 # temporary files left behind. More than SGF_CACHE_MAX entries: all go.
 test_lib_cache_sweeps_old_and_surplus_entries() {
+	needs_cache
 	load_lib
 	local check=0123456789abcdef0123456789abcdef oid=0123456789012345678901234567890123456789 i n
 	mkdir -p common

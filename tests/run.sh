@@ -16,6 +16,10 @@
 # ║    SGF_KEEP=1           keep the temporary directory             ║
 # ║    SGF_NO_SKIP=1        a test that skips itself fails the run   ║
 # ║                         (CI: nothing may go untested unnoticed)  ║
+# ║    SGF_ALLOW_SKIP="test_a test_b"                                ║
+# ║                         except these: they may skip all the same ║
+# ║                         (CI: a feature the platform does not     ║
+# ║                         have, named one by one)                  ║
 # ║    SGF_HOOK_RUNNER=prek the hook framework for the pre-commit    ║
 # ║                         tests (default: pre-commit, then prek)   ║
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -47,13 +51,24 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 	root="$(CDPATH='' cd -- "${root}" && pwd -P)"
 	mkdir -p "${root}/home" "${root}/tmp" "${root}/keys" "${root}/work"
 
+	# Windows (Git Bash): what Windows needs to run a program and to find
+	# one on PATH (PATHEXT: git is git.exe there). They hold no setting of
+	# git, sops or anything else the tests look at.
+	windows_env=()
+	for var in SYSTEMROOT WINDIR PATHEXT COMSPEC; do
+		[[ -z "${!var:-}" ]] || windows_env+=("${var}=${!var}")
+	done
+
+	# The global git config is the .gitconfig of that HOME: git before
+	# 2.32 does not know GIT_CONFIG_GLOBAL and reads that file, the same
+	# one newer git reads through the variable.
 	exec env -i \
 		PATH="${PATH}" \
 		HOME="${root}/home" \
 		TMPDIR="${root}/tmp" \
 		LANG=C LC_ALL=C TERM=dumb \
 		GIT_CONFIG_NOSYSTEM=1 \
-		GIT_CONFIG_GLOBAL="${root}/gitconfig" \
+		GIT_CONFIG_GLOBAL="${root}/home/.gitconfig" \
 		GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat \
 		SOPS_AGE_KEY_FILE="${root}/keys/a.txt" \
 		AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
@@ -63,7 +78,9 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		SGF_TOOL_DIR="${tool_dir}" \
 		SGF_KEEP="${SGF_KEEP:-}" \
 		SGF_NO_SKIP="${SGF_NO_SKIP:-}" \
+		SGF_ALLOW_SKIP="${SGF_ALLOW_SKIP:-}" \
 		SGF_HOOK_RUNNER="${SGF_HOOK_RUNNER:-}" \
+		${windows_env[@]+"${windows_env[@]}"} \
 		bash "${HERE}/run.sh" "$@"
 fi
 
@@ -86,6 +103,15 @@ for file in "${HERE}"/test_*.sh; do
 	# shellcheck source=/dev/null
 	. "${file}"
 done
+
+# skip_allowed <test name> : true when that test may skip itself
+skip_allowed() {
+	[[ "${SGF_NO_SKIP:-}" != "1" ]] && return 0
+	case " ${SGF_ALLOW_SKIP//[[:space:]]/ } " in
+	*" $1 "*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
 
 filter="${1:-}"
 passed=0
@@ -116,13 +142,13 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
 	if [[ "${status}" -eq 0 ]]; then
 		passed=$((passed + 1))
 		echo "ok   - ${name}"
-	elif [[ "${status}" -eq 77 && "${SGF_NO_SKIP:-}" != "1" ]]; then
+	elif [[ "${status}" -eq 77 ]] && skip_allowed "${name}"; then
 		skipped=$((skipped + 1))
 		echo "skip - ${name} ($(tail -1 "${dir}.log"))"
 	elif [[ "${status}" -eq 77 ]]; then
 		failed=$((failed + 1))
 		failed_names="${failed_names} ${name}"
-		echo "FAIL - ${name} (it skipped itself, and SGF_NO_SKIP=1 makes that a failure: $(tail -1 "${dir}.log"))"
+		echo "FAIL - ${name} (it skipped itself, and SGF_NO_SKIP=1 makes that a failure unless SGF_ALLOW_SKIP names it: $(tail -1 "${dir}.log"))"
 	else
 		failed=$((failed + 1))
 		failed_names="${failed_names} ${name}"

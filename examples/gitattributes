@@ -1,13 +1,14 @@
 # Copy the relevant lines into your repo's .gitattributes.
-# filter=sops → transparent encrypt (git add) / decrypt (checkout)
-# diff=sops   → `git diff` / `git log -p` show decrypted content
-# merge=sops  → merges, rebases, cherry-picks and stash pops work on the
-#               decrypted content (merge-driver.sh). Without it, two
-#               branches that both changed a secret cannot be merged.
-# -text       → git converts no line endings. With core.autocrlf=true
-#               (common on Windows) it would put CRs into the ciphertext
-#               before the smudge filter sees it, and sops cannot read a
-#               dotenv document with them: the checkout would stop.
+# filter=sops: encrypts on git add and decrypts on checkout, with no
+#              extra step.
+# diff=sops:   `git diff` and `git log -p` show the decrypted content.
+# merge=sops:  merges, rebases, cherry-picks and stash pops work on the
+#              decrypted content (merge-driver.sh). Without it, two
+#              branches that both changed a secret cannot be merged.
+# -text:       git converts no line endings. With core.autocrlf=true
+#              (common on Windows) it would put CRs into the ciphertext
+#              before the smudge filter sees it, and sops cannot read a
+#              dotenv document with them: the checkout would stop.
 
 # Every dotenv file, whatever it is called: .env, .env.local,
 # .env.production, prod.env. A pattern without a slash matches at every

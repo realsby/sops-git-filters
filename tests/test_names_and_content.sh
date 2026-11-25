@@ -30,13 +30,24 @@ test_names_awkward_file_names_round_trip() {
 		'%f percent %s.txt'
 		'back\slash.txt'
 	)
-	local name i=0
+	# The names the file system takes (on Windows none with a colon, a
+	# backslash, * ? " | or a control character); the others are named
+	# in a skip at the end.
+	local name i=0 top='2:top.secret'
+	file_system_takes "${names[@]}" "${top}"
+	names=()
+	for name in "${TAKEN[@]}"; do
+		[[ "${name}" == "${top}" ]] || names+=("${name}")
+	done
+	case " ${REFUSED[*]-} " in
+	*" ${top} "*) top='top.secret' ;;
+	esac
 	for name in "${names[@]}"; do
 		i=$((i + 1))
 		printf 'SECRET-%s\n' "${i}" >"secrets/${name}"
 	done
-	printf 'SECRET-top\n' >'2:top.secret'
-	git add secrets './2:top.secret'
+	printf 'SECRET-top\n' >"${top}"
+	git add secrets "./${top}"
 	git commit -q -m "awkward names"
 
 	run "${TOOL}/encryption-guard.sh"
@@ -52,17 +63,17 @@ test_names_awkward_file_names_round_trip() {
 		if git cat-file blob "${id}" | grep -q 'SECRET-'; then
 			fail "plaintext in the blob of: ${record#*$'\t'}"
 		fi
-	done < <(git ls-files -s -z -- secrets './2:top.secret')
-	assert_eq "${count}" "16" "number of managed files"
+	done < <(git ls-files -s -z -- secrets "./${top}")
+	assert_eq "${count}" "$((${#names[@]} + 1))" "number of managed files"
 
 	# Round trip: move the working copies away, check them out again.
 	cp -R secrets ../expected-secrets
-	cp './2:top.secret' ../expected-top
+	cp "./${top}" ../expected-top
 	mv secrets ../moved-secrets
-	mv './2:top.secret' ../moved-top
+	mv "./${top}" ../moved-top
 	git checkout -- .
 	diff -r secrets ../expected-secrets
-	cmp './2:top.secret' ../expected-top
+	cmp "./${top}" ../expected-top
 	assert_eq "$(git status --porcelain)" "" "git status after checkout"
 	"${TOOL}/harden-permissions.sh" --quiet
 	cd ..
@@ -72,12 +83,13 @@ test_names_awkward_file_names_round_trip() {
 	run "${TOOL}/install.sh"
 	assert_eq "${RC}" "0" "install.sh exit status"
 	diff -r secrets ../expected-secrets
-	cmp './2:top.secret' ../expected-top
+	cmp "./${top}" ../expected-top
 	assert_eq "$(git status --porcelain)" "" "git status after install.sh"
 	cd ..
 
 	# No file name was ever run as a command.
 	assert_eq "$(find . -name 'PWNED*' | wc -l | tr -d ' ')" "0" "files created by injected commands"
+	skip_if_refused
 }
 
 test_content_json_round_trips_byte_for_byte() {

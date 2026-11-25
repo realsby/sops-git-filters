@@ -14,7 +14,7 @@ test_basics_json_add_encrypts_and_reuses_blob() {
 	assert_eq "$(plain_of_stored .env)" "$(cat .env)" "decrypted blob"
 	git commit -q -m "add .env"
 
-	# Same plaintext → the very same blob, so no false diff.
+	# The same plaintext gives the very same blob, so there is no false diff.
 	local id
 	id="$(blob_id .env)"
 	touch .env
@@ -128,4 +128,49 @@ test_basics_stash_holds_ciphertext_only() {
 	git stash pop -q
 	assert_eq "$(cat .env)" "TOKEN=SEKRIT-unstaged" "working copy after stash pop"
 	assert_eq "$(cat new.secret)" "TOKEN=SEKRIT-untracked" "untracked file after stash pop"
+}
+
+# sops is never given /dev/stdin as its file: on Windows sops is a
+# Windows program, and Git Bash hands it that path as C:\proc\self\fd\0,
+# which does not exist there. Every add and every checkout of a secret
+# failed. Without a file, sops reads stdin. A stand-in that refuses the
+# path, as the Windows sops does, runs where every script calls sops on
+# stdin: the clean filter (encrypt, decrypt the stored version, decrypt
+# a SOPS document in the working tree), the smudge filter, preflight.sh
+# and the decryption pass of install.sh.
+test_basics_sops_is_never_given_dev_stdin() {
+	stub "${PWD}/bin" sops <<'STUB'
+for arg in "$@"; do
+	if [[ "${arg}" == /dev/stdin ]]; then
+		echo "stand-in sops: refused /dev/stdin, as sops on Windows cannot open it" >&2
+		exit 1
+	fi
+done
+exec "${REAL}" "$@"
+STUB
+	export PATH="${PWD}/bin:${PATH}"
+
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	printf 'A=2\n' >.env
+	git add .env
+	assert_eq "$(plain_of_stored .env)" "A=2" "the stored version after an edit"
+	printf 'A=3\n' | sops encrypt --input-type binary --output-type json --filename-override .env >../doc.json
+	cp ../doc.json .env
+	git add .env
+	assert_eq "$(plain_of_stored .env)" "A=3" "the stored version after a SOPS document was added"
+	git commit -q -m "change .env"
+	rm .env
+	git checkout -- .env
+	assert_eq "$(cat .env)" "A=3" "the working copy after a checkout"
+	run "${TOOL}/preflight.sh"
+	assert_eq "${RC}" "0" "preflight.sh exit status"
+	cd ..
+
+	fresh_clone origin clone
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(cat .env)" "A=3" "the working copy that install.sh decrypted"
 }

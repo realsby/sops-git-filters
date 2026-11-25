@@ -4,15 +4,36 @@ Every release is a tag. The same notes are on the [releases page](https://github
 
 ## Unreleased
 
+### Security
+
+- **Windows: the guard did not read the global and system attributes files**, because git prints their paths as `C:/...` and the guard took them for relative paths. A macro there that turns `filter` off (`[attr]binary -filter`) let a plaintext secret through. Such a path now counts as absolute, as does a path on a network share (`\\server\share\...`).
+
 ### Performance
 
-- **The clean filter remembers its answer for 10 minutes** ([#21](https://github.com/realsby/sops-git-filters/issues/21)). Git runs it each time it looks at a secret with uncommitted changes, and each run decrypted the stored version and encrypted the edit: two requests to a key service, and a new ciphertext every time. Now the first look after an edit costs that; later `git status`, `git diff --stat`, `git add` and `git commit -a` call `sops` no more, and `git diff` once (for the text it shows). They all see the same ciphertext for the same edit. On disk, in `.git/sops-git-filters/cache/`: HMACs under a random key of the repository, and object ids, never plaintext. `SOPS_FILTER_CACHE=0` turns it off. README: "What the clean filter remembers".
+- **The clean filter remembers its answer for 10 minutes** ([#21](https://github.com/realsby/sops-git-filters/issues/21)). Git runs it each time it looks at a secret with uncommitted changes, and each run decrypted the stored version and encrypted the edit: two requests to a key service, and a new ciphertext every time. Now the first look after an edit costs that; later `git status`, `git diff --stat`, `git add` and `git commit -a` do not call `sops` at all, and `git diff` calls it once (for the text it shows). They all see the same ciphertext for the same edit. On disk, in `.git/sops-git-filters/cache/`: HMACs under a random key of the repository, and object ids, never plaintext. `SOPS_FILTER_CACHE=0` turns it off. README: "What the clean filter remembers".
 - **`rekey.sh` lists the SOPS-managed files with one git call**, as the guard does, instead of a bash loop over every tracked file: 0.4 seconds instead of 19 with 60,000 tracked files. When git cannot list the index or answers out of order, it now stages nothing.
 
 ### Behaviour changes
 
 - **A comparison that worked is not repeated for 10 minutes.** Keys that become unavailable in that time (an expired session) are noticed at the first run after it, or at once with `SOPS_FILTER_CACHE=0`. A file you can encrypt but not decrypt still fails at its next check, as before.
 - **`git status` and `git diff` write the ciphertext they get into the object store**, as `git add` would, so that the next command can reuse it. `git gc` removes those that nothing refers to.
+
+### Fixed
+
+- **Windows (Git Bash): every `git add` and checkout of a secret failed.** The scripts gave `sops` the file `/dev/stdin`, which Git Bash hands to a Windows program as `C:\proc\self\fd\0`, a path that does not exist. `sops` now reads stdin itself.
+- **Windows: a machine-wide `core.hooksPath` (`~/.githooks`) was taken for a directory inside the repository**, because git prints it as `C:/...` too: `install.sh` wrote the permission hooks there, where git never runs them, instead of leaving the shared directory alone.
+- **Windows: `install.sh` stopped (exit status 128) at a secret whose path holds a character such as `` ` ``.** Git Bash hands git such an absolute path unconverted, and git cannot open it. It now names the file from the top of the working tree.
+- **`harden-permissions.sh` no longer says "set to 600" where the file system keeps no Unix modes** (Windows); it says that it changed nothing.
+- **busybox awk up to 1.30:** the clean filter failed when the keys of a secret changed ("Call to undefined function").
+
+### Documentation
+
+- The merge driver needs git 2.34 (`git stash pop`: 2.37): older git aborts a merge that the driver resolved. The permission hook runs after `git cherry-pick` and `git revert` from git 2.25 on.
+- Windows: what NTFS and Git Bash do not have (file modes, symbolic links), a hook script for the guard in place of the symlink, and `path_regex` rules: `sops` matches them against the path with backslashes there, so write `[/\\]` for the separator.
+
+### CI
+
+- Three more jobs, not required checks: the tests on Windows (Git Bash), in Alpine Linux (busybox awk) and with git 2.18.
 
 ## v3.1.0 — 2026-11-25
 

@@ -3,6 +3,7 @@
 # shellcheck disable=SC2154  # OUT/RC/TOOL/AGE_* come from tests/lib.sh
 
 test_perms_install_and_checkout_leave_0600() {
+	needs_file_modes
 	new_repo origin
 	printf 'A=1\n' >.env
 	git add .env
@@ -14,17 +15,18 @@ test_perms_install_and_checkout_leave_0600() {
 
 	fresh_clone origin clone
 	"${TOOL}/install.sh"
-	assert_eq "$(mode_of .env)" "600" "mode after install.sh"
+	assert_mode .env "600" "mode after install.sh"
 
 	# A checkout rewrites the file with the umask; the hook tightens it again.
 	git checkout -q older
 	assert_eq "$(cat .env)" "A=1" "working copy on the other branch"
-	assert_eq "$(mode_of .env)" "600" "mode after git checkout"
+	assert_mode .env "600" "mode after git checkout"
 }
 
 # A secret tracked as 100755 keeps its execute bit, or git would show it
 # as modified for ever.
 test_perms_executable_secret_keeps_its_execute_bit() {
+	needs_file_modes
 	new_repo origin
 	printf '#!/bin/sh\necho v1\n' >run.secret
 	chmod 755 run.secret
@@ -38,20 +40,20 @@ test_perms_executable_secret_keeps_its_execute_bit() {
 
 	fresh_clone origin clone
 	"${TOOL}/install.sh"
-	assert_eq "$(mode_of run.secret)" "700" "mode after install.sh"
+	assert_mode run.secret "700" "mode after install.sh"
 	assert_eq "$(git status --porcelain)" "" "git status after install.sh"
 
 	git checkout -q older
-	assert_eq "$(mode_of run.secret)" "700" "mode after git checkout"
+	assert_mode run.secret "700" "mode after git checkout"
 	assert_eq "$(git status --porcelain)" "" "git status after git checkout"
 
 	printf 'SOPS_FILE_MODE=640\n' >.sops-filter.conf
 	"${TOOL}/harden-permissions.sh"
-	assert_eq "$(mode_of run.secret)" "740" "mode with SOPS_FILE_MODE=640"
+	assert_mode run.secret "740" "mode with SOPS_FILE_MODE=640"
 
 	printf 'SOPS_FILE_MODE=0640\n' >.sops-filter.conf
 	"${TOOL}/harden-permissions.sh"
-	assert_eq "$(mode_of run.secret)" "740" "mode with SOPS_FILE_MODE=0640"
+	assert_mode run.secret "740" "mode with SOPS_FILE_MODE=0640"
 	assert_eq "$(git status --porcelain -- run.secret)" "" "git status with SOPS_FILE_MODE=0640"
 
 	# A zero owner digit must not be dropped: 060 becomes 160, not 070.
@@ -67,6 +69,7 @@ test_perms_executable_secret_keeps_its_execute_bit() {
 }
 
 test_perms_file_mode_comes_from_the_conf() {
+	needs_file_modes
 	new_repo repo
 	printf 'A=1\n' >.env
 	git add .env
@@ -74,7 +77,7 @@ test_perms_file_mode_comes_from_the_conf() {
 
 	printf 'SOPS_FILE_MODE=640\n' >.sops-filter.conf
 	"${TOOL}/harden-permissions.sh"
-	assert_eq "$(mode_of .env)" "640" "mode with SOPS_FILE_MODE=640"
+	assert_mode .env "640" "mode with SOPS_FILE_MODE=640"
 
 	printf 'SOPS_FILE_MODE=rw-r-----\n' >.sops-filter.conf
 	run "${TOOL}/harden-permissions.sh"
@@ -86,7 +89,7 @@ test_perms_file_mode_comes_from_the_conf() {
 		chmod 644 .env
 		run "${TOOL}/harden-permissions.sh"
 		assert_ne "${RC}" "0" "SOPS_FILE_MODE=${m} is refused"
-		assert_eq "$(mode_of .env)" "600" "mode after SOPS_FILE_MODE=${m} is refused"
+		assert_mode .env "600" "mode after SOPS_FILE_MODE=${m} is refused"
 	done
 	for m in 600 0600 640; do
 		printf 'SOPS_FILE_MODE=%s\n' "${m}" >.sops-filter.conf
@@ -98,6 +101,7 @@ test_perms_file_mode_comes_from_the_conf() {
 # The hooks ignore the script's exit status, so a refused SOPS_FILE_MODE
 # must still leave the secret at 0600 after a checkout, not at the umask.
 test_perms_refused_mode_still_hardens_through_the_hook() {
+	needs_file_modes
 	new_repo origin
 	printf 'A=1\n' >.env
 	git add .env
@@ -116,7 +120,7 @@ test_perms_refused_mode_still_hardens_through_the_hook() {
 	assert_eq "${RC}" "0" "git checkout exit status"
 	assert_eq "$(cat .env)" "A=1" "working copy on the other branch"
 	assert_contains "${OUT}" "invalid SOPS_FILE_MODE '2600'" "the hook reports the refused mode"
-	assert_eq "$(mode_of .env)" "600" "mode after git checkout with a refused mode"
+	assert_mode .env "600" "mode after git checkout with a refused mode"
 }
 
 # The hooks run after every checkout, merge, rebase and commit. Their
@@ -132,7 +136,7 @@ test_perms_hook_is_fast_with_many_tracked_files() {
 
 	timed "${TOOL}/harden-permissions.sh"
 	assert_eq "${RC}" "0" "harden-permissions.sh exit status"
-	assert_eq "$(mode_of .env)" "600" "mode of the secret"
+	assert_mode .env "600" "mode of the secret"
 	faster_than "${SECS}" 1 || fail "harden-permissions.sh took ${SECS} s for 100,000 tracked files"
 }
 
@@ -140,6 +144,7 @@ test_perms_hook_is_fast_with_many_tracked_files() {
 # a file without the attribute are left alone, an executable keeps its
 # execute bit.
 test_perms_awkward_names_symlinks_and_executables() {
+	needs_file_modes
 	new_repo repo
 	local names=(
 		'with space.secret'
@@ -176,16 +181,18 @@ test_perms_awkward_names_symlinks_and_executables() {
 	assert_eq "${RC}" "0" "harden-permissions.sh exit status"
 	assert_contains "${OUT}" "Permissions: $((${#names[@]} + 1)) SOPS-managed file(s) set to 600." "message"
 	for name in "${names[@]}"; do
-		assert_eq "$(mode_of "./${name}")" "600" "mode of [${name}]"
+		assert_mode "./${name}" "600" "mode of [${name}]"
 	done
-	assert_eq "$(mode_of run.secret)" "700" "mode of the executable secret"
-	assert_eq "$(mode_of other.txt)" "644" "mode of a file without the attribute"
+	assert_mode run.secret "700" "mode of the executable secret"
+	assert_mode other.txt "644" "mode of a file without the attribute"
 	assert_eq "$(git status --porcelain)" "" "git status"
 }
 
 # A pathspec setting the caller exported (GIT_LITERAL_PATHSPECS=1 also
 # comes from `git --literal-pathspecs`) must not hide the secrets.
 test_perms_hook_ignores_pathspec_settings_of_the_caller() {
+	needs_file_modes
+	needs_file_name ':(literal)b.secret'
 	new_repo repo
 	printf 'A=1\n' >.env
 	printf 'B=1\n' >':(literal)b.secret'
@@ -197,13 +204,13 @@ test_perms_hook_ignores_pathspec_settings_of_the_caller() {
 		# shellcheck disable=SC2086  # one or two settings
 		run env ${setting} "${TOOL}/harden-permissions.sh"
 		assert_eq "${RC}" "0" "harden-permissions.sh exit status with ${setting}"
-		assert_eq "$(mode_of .env)" "600" "mode of .env with ${setting}"
+		assert_mode .env "600" "mode of .env with ${setting}"
 		assert_eq "$(mode_of ':(literal)b.secret')" "600" "mode of :(literal)b.secret with ${setting}"
 	done
 }
 
 test_install_keeps_hooks_it_did_not_write() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	write_sops_yaml
@@ -222,7 +229,7 @@ test_install_keeps_hooks_it_did_not_write() {
 }
 
 test_install_can_skip_the_hooks() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	write_sops_yaml
@@ -255,11 +262,11 @@ test_layout_git_run_from_a_subdirectory_or_elsewhere() {
 # started from inside it.
 test_layout_install_from_a_submodule_configures_the_superproject() {
 	local base="${PWD}"
-	git init -q toolrepo
+	git_init toolrepo
 	cp "${SGF_TOOL_DIR}"/*.sh toolrepo/
 	(cd toolrepo && git add -A && git commit -q -m "tool")
 
-	git init -q super
+	git_init super
 	cd super || exit 1
 	git -c protocol.file.allow=always submodule add -q "${base}/toolrepo" utilities/sops-git-filters
 	write_sops_yaml
@@ -278,7 +285,7 @@ test_layout_install_from_a_submodule_configures_the_superproject() {
 }
 
 test_layout_install_refuses_its_own_checkout() {
-	git init -q tool
+	git_init tool
 	cp "${SGF_TOOL_DIR}"/*.sh tool/
 	cd tool || exit 1
 	git add -A
@@ -294,10 +301,10 @@ test_layout_linked_worktree() {
 	git add .env
 	git commit -q -m "add .env"
 
-	git worktree add -q ../linked -b side
+	git worktree add ../linked -b side >/dev/null
 	cd ../linked || exit 1
 	assert_eq "$(cat .env)" "A=1" "working copy in the linked worktree"
-	assert_eq "$(mode_of .env)" "600" "mode in the linked worktree"
+	assert_mode .env "600" "mode in the linked worktree"
 	printf 'A=2\n' >.env
 	git add .env
 	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "blob staged in the linked worktree"
@@ -305,6 +312,7 @@ test_layout_linked_worktree() {
 }
 
 test_layout_sparse_checkout() {
+	git_at_least 2.26 || skip "git $(git --version | awk '{print $3}') has no git sparse-checkout add (2.26)"
 	new_repo origin
 	mkdir app conf
 	echo code >app/main.txt
@@ -350,22 +358,25 @@ odd_round_trip() {
 	git checkout -q main
 	printf 'A=ours\nB=2\nC=3\n' >.env
 	git commit -q -am "ours: A"
-	run git merge --no-edit theirs
-	assert_eq "${RC}" "0" "git merge exit status"
-	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
-	assert_eq "$(plain_of_stored .env)" $'A=ours\nB=2\nC=theirs' "merged blob"
 
 	umask 022
 	git checkout -q theirs
 	assert_eq "$(cat .env)" $'A=1\nB=2\nC=theirs' "working copy on the other branch"
-	assert_eq "$(mode_of .env)" "600" "mode after git checkout (the hook ran)"
+	assert_mode .env "600" "mode after git checkout (the hook ran)"
+	git checkout -q main
+	assert_eq "$(find "${base}" -name 'PWNED*')" "" "files created by the directory name"
 
+	merge_driver_needs_ort
+	run git merge --no-edit theirs
+	assert_eq "${RC}" "0" "git merge exit status"
+	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
+	assert_eq "$(plain_of_stored .env)" $'A=ours\nB=2\nC=theirs' "merged blob"
 	assert_eq "$(find "${base}" -name 'PWNED*')" "" "files created by the directory name"
 }
 
 # odd_repo : a repository with merge=sops on .env, no tool yet; cd into it
 odd_repo() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	# shellcheck disable=SC2119  # no extra recipients here
 	write_sops_yaml
@@ -464,10 +475,11 @@ test_layout_non_ascii_tool_path_outside_the_repo() {
 # inside it: its path is recorded relative to the repository, not as an
 # absolute one.
 test_layout_install_through_a_symlinked_path() {
+	needs_symlinks
 	mkdir real
 	ln -s real link
 	cd real || exit 1
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	# shellcheck disable=SC2119  # no extra recipients here
@@ -490,9 +502,10 @@ test_layout_install_through_a_symlinked_path() {
 }
 
 test_layout_install_refuses_its_own_checkout_through_a_symlink() {
+	needs_symlinks
 	mkdir real
 	ln -s real link
-	git init -q real/tool
+	git_init real/tool
 	cp "${SGF_TOOL_DIR}"/*.sh real/tool/
 	(cd real/tool && git add -A && git commit -q -m "tool")
 
@@ -501,4 +514,27 @@ test_layout_install_refuses_its_own_checkout_through_a_symlink() {
 	assert_eq "${RC}" "1" "install.sh exit status"
 	assert_contains "${OUT}" "inside the sops-git-filters checkout itself" "install.sh message"
 	assert_eq "$(git config --local --get filter.sops.clean || true)" "" "the tool's checkout is not configured"
+}
+
+# A file system that keeps no Unix modes (NTFS through Git Bash on
+# Windows): chmod succeeds and changes nothing. The message must not say
+# the files were set to 600. A chmod that does nothing stands in for it.
+test_perms_says_when_the_file_system_keeps_no_modes() {
+	umask 022
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	chmod 644 .env
+	stub "${PWD}/../bin" chmod <<'STUB'
+exit 0
+STUB
+	run env PATH="${PWD}/../bin:${PATH}" "${TOOL}/harden-permissions.sh"
+	assert_eq "${RC}" "0" "harden-permissions.sh exit status"
+	assert_contains "${OUT}" "this file system keeps no Unix file modes" "message"
+	assert_not_contains "${OUT}" "set to 600" "message"
+
+	needs_file_modes
+	run "${TOOL}/harden-permissions.sh"
+	assert_contains "${OUT}" "Permissions: 1 SOPS-managed file(s) set to 600." "message with a chmod that works"
 }

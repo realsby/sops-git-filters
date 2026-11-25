@@ -28,7 +28,7 @@ MINI
 	assert_eq "${RC}" "2" "runner exit status when SGF_TOOL_DIR does not exist"
 }
 
-# A filter that matches nothing ran nothing. That is not a pass.
+# A filter that matches nothing ran nothing, which must not count as a pass.
 test_runner_fails_when_no_test_is_selected() {
 	mini_runner mini <<'MINI'
 test_mini_passes() { :; }
@@ -55,4 +55,23 @@ MINI
 	assert_ne "${RC}" "0" "runner exit status with SGF_NO_SKIP=1"
 	assert_contains "${OUT}" "FAIL - test_mini_skips" "runner output"
 	assert_contains "${OUT}" "0 passed, 1 failed" "runner summary"
+}
+
+# A platform without a feature (a git older than the feature, file modes
+# on Windows) may skip the tests of that feature, named one by one. Any
+# other test that skips itself still fails the run.
+test_runner_lets_the_named_tests_skip() {
+	mini_runner mini <<'MINI'
+test_mini_skips() { skip "nothing to test with"; }
+test_mini_skips_too() { skip "nothing to test with either"; }
+MINI
+	run env SGF_TEST_INNER=0 SGF_NO_SKIP=1 SGF_ALLOW_SKIP=test_mini_skips bash mini/tests/run.sh
+	assert_ne "${RC}" "0" "runner exit status when one of two skips is allowed"
+	assert_contains "${OUT}" "skip - test_mini_skips (nothing to test with)" "runner output"
+	assert_contains "${OUT}" "FAIL - test_mini_skips_too" "runner output"
+	assert_contains "${OUT}" "0 passed, 1 failed, 1 skipped" "runner summary"
+
+	run env SGF_TEST_INNER=0 SGF_NO_SKIP=1 SGF_ALLOW_SKIP=$'test_mini_skips_too\n test_mini_skips' bash mini/tests/run.sh
+	assert_eq "${RC}" "0" "runner exit status when both skips are allowed"
+	assert_contains "${OUT}" "0 passed, 0 failed, 2 skipped" "runner summary"
 }

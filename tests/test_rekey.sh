@@ -3,7 +3,7 @@
 # shellcheck disable=SC2154  # OUT/RC/TOOL/AGE_* come from tests/lib.sh
 
 decrypt_as_b() { # stdin: a json-format blob; decrypt with key B only
-	SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary /dev/stdin
+	SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary
 }
 
 test_rekey_adds_a_recipient() {
@@ -86,9 +86,10 @@ test_rekey_follows_path_rules() {
 	git add team/shared.secret private.secret
 	git commit -q -m "two secrets, key A only"
 
+	# [/\\], not /: on Windows sops matches the path with backslashes.
 	cat >.sops.yaml <<YAML
 creation_rules:
-  - path_regex: ^team/
+  - path_regex: ^team[/\\\\]
     key_groups:
       - age:
           - ${AGE_PUB_A}
@@ -127,7 +128,7 @@ test_rekey_dry_run_and_path_limit() {
 }
 
 test_rekey_reports_a_plaintext_blob() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	printf 'P=legacy\n' >.env
 	git add .env
@@ -242,7 +243,7 @@ test_rekey_reads_the_attributes_of_the_index() {
 # only, written to the object store; prints its object id
 sops_blob_for_a() {
 	printf '%s\n' "$1" |
-		sops encrypt --age "${AGE_PUB_A}" --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		sops encrypt --age "${AGE_PUB_A}" --input-type binary --output-type json --filename-override any.secret |
 		git hash-object -w --stdin
 }
 
@@ -269,6 +270,11 @@ test_rekey_handles_awkward_names() {
 		'"starts with a quote.secret'
 		'sub dir/"quoted" dir/x.secret'
 	)
+	# rekey.sh writes a copy of each file: the names the file system and
+	# git take here (not on Windows: : \ * ? " and control characters);
+	# the others are named in a skip at the end.
+	names_taken "${names[@]}"
+	names=("${TAKEN[@]}")
 	local name i=0
 	for name in "${names[@]}"; do
 		i=$((i + 1))
@@ -286,6 +292,7 @@ test_rekey_handles_awkward_names() {
 		assert_contains "${OUT}" "re-keyed  ${name}"$'\n' "rekey.sh names [${name}]"
 		assert_eq "$(git cat-file blob ":0:${name}" | decrypt_as_b)" "PW=${i}" "key B decrypts the staged blob of [${name}]"
 	done
+	skip_if_refused
 }
 
 # A path in a conflict is not re-keyed: each of its stages is reported,

@@ -5,7 +5,7 @@
 # A repository where install.sh never ran: no filter, the guard is the
 # only control. Leaves the caller inside it.
 unfiltered_repo() { # [json|dotenv]
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	write_sops_yaml
@@ -45,7 +45,7 @@ test_guard_blocks_plaintext_that_mentions_the_marker() {
 test_guard_blocks_partly_encrypted_dotenv() {
 	unfiltered_repo dotenv
 	{
-		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env
 		printf 'API_TOKEN=this-value-is-not-encrypted\n'
 	} >.env
 	git add .env
@@ -56,7 +56,7 @@ test_guard_blocks_partly_encrypted_dotenv() {
 # A SOPS envelope whose content is in clear. Its MAC is ENC[...] all the same.
 test_guard_blocks_envelope_with_plaintext_data() {
 	unfiltered_repo
-	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret |
 		sed 's/"data": "ENC[^"]*"/"data": "key material in clear"/' >key.secret
 	assert_contains "$(cat key.secret)" '"data": "key material in clear"' "test fixture"
 	assert_contains "$(cat key.secret)" 'ENC[AES256_GCM' "test fixture keeps an encrypted MAC"
@@ -74,7 +74,7 @@ test_guard_blocks_hand_made_encrypted_values() {
 	local doc token name
 
 	unfiltered_repo
-	doc="$(printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin)"
+	doc="$(printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret)"
 	printf '%s\n' "${doc}" >real.secret
 	for name in data mac; do
 		token="$(printf '%s\n' "${doc}" | sed -n 's/^[[:space:]]*"'"${name}"'": "\(ENC\[[^"]*\]\)".*/\1/p')"
@@ -95,7 +95,7 @@ test_guard_blocks_hand_made_encrypted_values() {
 
 	mkdir dotenv && cd dotenv || exit 1
 	unfiltered_repo dotenv
-	doc="$(printf '# note\nA=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin)"
+	doc="$(printf '# note\nA=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env)"
 	printf '%s\n' "${doc}" >real.secret
 	for name in comment value sops_mac; do
 		case "${name}" in
@@ -145,7 +145,7 @@ test_guard_passes_what_sops_writes_for_empty_content() {
 test_guard_blocks_plaintext_next_to_the_envelope() {
 	unfiltered_repo
 	printf '{"data":"","sops":{},"credentials":{"password":"hunter2"}}\n' >one.secret
-	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret |
 		sed '$d' >two.secret
 	printf ',\n\t"credentials": {"password": "hunter2"}\n}\n' >>two.secret
 	assert_contains "$(cat two.secret)" '"data": "ENC[AES256_GCM' "test fixture: a real envelope"
@@ -160,7 +160,7 @@ test_guard_blocks_plaintext_next_to_the_envelope() {
 test_guard_blocks_plaintext_in_a_sops_prefixed_line() {
 	unfiltered_repo dotenv
 	{
-		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env
 		printf 'sops_API_TOKEN=hunter2\n'
 	} >.env
 	git add .env
@@ -189,6 +189,7 @@ test_guard_checks_the_whole_repository_from_a_subdirectory() {
 
 # ":2:prod.secret" is git syntax for "index stage 2 of prod.secret".
 test_guard_checks_files_named_like_an_index_stage() {
+	needs_file_name '2:prod.secret'
 	unfiltered_repo
 	printf 'TOKEN=plaintext\n' >'2:prod.secret'
 	git add './2:prod.secret'
@@ -212,7 +213,7 @@ stage_raw() {
 test_guard_blocks_plaintext_after_a_nul_byte() {
 	unfiltered_repo dotenv
 	{
-		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env
 		printf '\000DB_PASSWORD=hunter2\n'
 	} >../dotenv.blob
 	stage_raw .env ../dotenv.blob
@@ -224,14 +225,14 @@ test_guard_blocks_plaintext_after_a_nul_byte() {
 	cd ..
 
 	# json: the NUL byte follows a valid line of the document.
-	git init -q repo2
+	git_init repo2
 	cd repo2 || exit 1
 	vendor_tool
 	write_sops_yaml
 	printf '*.secret filter=sops diff=sops\n' >.gitattributes
 	git add -A
 	git commit -q -m scaffold
-	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin >../doc.json
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret >../doc.json
 	assert_contains "$(sed -n 2p ../doc.json)" '"data": "ENC[AES256_GCM' "test fixture: line 2 holds the data"
 	{
 		sed -n 1p ../doc.json
@@ -253,6 +254,7 @@ test_guard_blocks_plaintext_after_a_nul_byte() {
 
 # Git never filters a symlink, so there is nothing to encrypt.
 test_guard_ignores_symlinks() {
+	needs_symlinks
 	unfiltered_repo
 	ln -s ../shared/.env .env
 	git add .env
@@ -300,8 +302,7 @@ test_guard_blocks_a_filter_line_in_info_attributes() {
 	printf 'API_KEY=old\n' >.env
 	git add .env
 	git commit -q -m "encrypted .env"
-	mkdir -p .git/hooks
-	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	guard_hook
 
 	local info
 	info="$(git rev-parse --git-path info/attributes)"
@@ -367,6 +368,34 @@ test_guard_blocks_a_filter_macro_in_core_attributesfile() {
 	run "${TOOL}/encryption-guard.sh"
 	assert_eq "${RC}" "1" "guard exit status with a macro that unsets filter"
 	assert_contains "${OUT}" "global-attributes:2: [attr]binary -diff -merge -text -filter" "guard names the file and the line"
+}
+
+# On Windows git gives the guard a network path as it was configured,
+# "\\server\share\...". The machine's own disk, through its
+# administrative share, stands in for a server. Reading that share takes
+# an administrator, and a machine may turn it off: without it the test
+# skips, which the Windows CI job does not allow. Elsewhere the same file
+# is named with two leading slashes, which must count as absolute too.
+test_guard_blocks_a_filter_macro_in_core_attributesfile_on_a_network_path() {
+	new_repo repo
+	printf '.env filter=sops diff=sops binary\n' >.gitattributes
+	git add .gitattributes
+	printf 'A=1\n' >.env
+	git add .env
+	printf '[attr]binary -diff -merge -text -filter\n' >../global-attributes
+	local path
+	case "${OSTYPE:-}" in
+	msys* | cygwin*)
+		path="$(cygpath -w "${PWD}/../global-attributes")"
+		path="\\\\localhost\\${path:0:1}\$${path:2}"
+		[[ -r "${path}" ]] || skip "cannot read ${path}: the administrative share needs an administrator"
+		;;
+	*) path="/${PWD}/../global-attributes" ;;
+	esac
+	git config core.attributesFile "${path}"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "1" "guard exit status with the macro in ${path}"
+	assert_contains "${OUT}" "global-attributes:1: [attr]binary -diff -merge -text -filter" "guard names the file and the line"
 }
 
 # Lines that cannot change the filter attribute of a path do not block,
@@ -487,7 +516,13 @@ test_guard_names_plaintext_files_with_awkward_names() {
 		'"starts with a quote.secret'
 		'sub dir/"quoted" dir/x.secret'
 	)
-	local name oid i=0
+	# The names git takes into the index here (git for Windows refuses
+	# those NTFS cannot hold); the others are named in a skip at the end.
+	local name oid i=0 tab_plain=$'tab\tplain.txt'
+	index_takes "${tab_plain}"
+	[[ ${#REFUSED[@]} -eq 0 ]] || tab_plain=""
+	index_takes "${names[@]}"
+	names=("${TAKEN[@]}")
 	for name in "${names[@]}"; do
 		i=$((i + 1))
 		oid="$(printf 'PW=hunter%s\n' "${i}" | git hash-object -w --stdin)"
@@ -495,7 +530,7 @@ test_guard_names_plaintext_files_with_awkward_names() {
 	done
 	oid="$(printf 'not a secret\n' | git hash-object -w --stdin)"
 	git update-index --add --cacheinfo "100644,${oid},plain.txt"
-	git update-index --add --cacheinfo "100644,${oid},"$'tab\tplain.txt'
+	[[ -z "${tab_plain}" ]] || git update-index --add --cacheinfo "100644,${oid},${tab_plain}"
 	git update-index --add --cacheinfo "100644,${oid},"$'caf\303\251.txt'
 
 	run "${TOOL}/encryption-guard.sh"
@@ -507,13 +542,14 @@ test_guard_names_plaintext_files_with_awkward_names() {
 	assert_not_contains "${OUT}" $'caf\303\251.txt' "guard output"
 	assert_not_contains "${OUT}" "hunter" "guard output"
 	assert_eq "$(printf '%s\n' "${OUT}" | grep -c '^   - ')" "${#names[@]}" "lines that name a file"
+	skip_if_refused
 }
 
 # sops_blob <text> : write an encrypted SOPS document (json) of <text>
 # to the object store and print its object id
 sops_blob() {
 	printf '%s\n' "$1" |
-		sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		sops encrypt --input-type binary --output-type json --filename-override any.secret |
 		git hash-object -w --stdin
 }
 
@@ -527,27 +563,31 @@ set_stage() {
 # git quotes.
 test_guard_checks_every_stage_of_an_unmerged_path() {
 	unfiltered_repo
-	local name stage plain
-	for name in c.secret $'tab\t"q".secret'; do
+	local name stage plain entries
+	# The names git takes into the index here (see test_guard_names_...).
+	index_takes c.secret $'tab\t"q".secret'
+	entries="$((3 * ${#TAKEN[@]}))"
+	for name in "${TAKEN[@]}"; do
 		for stage in 1 2 3; do
 			set_stage "${name}" "${stage}" "$(sops_blob "stage ${stage}")"
 		done
 	done
-	assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "6" "test fixture: unmerged entries"
+	assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "${entries}" "test fixture: unmerged entries"
 	run "${TOOL}/encryption-guard.sh"
 	assert_eq "${RC}" "0" "guard exit status when every stage is encrypted"
 
 	plain="$(printf 'PW=hunter2\n' | git hash-object -w --stdin)"
-	for name in c.secret $'tab\t"q".secret'; do
+	for name in "${TAKEN[@]}"; do
 		for stage in 1 2 3; do
 			set_stage "${name}" "${stage}" "${plain}"
-			assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "6" "test fixture: unmerged entries"
+			assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "${entries}" "test fixture: unmerged entries"
 			run "${TOOL}/encryption-guard.sh"
 			assert_ne "${RC}" "0" "guard exit status with plaintext in stage ${stage} of [${name}]"
 			assert_contains "${OUT}" $'\n'"   - ${name}  (" "guard names [${name}] (stage ${stage})"
 			set_stage "${name}" "${stage}" "$(sops_blob "stage ${stage}")"
 		done
 	done
+	skip_if_refused
 }
 
 # Intent to add is told from a staged empty file under names git quotes:
@@ -557,6 +597,7 @@ test_guard_tells_intent_to_add_from_staged_under_awkward_names() {
 	unfiltered_repo
 	local ita=$'ita\t"q" back\\slash \303\251.secret'
 	local staged=$'staged\t"q" back\\slash \303\251.secret'
+	needs_file_name "${ita}"
 	printf 'PW=hunter2\n' >"${ita}"
 	git add -N -- "${ita}"
 	run "${TOOL}/encryption-guard.sh"
@@ -590,7 +631,7 @@ STUB
 }
 
 # An answer of git check-attr that does not fit the listing (cut short,
-# or in another order) is not an answer: the commit is blocked.
+# or in another order) blocks the commit.
 test_guard_fails_closed_when_check_attr_answers_wrong() {
 	unfiltered_repo
 	printf 'PW=hunter2\n' >.env
@@ -655,6 +696,7 @@ test_guard_blocks_when_sops_yaml_is_missing() {
 
 # README: ln -s ../../utilities/sops-git-filters/encryption-guard.sh .git/hooks/pre-commit
 test_guard_works_as_a_symlinked_hook() {
+	needs_symlinks
 	unfiltered_repo
 	mkdir -p .git/hooks
 	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
@@ -697,8 +739,7 @@ test_guard_names_an_unfinished_format_change() {
 # the hook runs. So it must not block a commit (audit A-05).
 test_guard_passes_while_a_secret_is_intent_to_add() {
 	new_repo repo
-	mkdir -p .git/hooks
-	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	guard_hook
 	printf 'PW=hunter2\n' >a.secret
 	printf 'TOKEN=abc\n' >b.secret
 	git add -N a.secret b.secret
@@ -719,7 +760,7 @@ test_guard_passes_while_a_secret_is_intent_to_add() {
 	run git commit -q -a -m "everything"
 	assert_eq "${RC}" "0" "git commit -a"
 	assert_contains "$(git show HEAD:b.secret)" '"data": "ENC[AES256_GCM' "b.secret in the commit"
-	assert_not_contains "$(git show HEAD:b.secret)" "abc" "b.secret in the commit"
+	assert_not_contains "$(git show HEAD:b.secret)" "TOKEN=abc" "b.secret in the commit"
 }
 
 # Only an intent-to-add entry is let through. An empty blob that is

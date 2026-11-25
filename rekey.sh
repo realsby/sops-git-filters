@@ -181,10 +181,11 @@ rekey_entry() {
 # list the index or answers out of order, nothing is staged.
 SPEC=()
 for item in ${LIMIT[@]+"${LIMIT[@]}"}; do
-	case "${item}" in
-	/*) SPEC[${#SPEC[@]}]="${item}" ;;
-	*) SPEC[${#SPEC[@]}]="${CALLER_PREFIX}${item}" ;;
-	esac
+	if sgf_is_absolute "${item}"; then
+		SPEC[${#SPEC[@]}]="${item}"
+	else
+		SPEC[${#SPEC[@]}]="${CALLER_PREFIX}${item}"
+	fi
 done
 if ! LISTING="$(sgf_managed_entries "${PROJECT_ROOT}" rekey.sh "nothing was re-keyed" ${SPEC[@]+"${SPEC[@]}"})"; then
 	echo "Error: could not list the SOPS-managed files of the index (see above). Nothing was re-keyed." >&2
@@ -216,9 +217,8 @@ if [[ "${#ENTRY_PATHS[@]}" -eq 0 && -z "$(git ls-files -- ${SPEC[@]+"${SPEC[@]}"
 	exit 0
 fi
 
-# `|| true`: errexit stays off inside rekey_entry, as it was in the loop
-# this replaces. A command that fails there is reported and counted, and
-# the next file is still tried.
+# `|| true`: errexit stays off inside rekey_entry. A command that fails
+# there is reported and counted, and the next file is still tried.
 for ((i = 0; i < ${#ENTRY_PATHS[@]}; i++)); do
 	rekey_entry "${ENTRY_MODES[i]}" "${ENTRY_OIDS[i]}" "${ENTRY_STAGES[i]}" "${ENTRY_PATHS[i]}" || true
 done

@@ -38,6 +38,11 @@ SGF_VERSION="3.1.0"
 # when the rule does not select that key the whole file is stored in
 # clear inside a SOPS envelope. 3.11.0 ignores those options for the
 # binary store.
+#
+# The scripts call `sops encrypt` and `sops decrypt` with no file: sops
+# reads stdin then (every version from this one on). Not with /dev/stdin
+# as the file: on Windows sops is a Windows program, and Git Bash hands
+# it that path as C:\proc\self\fd\0, which does not exist there.
 # shellcheck disable=SC2034  # read by install.sh and clean-filter.sh
 SGF_MIN_SOPS_VERSION="3.11.0"
 
@@ -226,6 +231,30 @@ sgf_unquote_path() {
 		rest="${rest:2}"
 	done
 	REPLY="${out}"
+}
+
+# ── An absolute path ──────────────────────────────────────────────
+# sgf_is_absolute <path>
+# True for an absolute path. On Windows git is a Windows program: Git
+# Bash runs these scripts, but git prints an absolute path with a drive
+# letter, "C:/Users/...", and such a path does not start with a slash.
+# A path on a network share keeps the form it was configured in,
+# "\\server\share\..." ("//server/share/..." starts with a slash
+# anyway). Bash takes both as they are ([[ -d ]], cd, and `pwd -P` turns
+# a drive letter into /c/Users/...). Only there: elsewhere "C:/x" and
+# "\\x" are relative paths.
+sgf_is_absolute() {
+	case "$1" in
+	/*) return 0 ;;
+	esac
+	case "${OSTYPE:-}" in
+	msys* | cygwin* | win*)
+		case "$1" in
+		[A-Za-z]:[/\\]* | \\\\*) return 0 ;;
+		esac
+		;;
+	esac
+	return 1
 }
 
 # ── Paths in the commands a message prints ────────────────────────
@@ -1006,8 +1035,9 @@ sgf_version_ge() {
 # or wherever the tool lives). install.sh copies the ones git needs into
 # <git common dir>/sops-git-filters/ and points the filter, the merge
 # driver and the hooks there, so that checking out a branch cannot swap
-# the code that sees the plaintext. The price: an update of the checkout
-# does nothing until install.sh has run again. The installed copy says so.
+# the code that sees the plaintext. It also means that an update of the
+# checkout does nothing until install.sh has run again; the installed
+# copy says so.
 
 # sgf_version_of <a lib.sh> : prints the X.Y.Z of its SGF_VERSION line, or
 # nothing. The file may come from a branch nobody reviewed, and the

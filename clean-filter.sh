@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  SOPS Clean Filter for Git                                       ║
+# ║  SOPS clean filter for git                                       ║
 # ║                                                                  ║
 # ║  Git calls this script automatically during `git add` for any    ║
 # ║  file matched by the "sops" filter in .gitattributes.            ║
@@ -14,14 +14,15 @@
 # ║  This is the "clean" side: it receives plaintext on stdin and    ║
 # ║  must output the encrypted version for git to store.             ║
 # ║                                                                  ║
-# ║  The problem: SOPS encryption is non-deterministic — encrypting  ║
-# ║  the same plaintext twice produces different ciphertext (new IV  ║
-# ║  each time). This means git would see every file as "changed"    ║
-# ║  on every checkout, even if nothing actually changed.            ║
+# ║  SOPS encryption is not deterministic: encrypting the same       ║
+# ║  plaintext twice gives different ciphertext (a new IV each       ║
+# ║  time), so git would see every file as "changed" on every        ║
+# ║  checkout, even when nothing changed.                            ║
 # ║                                                                  ║
-# ║  The fix: before encrypting, we decrypt what's already in the    ║
-# ║  index (or HEAD) and compare it to the new content. If it is     ║
-# ║  identical, we reuse the existing ciphertext — no false diff.    ║
+# ║  Before encrypting, the filter decrypts what is already in       ║
+# ║  the index (or HEAD) and compares it with the new content. If    ║
+# ║  it is identical, it reuses the existing ciphertext, and git     ║
+# ║  sees no change.                                                 ║
 # ║                                                                  ║
 # ║  That comparison needs the stored version to decrypt. When it    ║
 # ║  does not (keys or cloud credentials missing) the filter stops   ║
@@ -233,8 +234,8 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 	# (pipefail: the status of the pipeline is that of sops.)
 	if ! SGF_CAPTURED=$(printf '%s' "${INPUT}" | sops decrypt \
 		"${DECRYPT_ARGS[@]}" \
-		--filename-override "${FILENAME}" \
-		/dev/stdin | sgf_cat_counting_nuls) || ! sgf_split_counted; then
+		--filename-override "${FILENAME}" |
+		sgf_cat_counting_nuls) || ! sgf_split_counted; then
 		echo "ERROR: ${FILENAME} is a SOPS document that does not decrypt with your keys, and not" >&2
 		echo "       the version git holds (sops' message is above). Refusing to stage it: nobody" >&2
 		echo "       could check it, and it would stop the checkout of everyone who cannot decrypt it." >&2
@@ -320,6 +321,10 @@ say_key_change() { # <new document>
 	[[ -n "${before}" && -n "${after}" && "${before}" != "${after}" ]] || return 0
 	# The lines are "<key group> TAB <type> <name>" (lib.sh). The group is
 	# named only when a document has more than one.
+	#
+	# No variable name directly before a "(" (`added (x ? ...)`), not even
+	# with a space between: busybox awk up to 1.30 reads that as a call of
+	# a function of that name and fails ("Call to undefined function").
 	SGF_BEFORE="${before}" SGF_AFTER="${after}" SGF_FILE="${FILENAME}" awk '
 	function group(x) { return substr(x, 1, index(x, "\t") - 1) + 0 }
 	function shown(x) {
@@ -330,10 +335,11 @@ say_key_change() { # <new document>
 		na = split(ENVIRON["SGF_AFTER"], a, "\n")
 		for (i = 1; i <= nb; i++) { old[b[i]] = 1; if (group(b[i]) > 1) groups = 1 }
 		for (i = 1; i <= na; i++) { new[a[i]] = 1; if (group(a[i]) > 1) groups = 1 }
-		for (i = 1; i <= na; i++) if (!(a[i] in old)) added = added (added == "" ? "" : ", ") shown(a[i])
-		for (i = 1; i <= nb; i++) if (!(b[i] in new)) removed = removed (removed == "" ? "" : ", ") shown(b[i])
+		for (i = 1; i <= na; i++) if (!(a[i] in old)) added = (added == "" ? "" : added ", ") shown(a[i])
+		for (i = 1; i <= nb; i++) if (!(b[i] in new)) removed = (removed == "" ? "" : removed ", ") shown(b[i])
 		line = "sops clean filter: the keys of " ENVIRON["SGF_FILE"] " change with this version (from .sops.yaml):"
-		if (added != "") line = line " added: " added (removed != "" ? ";" : "")
+		if (added != "") line = line " added: " added
+		if (added != "" && removed != "") line = line ";"
 		if (removed != "") line = line " removed: " removed
 		print line
 	}' >&2
@@ -347,10 +353,10 @@ encrypt_input() {
 	# --filename-override tells SOPS which .sops.yaml creation rule to
 	# match (stdin has no filename of its own). The result is held back
 	# until it has been checked; the trailing x keeps its final newline.
+	# No file argument: sops reads stdin then (lib.sh, SGF_MIN_SOPS_VERSION).
 	encrypted="$(printf '%s' "${INPUT}" | sops encrypt \
 		"${ENCRYPT_ARGS[@]}" \
-		--filename-override "${FILENAME}" \
-		/dev/stdin && printf x)" || return 1
+		--filename-override "${FILENAME}" && printf x)" || return 1
 	encrypted="${encrypted%x}"
 
 	# ── Never trust the output unseen ────
@@ -545,7 +551,7 @@ if [[ "${SOPS_FILTER_CACHE:-}" != "0" && "${SOPS_FILTER_FORCE_REENCRYPT:-}" != "
 fi
 
 # ── New file: no previous version in the index or HEAD ────────
-# For new files there is nothing to compare — just encrypt and exit.
+# A new file has nothing to compare with: encrypt it and exit.
 if [[ -z "${STORED_ID}" ]]; then
 	if replay_encryption "new file"; then
 		exit 0
@@ -626,8 +632,8 @@ KEYS_BEFORE_FORMAT=""
 # (pipefail: the status of the pipeline is that of sops.)
 if ! SGF_CAPTURED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
 	"${DECRYPT_ARGS[@]}" \
-	--filename-override "${FILENAME}" \
-	/dev/stdin | sgf_cat_counting_nuls) || ! sgf_split_counted; then
+	--filename-override "${FILENAME}" |
+	sgf_cat_counting_nuls) || ! sgf_split_counted; then
 	echo "ERROR: cannot decrypt the version of ${FILENAME} that git holds (sops' message is above)." >&2
 	echo "       Without it this filter cannot tell whether the file changed, and it does not" >&2
 	echo "       re-encrypt blindly. Are your keys or credentials available?" >&2
@@ -647,7 +653,7 @@ EXISTING_DECRYPTED="${SGF_CONTENT}"
 # A stored version with NUL bytes (written by another tool) can never
 # equal the input, which has none: the variable only looks the same.
 if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; then
-	# Content unchanged — reuse the existing ciphertext verbatim.
+	# Content unchanged: reuse the existing ciphertext verbatim.
 	# Same plaintext → same stored blob → no false diff. (This holds for
 	# an empty file too: what counts is that the decryption worked.)
 	echo "sops clean filter: content unchanged, reusing existing encrypted blob for ${FILENAME}" >&2
@@ -658,7 +664,7 @@ if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; the
 	printf '%s' "${EXISTING_ENCRYPTED}"
 	remember "${STORED_ID}"
 else
-	# Content actually changed — encrypt the new version.
+	# Content changed: encrypt the new version.
 	echo "sops clean filter: content changed, re-encrypting ${FILENAME}" >&2
 	KEYS_BEFORE="${EXISTING_ENCRYPTED}"
 	KEYS_BEFORE_FORMAT="${STORE_FORMAT}"

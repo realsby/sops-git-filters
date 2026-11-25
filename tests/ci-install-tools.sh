@@ -8,7 +8,8 @@
 # ║  Downloads the release binaries of sops, age and prek from       ║
 # ║  GitHub and puts sops, age, age-keygen and prek into             ║
 # ║  <destination dir>. prek runs the pre-commit hooks in the tests  ║
-# ║  of tests/test_precommit.sh.                                     ║
+# ║  of tests/test_precommit.sh. Linux, macOS and Windows (Git       ║
+# ║  Bash, where the files get the .exe suffix).                     ║
 # ║                                                                  ║
 # ║  Every file is checked against a SHA-256 pinned in this script   ║
 # ║  BEFORE it is made executable or unpacked. A release tag is a    ║
@@ -16,7 +17,8 @@
 # ║                                                                  ║
 # ║  To add a version: add its checksums below. For sops take them   ║
 # ║  from sops-v<version>.checksums.txt in the release; age ships    ║
-# ║  no checksum file, so download each tarball and run sha256sum;   ║
+# ║  no checksum file, so download each archive (.tar.gz, .zip on    ║
+# ║  Windows) and run sha256sum;                                     ║
 # ║  prek publishes <archive>.sha256 next to each archive.           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -32,12 +34,16 @@ AGE_VERSION="1.3.2"
 PREK_VERSION="0.5.3"
 
 # PREK_TARGET: the name prek gives the platform in its archive names. On
-# Linux the static (musl) build, which runs on any distribution.
+# Linux the static (musl) build, which runs on any distribution, Alpine
+# too. Windows means Git Bash (MSYS2): uname -s says MINGW64_NT-10.0-...;
+# the programs there are .exe files, and age and prek come as zip files.
+EXE=""
 case "$(uname -s)-$(uname -m)" in
 Linux-x86_64) OS=linux ARCH=amd64 PREK_TARGET=x86_64-unknown-linux-musl ;;
 Linux-aarch64 | Linux-arm64) OS=linux ARCH=arm64 PREK_TARGET=aarch64-unknown-linux-musl ;;
 Darwin-arm64) OS=darwin ARCH=arm64 PREK_TARGET=aarch64-apple-darwin ;;
 Darwin-x86_64) OS=darwin ARCH=amd64 PREK_TARGET=x86_64-apple-darwin ;;
+MINGW*-x86_64 | MSYS*-x86_64) OS=windows ARCH=amd64 PREK_TARGET=x86_64-pc-windows-msvc EXE=.exe ;;
 *)
 	echo "ci-install-tools: unsupported platform $(uname -s)-$(uname -m)" >&2
 	exit 1
@@ -51,18 +57,22 @@ pinned_sha256() {
 	sops-3.11.0-linux-arm64) echo c71d32f74b3a73ce283affe6ed36e221a8f1476c3d37963f60bd962fb1676681 ;;
 	sops-3.11.0-darwin-arm64) echo 45e7562b1f5d022c4d7a4e4c3d1b7b1a7ee6c328356629286cfd18a394b00e7c ;;
 	sops-3.11.0-darwin-amd64) echo c36583e178f7e83b947044b292e106e79615f7725f75cb147045fb0c81953e2b ;;
+	sops-3.11.0-windows-amd64) echo f3d74d83006954f0d8cf770ad7e5380504270ded5a62f33eb2548ce5461af3b3 ;;
 	sops-3.13.3-linux-amd64) echo e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b ;;
 	sops-3.13.3-linux-arm64) echo 53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77 ;;
 	sops-3.13.3-darwin-arm64) echo b97c0d434aab577dc40310e8d22ff9e45eef4c80638ab978daae9b4681c59286 ;;
 	sops-3.13.3-darwin-amd64) echo 42162d5cef10b74fcf80a045a70e658d7ce6e63d6ea1be6f347e44015714468d ;;
+	sops-3.13.3-windows-amd64) echo a4a9a398858fe8b2ef72d9686d930bf7c5cece9be74ad83ac3b53cfdd70e6b1c ;;
 	age-1.3.2-linux-amd64) echo cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 ;;
 	age-1.3.2-linux-arm64) echo 6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4 ;;
 	age-1.3.2-darwin-arm64) echo e2020b073c44f692685a24d6abc378817eb81ffaaf49fd0531ef8565f767f2f5 ;;
 	age-1.3.2-darwin-amd64) echo 1d1e4bc66e1427edad7739ae7616157de0e79db8b6d2a1497d7d9925fb06a539 ;;
+	age-1.3.2-windows-amd64) echo f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7 ;;
 	prek-0.5.3-linux-amd64) echo d4eae1f31c0817d0a9bfa532d4bb66df60a8b01f121def002021915e826c3d1f ;;
 	prek-0.5.3-linux-arm64) echo ad3fe48802a02ec82286ab842c4a09a4e1db765e402f1fcc016f75b6929ec480 ;;
 	prek-0.5.3-darwin-arm64) echo 6006cc4e69cfc86d55f4e407ca60ba960a521befa54fece94038639b1f4de381 ;;
 	prek-0.5.3-darwin-amd64) echo 874f05d12e7cb672758295b5253dfd05aadad3c2bcaa42ae712b917294629b07 ;;
+	prek-0.5.3-windows-amd64) echo c15a5636bf93a3937507d8da2302b074b0946b3d35882471b002ea93586728d8 ;;
 	*) return 1 ;;
 	esac
 }
@@ -97,21 +107,41 @@ mkdir -p "${DEST}"
 DOWNLOADS="$(mktemp -d)"
 trap 'rm -rf "${DOWNLOADS}"' EXIT
 
-fetch "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.${OS}.${ARCH}" \
-	"${DOWNLOADS}/sops" "sops-${SOPS_VERSION}-${OS}-${ARCH}"
-install -m 0755 "${DOWNLOADS}/sops" "${DEST}/sops"
+# sops names its Windows binary sops-v<version>.amd64.exe, not
+# sops-v<version>.windows.amd64.
+if [[ "${OS}" == "windows" ]]; then
+	sops_asset="sops-v${SOPS_VERSION}.${ARCH}.exe"
+else
+	sops_asset="sops-v${SOPS_VERSION}.${OS}.${ARCH}"
+fi
+fetch "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/${sops_asset}" \
+	"${DOWNLOADS}/sops${EXE}" "sops-${SOPS_VERSION}-${OS}-${ARCH}"
+install -m 0755 "${DOWNLOADS}/sops${EXE}" "${DEST}/sops${EXE}"
 
-fetch "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-${OS}-${ARCH}.tar.gz" \
-	"${DOWNLOADS}/age.tar.gz" "age-${AGE_VERSION}-${OS}-${ARCH}"
-tar -xzf "${DOWNLOADS}/age.tar.gz" -C "${DOWNLOADS}" age/age age/age-keygen
-install -m 0755 "${DOWNLOADS}/age/age" "${DEST}/age"
-install -m 0755 "${DOWNLOADS}/age/age-keygen" "${DEST}/age-keygen"
+if [[ "${OS}" == "windows" ]]; then
+	fetch "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-${OS}-${ARCH}.zip" \
+		"${DOWNLOADS}/age.zip" "age-${AGE_VERSION}-${OS}-${ARCH}"
+	unzip -q "${DOWNLOADS}/age.zip" age/age.exe age/age-keygen.exe -d "${DOWNLOADS}"
+else
+	fetch "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-${OS}-${ARCH}.tar.gz" \
+		"${DOWNLOADS}/age.tar.gz" "age-${AGE_VERSION}-${OS}-${ARCH}"
+	tar -xzf "${DOWNLOADS}/age.tar.gz" -C "${DOWNLOADS}" age/age age/age-keygen
+fi
+install -m 0755 "${DOWNLOADS}/age/age${EXE}" "${DEST}/age${EXE}"
+install -m 0755 "${DOWNLOADS}/age/age-keygen${EXE}" "${DEST}/age-keygen${EXE}"
 
-fetch "https://github.com/j178/prek/releases/download/v${PREK_VERSION}/prek-${PREK_TARGET}.tar.gz" \
-	"${DOWNLOADS}/prek.tar.gz" "prek-${PREK_VERSION}-${OS}-${ARCH}"
-tar -xzf "${DOWNLOADS}/prek.tar.gz" -C "${DOWNLOADS}" "prek-${PREK_TARGET}/prek"
-install -m 0755 "${DOWNLOADS}/prek-${PREK_TARGET}/prek" "${DEST}/prek"
+if [[ "${OS}" == "windows" ]]; then
+	fetch "https://github.com/j178/prek/releases/download/v${PREK_VERSION}/prek-${PREK_TARGET}.zip" \
+		"${DOWNLOADS}/prek.zip" "prek-${PREK_VERSION}-${OS}-${ARCH}"
+	mkdir "${DOWNLOADS}/prek-${PREK_TARGET}"
+	unzip -q "${DOWNLOADS}/prek.zip" prek.exe -d "${DOWNLOADS}/prek-${PREK_TARGET}"
+else
+	fetch "https://github.com/j178/prek/releases/download/v${PREK_VERSION}/prek-${PREK_TARGET}.tar.gz" \
+		"${DOWNLOADS}/prek.tar.gz" "prek-${PREK_VERSION}-${OS}-${ARCH}"
+	tar -xzf "${DOWNLOADS}/prek.tar.gz" -C "${DOWNLOADS}" "prek-${PREK_TARGET}/prek"
+fi
+install -m 0755 "${DOWNLOADS}/prek-${PREK_TARGET}/prek${EXE}" "${DEST}/prek${EXE}"
 
-"${DEST}/sops" --disable-version-check --version | head -1
-"${DEST}/age" --version
-"${DEST}/prek" --version
+"${DEST}/sops${EXE}" --disable-version-check --version | head -1
+"${DEST}/age${EXE}" --version
+"${DEST}/prek${EXE}" --version

@@ -74,7 +74,7 @@ test_install_stopped_by_an_overriding_process_filter_leaves_a_new_clone_working(
 	cd ..
 
 	fresh_clone origin clone
-	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.process GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	run env_with_config filter.sops.process cat "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status"
 	assert_contains "${OUT}" "filter.sops.process is set outside" "install.sh message"
 	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
@@ -88,8 +88,8 @@ test_install_stopped_by_an_overriding_process_filter_leaves_a_new_clone_working(
 	# The same with a clean or smudge command that is there for this one
 	# run only: it is no setup to keep fail-closed.
 	git checkout -q -- .env
-	run env PATH="$(path_with_only ../nosops git bash dirname)" \
-		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	run env_with_config filter.sops.smudge cat \
+		env PATH="$(path_with_only ../nosops git bash dirname)" "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status without sops"
 	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
 }
@@ -105,7 +105,7 @@ test_install_stopped_by_an_overriding_smudge_filter_says_what_it_left() {
 	cd ..
 
 	fresh_clone origin clone
-	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	run env_with_config filter.sops.smudge cat "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status"
 	assert_contains "${OUT}" "another git config file overrides" "install.sh message"
 	assert_contains "${OUT}" "no hooks were installed and no file was decrypted" "install.sh message"
@@ -211,7 +211,7 @@ test_install_restores_required_flag_with_an_incomplete_copy() {
 # A secret that was committed before the filter existed stays plaintext
 # in git. install.sh must say so, not blame the keys.
 test_install_reports_plaintext_tracked_before_adoption() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	printf 'P=legacy\n' >.env
 	git add .env
@@ -242,7 +242,7 @@ test_install_reports_plaintext_tracked_before_adoption() {
 # then the storage format is changed. The report on the format must not
 # hide that the committed version is readable.
 test_install_reports_a_plaintext_commit_behind_the_other_format() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	printf 'P=legacy\n' >.env
 	git add .env
@@ -326,6 +326,7 @@ test_install_decrypts_several_dotenv_files() {
 # comes from `git --literal-pathspecs`) must not hide the secrets from
 # install.sh's decrypt pass or from preflight.sh.
 test_install_and_preflight_ignore_pathspec_settings_of_the_caller() {
+	needs_file_name ':(literal)b.secret'
 	new_repo origin
 	printf 'A=1\n' >.env
 	printf 'B=2\n' >':(literal)b.secret'
@@ -433,7 +434,7 @@ test_install_does_not_write_a_file_with_nul_bytes_damaged() {
 	printf 'A=1\n' >.env
 	git add .env
 	printf 'a\0b\n' | sops encrypt --input-type binary --output-type json \
-		--filename-override bin.secret /dev/stdin >../bin.enc
+		--filename-override bin.secret >../bin.enc
 	git update-index --add --cacheinfo "100644,$(git hash-object -w ../bin.enc),bin.secret"
 	git commit -q -m "a text secret and a binary one"
 	cd ..
@@ -455,6 +456,7 @@ test_install_does_not_write_a_file_with_nul_bytes_damaged() {
 # A-14). Git does not follow such a path either. The permission pass
 # does not chmod through a symlinked directory.
 test_install_does_not_write_through_a_link() {
+	needs_symlinks
 	new_repo origin
 	mkdir secrets
 	printf 'A=1\n' >.env
@@ -490,13 +492,13 @@ test_install_does_not_write_through_a_link() {
 	assert_eq "$(git hash-object --no-filters ../outside/target.txt)" "$(blob_id .env)" "the target of the symlink"
 	assert_eq "$(git hash-object --no-filters ../outside/app.secret)" "$(blob_id secrets/app.secret)" "the file in the symlinked directory"
 	assert_eq "$(git hash-object --no-filters ../outside/hard.txt)" "$(blob_id hard.secret)" "the other name of the hard link"
-	assert_eq "$(mode_of ../outside/target.txt)" "644" "mode of the target of the symlink"
-	assert_eq "$(mode_of ../outside/app.secret)" "644" "mode of the file in the symlinked directory"
+	assert_mode ../outside/target.txt "644" "mode of the target of the symlink"
+	assert_mode ../outside/app.secret "644" "mode of the file in the symlinked directory"
 	[[ -L .env && -L secrets ]] || fail "a symlink was replaced"
 	# The secret without a link is decrypted as before.
 	assert_contains "${OUT}" "Re-smudged plain.secret" "install.sh output"
 	assert_eq "$(cat plain.secret)" "D=4" "working copy of the secret without a link"
-	assert_eq "$(mode_of plain.secret)" "600" "mode of the secret without a link"
+	assert_mode plain.secret "600" "mode of the secret without a link"
 }
 
 # cr_bytes <file> : how many CR bytes the file holds
@@ -527,7 +529,7 @@ test_install_decrypts_a_crlf_checkout_of_the_ciphertext() {
 		assert_contains "${OUT}" "Re-smudged .env" "install.sh output (${format})"
 		assert_eq "$(cat .env)" "$(printf 'A=1\nB=2')" "working copy (${format})"
 		assert_eq "$(cr_bytes .env)" "0" "CR bytes in the plaintext (${format})"
-		assert_eq "$(mode_of .env)" "600" "mode (${format})"
+		assert_mode .env "600" "mode (${format})"
 		assert_eq "$(git status --porcelain)" "" "git status (${format})"
 		cd ..
 	done

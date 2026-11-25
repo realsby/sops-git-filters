@@ -137,3 +137,168 @@ jobs:
           git commit -q -m "add .env"
           git cat-file blob HEAD:.env | grep -q 'ENC\[AES256_GCM,'
           "${tool}/encryption-guard.sh"
+
+  # Git for Windows: the scripts run in its bash (MSYS2), git and sops
+  # are Windows programs. Not a required check.
+  windows:
+    name: tests (windows-latest, Git Bash, sops 3.13.3)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      SOPS_VERSION: "3.13.3"
+      SGF_NO_SKIP: "1"
+      SGF_HOOK_RUNNER: prek
+      # The tests of what NTFS through Git Bash cannot have skip
+      # themselves, and may here: Unix file modes (chmod 600 changes
+      # nothing; a file of mode 000 is readable), symbolic links (ln -s
+      # copies), file names with : \ * ? " | or a control character.
+      SGF_ALLOW_SKIP: >-
+        test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink
+        test_clean_cache_without_a_sha256_tool
+        test_lib_cache_private
+        test_rekey_handles_awkward_names
+        test_perms_install_and_checkout_leave_0600
+        test_perms_executable_secret_keeps_its_execute_bit
+        test_perms_file_mode_comes_from_the_conf
+        test_perms_refused_mode_still_hardens_through_the_hook
+        test_perms_hook_ignores_pathspec_settings_of_the_caller
+        test_perms_awkward_names_symlinks_and_executables
+        test_perms_says_when_the_file_system_keeps_no_modes
+        test_hooks_keep_0600_after_everyday_commands
+        test_hooks_keep_0600_after_cherry_pick_and_revert
+        test_hooks_line_for_a_shared_directory_acts_in_one_repository_only
+        test_guard_fails_closed_when_info_attributes_is_unreadable
+        test_guard_ignores_symlinks
+        test_guard_works_as_a_symlinked_hook
+        test_layout_install_refuses_its_own_checkout_through_a_symlink
+        test_layout_install_through_a_symlinked_path
+        test_install_does_not_write_through_a_link
+        test_hooks_are_not_written_through_a_symlink
+        test_hooks_directory_symlinked_out_of_the_repository_is_shared
+        test_lib_through_symlink
+        test_lib_version_of_reads_a_bounded_piece_of_a_regular_file
+        test_copy_says_when_the_checkout_is_newer
+        test_clean_path_that_looks_like_an_index_stage
+        test_clean_printed_commands_keep_a_trailing_newline
+        test_guard_checks_files_named_like_an_index_stage
+        test_guard_checks_every_stage_of_an_unmerged_path
+        test_guard_names_plaintext_files_with_awkward_names
+        test_guard_tells_intent_to_add_from_staged_under_awkward_names
+        test_install_and_preflight_ignore_pathspec_settings_of_the_caller
+        test_names_awkward_file_names_round_trip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download sops, age and prek (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "$(cygpath -u "${RUNNER_TEMP}")/tools"
+      - name: Run the tests
+        run: |
+          export PATH="$(cygpath -u "${RUNNER_TEMP}")/tools:${PATH}"
+          git --version
+          uname -a
+          tests/run.sh
+
+  # Alpine, where awk, sed, grep, find and the rest are busybox: the
+  # scripts must not need GNU tools, nor the awk of macOS. Not a
+  # required check.
+  busybox:
+    name: tests (Alpine 3.24, busybox awk)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOPS_VERSION: "3.13.3"
+      # By digest: the tag is a mutable pointer.
+      ALPINE_IMAGE: alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # On the runner: the Linux binaries are static and run on Alpine.
+      - name: Download sops, age and prek (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "${RUNNER_TEMP}/tools"
+      - name: Run the tests in Alpine
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/src:ro" \
+            --volume "${RUNNER_TEMP}/tools:/tools:ro" \
+            --env SGF_NO_SKIP=1 --env SGF_HOOK_RUNNER=prek \
+            "${ALPINE_IMAGE}" sh -euc '
+              apk add --no-cache --quiet bash git
+              # What this job is for: awk must be the one of busybox.
+              awk="$(readlink -f "$(command -v awk)")"
+              if [ "${awk}" != /bin/busybox ]; then
+                echo "::error::awk is ${awk}, not busybox"
+                exit 1
+              fi
+              busybox | head -1
+              # Not as root: one test needs a file that it cannot read.
+              adduser -D tester
+              cp -R /src /home/tester/sgf
+              chown -R tester /home/tester/sgf
+              su tester -c "cd /home/tester/sgf && PATH=/tools:\${PATH} bash tests/run.sh"
+            '
+
+  # git 2.18, the oldest git the README names, from the packages of
+  # Alpine 3.8 (with bash 4.4 and busybox 1.28). Not a required check.
+  git-2-18:
+    name: tests (git 2.18, Alpine 3.8)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOPS_VERSION: "3.13.3"
+      # By digest: the tag is a mutable pointer.
+      ALPINE_IMAGE: alpine:3.8.5@sha256:2bb501e6173d9d006e56de5bce2720eb06396803300fe1687b58a7ff32bf4c14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download sops, age and prek (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "${RUNNER_TEMP}/tools"
+      - name: Run the tests with git 2.18
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/src:ro" \
+            --volume "${RUNNER_TEMP}/tools:/tools:ro" \
+            --env SGF_NO_SKIP=1 --env SGF_HOOK_RUNNER=prek \
+            --env SGF_ALLOW_SKIP="${ALLOW_SKIP}" \
+            "${ALPINE_IMAGE}" sh -euc '
+              apk add --no-cache --quiet bash git
+              # What this job is for: git must be 2.18.
+              version="$(git --version)"
+              case "${version}" in
+              "git version 2.18."*) echo "${version}" ;;
+              *)
+                echo "::error::${version}, not 2.18"
+                exit 1
+                ;;
+              esac
+              # Not as root: one test needs a file that it cannot read.
+              adduser -D tester
+              cp -R /src /home/tester/sgf
+              chown -R tester /home/tester/sgf
+              su tester -c "cd /home/tester/sgf && PATH=/tools:\${PATH} bash tests/run.sh"
+            '
+        env:
+          # The tests of what needs a newer git skip themselves, and may
+          # here. attr.tree came with git 2.42, `git sparse-checkout add`
+          # with 2.26, the post-commit hook after cherry-pick and revert
+          # with 2.25. A merge through the merge driver needs the ort
+          # strategy: the default of merge, rebase and cherry-pick since
+          # 2.34, of stash pop since 2.37 (README, Requirements).
+          ALLOW_SKIP: >-
+            test_guard_names_attr_tree_when_plaintext_is_staged
+            test_layout_sparse_checkout
+            test_hooks_keep_0600_after_cherry_pick_and_revert
+            test_merge_json_combines_changes_to_different_lines
+            test_merge_dotenv_combines_changes_to_different_lines
+            test_merge_rebase_combines_changes
+            test_merge_cherry_pick_combines_changes
+            test_merge_stash_keep_index_then_pop
+            test_merge_keeps_the_files_of_a_merge_that_is_still_running
+            test_merge_leaves_no_plaintext_under_git_dir
+            test_copy_a_branch_cannot_swap_the_code_git_runs
+            test_layout_tool_path_that_needs_quoting_inside_the_repo
+            test_layout_tool_path_that_needs_quoting_outside_the_repo
+            test_layout_non_ascii_tool_path_inside_the_repo
+            test_layout_non_ascii_tool_path_outside_the_repo

@@ -170,7 +170,7 @@ check_entries() {
 		return 1
 	fi
 
-	# SOPS-managed files are tracked — encryption must be possible at all.
+	# SOPS-managed files are tracked, so encryption must be possible at all.
 	if [[ "${managed}" -gt 0 && ! -f "${PROJECT_ROOT}/.sops.yaml" ]]; then
 		blocked "SOPS not configured"
 		echo " ${managed} tracked file(s) require SOPS encryption but" >&2
@@ -286,7 +286,7 @@ attribute_overrides() {
 	# path is made absolute, so none is taken for an assignment itself.
 	for file in "system=${system}" "global=${global}" "info=${info}"; do
 		[[ -n "${file#*=}" ]] || continue
-		[[ "${file#*=}" == /* ]] || file="${file%%=*}=${PROJECT_ROOT}/${file#*=}"
+		sgf_is_absolute "${file#*=}" || file="${file%%=*}=${PROJECT_ROOT}/${file#*=}"
 		[[ -e "${file#*=}" ]] || continue
 		if [[ -d "${file#*=}" || ! -r "${file#*=}" ]]; then
 			echo "encryption-guard: cannot read ${file#*=}, an attributes file git reads too" >&2

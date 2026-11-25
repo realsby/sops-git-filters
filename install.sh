@@ -3,11 +3,11 @@
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  SOPS Git Filter Setup                                           ║
 # ║                                                                  ║
-# ║  Configures the enclosing git repository to transparently        ║
-# ║  encrypt/decrypt files that match the "sops" filter in           ║
-# ║  .gitattributes. Run it from anywhere inside the repository      ║
-# ║  you want to configure (idempotent — safe to run on every        ║
-# ║  clone, in a setup task, or repeatedly).                         ║
+# ║  Configures the enclosing git repository to encrypt and decrypt  ║
+# ║  the files that match the "sops" filter in .gitattributes, with  ║
+# ║  no extra step. Run it from anywhere inside the repository you   ║
+# ║  want to configure. It is idempotent: safe to run on every       ║
+# ║  clone, in a setup task, or repeatedly.                          ║
 # ║                                                                  ║
 # ║  Once configured, the workflow becomes git-crypt-like:           ║
 # ║                                                                  ║
@@ -25,12 +25,12 @@
 # ║  2. filter.sops.clean    (working dir → staging)                 ║
 # ║     Encrypts plaintext before git stores it. Delegates to        ║
 # ║     clean-filter.sh, which reuses existing ciphertext when       ║
-# ║     content is unchanged (prevents false diffs) and fails hard   ║
-# ║     rather than ever staging plaintext.                          ║
+# ║     content is unchanged (no false diffs) and fails hard, so     ║
+# ║     it never stages plaintext.                                   ║
 # ║                                                                  ║
 # ║  3. diff.sops.textconv   (git diff / git log -p)                 ║
-# ║     Routes diffs through the smudge filter so they show          ║
-# ║     meaningful plaintext changes instead of ciphertext.          ║
+# ║     Routes diffs through the smudge filter so they show the      ║
+# ║     plaintext changes instead of ciphertext.                     ║
 # ║                                                                  ║
 # ║  4. merge.sops.driver    (merge / rebase / cherry-pick / stash)  ║
 # ║     For paths with merge=sops in .gitattributes: merges the      ║
@@ -44,25 +44,25 @@
 # ║  resolved when the command runs ("$(git rev-parse                ║
 # ║  --git-common-dir)"/...), so it also works in a linked worktree  ║
 # ║  and after the repository moved. Checking out a branch therefore ║
-# ║  cannot swap the code that sees your plaintext. The price: after ║
-# ║  an update of the tool, NOTHING changes until install.sh has run ║
+# ║  cannot swap the code that sees your plaintext. But after an     ║
+# ║  update of the tool, NOTHING changes until install.sh has run    ║
 # ║  again. The installed copy prints a line when it notices that.   ║
 # ║                                                                  ║
 # ║  Finally, a re-smudge pass fixes the fresh-clone gap: files      ║
 # ║  checked out BEFORE the filters were configured still hold raw   ║
-# ║  ciphertext in the working tree — they are decrypted in place    ║
+# ║  ciphertext in the working tree. They are decrypted in place     ║
 # ║  (only when the working copy is byte-identical to the stored     ║
 # ║  blob, so local edits are never touched, and never through a     ║
 # ║  symlink or a hard link, which could lead out of the tree).      ║
 # ║                                                                  ║
 # ║  Then permissions are tightened: git cannot store mode 0600, so  ║
-# ║  smudged secrets land with the caller's umask (0644 by default   ║
-# ║  — world-readable private keys). harden-permissions.sh chmods    ║
-# ║  every filter=sops file to 0600 (SOPS_FILE_MODE overrides; a     ║
-# ║  100755 file keeps its owner execute bit, 0700), and five hooks  ║
-# ║  are installed so that later git commands do the same:           ║
-# ║  post-checkout, post-merge, post-rewrite, post-applypatch and    ║
-# ║  post-commit. Set SOPS_FILTER_INSTALL_HOOKS=0 to skip them.      ║
+# ║  smudged secrets land with the caller's umask (0644 by default,  ║
+# ║  which makes private keys world-readable). harden-permissions.sh ║
+# ║  chmods every filter=sops file to 0600 (SOPS_FILE_MODE           ║
+# ║  overrides; a 100755 file keeps its owner execute bit, 0700),    ║
+# ║  and five hooks are installed so that later git commands do the  ║
+# ║  same: post-checkout, post-merge, post-rewrite, post-applypatch  ║
+# ║  and post-commit. Set SOPS_FILTER_INSTALL_HOOKS=0 to skip them.  ║
 # ║                                                                  ║
 # ║  The hooks are written into this repository's own hooks          ║
 # ║  directory only. When core.hooksPath names a directory that      ║
@@ -197,7 +197,7 @@ fi
 # ── Minimum sops version ────
 # Older releases can store a file in clear inside a SOPS envelope (see
 # SGF_MIN_SOPS_VERSION in lib.sh). clean-filter.sh would refuse such a
-# result, so nothing leaks — but every `git add` would fail. Say so now.
+# result, so nothing leaks, but every `git add` would fail. Say so now.
 SOPS_VERSION="$(sgf_sops_version)"
 if [[ -z "${SOPS_VERSION}" ]]; then
 	echo "Error: could not read the version of $(command -v sops) ('sops --version')." >&2
@@ -247,8 +247,8 @@ MERGE_CMD="${INSTALLED_Q}/merge-driver.sh %O %A %B %L %P"
 # textconv = cat is NOT a mistake. Git materializes textconv temp files
 # through convert_to_working_tree(), i.e. the smudge filter runs FIRST
 # and textconv already receives decrypted plaintext. Without a textconv
-# driver git diffs the raw blobs instead (ciphertext gibberish) — so
-# `cat` is exactly the switch that flips diffs to the smudged path.
+# driver git diffs the raw blobs instead (ciphertext gibberish), so
+# `cat` is the switch that flips diffs to the smudged path.
 # (A `sops decrypt` textconv double-decrypts and errors on plaintext.)
 TEXTCONV_CMD="cat"
 
@@ -327,8 +327,8 @@ fi
 HARDEN_SCRIPT="${INSTALL_DIR}/harden-permissions.sh"
 
 # ── Configure git (local to the target repo only) ────
-# required=true: fail the operation if the filter fails — never silently
-# commit plaintext because sops or the script is broken. Written on EVERY
+# required=true: fail the operation if the filter fails, so that a broken
+# sops or script never silently commits plaintext. Written on EVERY
 # run, outside the "already configured" test below: with the two
 # commands in place and this flag missing, git treats a failing filter
 # as no filter at all and stages the plaintext. (An existing setup
@@ -411,7 +411,7 @@ fi
 # ── Re-smudge pass: heal files checked out before setup ────
 # On a fresh clone the filters are not yet in .git/config, so SOPS-
 # managed files land in the working tree as raw ciphertext. Decrypt
-# them in place — but ONLY when the working copy is byte-identical to
+# them in place, but ONLY when the working copy is byte-identical to
 # the blob in the index (proof the smudge never ran and there are no
 # local edits to lose), or is that blob with a CR before its line ends
 # (core.autocrlf, see below).
@@ -487,7 +487,10 @@ while IFS= read -r -d '' record; do
 	fi
 
 	[[ -f "${f}" ]] || continue
-	worktree_sha=$(git hash-object --no-filters -- "${f}")
+	# The path from the top of the working tree, not "${f}": on Windows
+	# Git Bash turns an absolute /c/... path into C:/... for git, but not
+	# one with a character such as ` in it, and git then cannot open it.
+	worktree_sha=$(git -C "${TARGET_ROOT}" hash-object --no-filters -- "${path}")
 	if [[ "${worktree_sha}" != "${index_sha}" ]]; then
 		# core.autocrlf=true (or eol=crlf) on a path without -text: the
 		# checkout before the filters existed put a CR before every LF of
@@ -525,7 +528,7 @@ while IFS= read -r -d '' record; do
 	# (pipefail: the status of the pipeline is that of sops.)
 	# shellcheck disable=SC2086  # DECRYPT_ARGS is a flag list
 	if SGF_CAPTURED=$(git -C "${TARGET_ROOT}" cat-file blob "${index_sha}" |
-		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" /dev/stdin 2>"${decrypt_stderr}" |
+		sops decrypt ${DECRYPT_ARGS} --filename-override "${path}" 2>"${decrypt_stderr}" |
 		sgf_cat_counting_nuls) && sgf_split_counted; then
 		if [[ "${SGF_NUL_COUNT}" != "0" ]]; then
 			HOLDS_NUL_BYTES="${HOLDS_NUL_BYTES}   - ${path}"$'\n'
@@ -533,7 +536,7 @@ while IFS= read -r -d '' record; do
 		fi
 		printf '%s' "${SGF_CONTENT}" >"${f}"
 		# The write above bypassed git, so the index's cached stat still
-		# describes the ciphertext checkout — and git flags size deltas
+		# describes the ciphertext checkout, and git flags size deltas
 		# as "modified" without consulting filters. update-index re-runs
 		# the clean filter (which reuses the identical blob) and records
 		# fresh stat data, so `git status` is clean again.
@@ -559,7 +562,7 @@ fi
 
 # ── Tighten permissions on the decrypted files ────
 # Git only round-trips the executable bit, so every smudge (including
-# the pass above) writes secrets with the caller's umask — 0644 on a
+# the pass above) writes secrets with the caller's umask: 0644 on a
 # default workstation. Fix them now; the hooks below fix them later.
 if [[ -x "${HARDEN_SCRIPT}" ]]; then
 	"${HARDEN_SCRIPT}" --root "${TARGET_ROOT}" || true
@@ -713,9 +716,9 @@ machine_wide_hooks_dirs() {
 		git config --global --includes --type=path --get-all core.hooksPath 2>/dev/null || true
 		git config --system --includes --type=path --get-all core.hooksPath 2>/dev/null || true
 	} | while IFS= read -r value; do
-		case "${value}" in
-		/*) physical_path "${value}" || true ;;
-		esac
+		if sgf_is_absolute "${value}"; then
+			physical_path "${value}" || true
+		fi
 	done
 }
 
@@ -774,10 +777,10 @@ HOOKS_DIR="$(git -C "${TARGET_ROOT}" config --type=path --get core.hooksPath 2>/
 if [[ -z "${HOOKS_DIR}" ]]; then
 	HOOKS_DIR="$(git -C "${TARGET_ROOT}" rev-parse --git-path hooks)"
 fi
-case "${HOOKS_DIR}" in
-/*) ;;
-*) HOOKS_DIR="${TARGET_ROOT}/${HOOKS_DIR}" ;;
-esac
+# C:/... on Windows is absolute too (lib.sh): taken for a relative path,
+# a machine-wide ~/.githooks was a directory inside this repository, and
+# the hooks went there, where git never runs them.
+sgf_is_absolute "${HOOKS_DIR}" || HOOKS_DIR="${TARGET_ROOT}/${HOOKS_DIR}"
 HOOKS_DIR_P="$(physical_path "${HOOKS_DIR}" || true)"
 HOOKS_DIR_OWN=0
 if [[ -n "${HOOKS_DIR_P}" ]] && hooks_dir_is_own "${HOOKS_DIR_P}"; then
@@ -792,10 +795,7 @@ fi
 SEEN_HOOKS_DIRS=""
 while IFS= read -r candidate; do
 	[[ -n "${candidate}" ]] || continue
-	case "${candidate}" in
-	/*) ;;
-	*) candidate="${TARGET_ROOT}/${candidate}" ;;
-	esac
+	sgf_is_absolute "${candidate}" || candidate="${TARGET_ROOT}/${candidate}"
 	candidate_p="$(physical_path "${candidate}" || true)"
 	[[ -n "${candidate_p}" ]] || continue
 	case "${SEEN_HOOKS_DIRS}" in
@@ -844,7 +844,7 @@ else
 	for hook_name in ${HOOK_NAMES}; do
 		hook_path="${HOOKS_DIR}/${hook_name}"
 
-		# Never clobber a hook this tool did not write — pre-commit, prek,
+		# Never clobber a hook this tool did not write: pre-commit, prek,
 		# husky and hand-rolled hooks all live here. A symlink is never
 		# written through either: its target can be a file outside this
 		# repository.

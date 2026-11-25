@@ -101,7 +101,8 @@ STUB
 }
 
 # With a real sops and a rule that does not select the "data" key: either
-# the file is encrypted in full or the add fails. Never plaintext.
+# the file is encrypted in full or the add fails, and plaintext is never
+# stored.
 test_clean_json_partial_rule_never_stores_plaintext() {
 	new_repo repo
 	cat >.sops.yaml <<YAML
@@ -277,7 +278,7 @@ encrypt_for() {
 		type=dotenv
 		out=dotenv
 	fi
-	sops encrypt --age "$2" --input-type "${type}" --output-type "${out}" --filename-override any.secret /dev/stdin
+	sops encrypt --age "$2" --input-type "${type}" --output-type "${out}" --filename-override any.secret
 }
 
 # A file copied from another project, encrypted for that project's key
@@ -411,7 +412,7 @@ test_clean_printed_commands_take_the_path_literally() {
 	assert_contains "${line}" "git add " "test fixture: the printed line"
 	(export SOPS_AGE_KEY_FILE="${NO_KEY}" && cd sub && eval "${line}")
 	assert_eq "$(git diff --cached --name-only)" "${file}" "what the printed line staged"
-	assert_eq "$(git cat-file blob ":${file}" | sops decrypt --input-type json --output-type binary /dev/stdin)" "B=3" "the staged blob"
+	assert_eq "$(git cat-file blob ":${file}" | sops decrypt --input-type json --output-type binary)" "B=3" "the staged blob"
 }
 
 # A newline at the end of a name is part of it. The quoted path in the
@@ -420,6 +421,7 @@ test_clean_printed_commands_take_the_path_literally() {
 # the edits in b.secret.
 test_clean_printed_commands_keep_a_trailing_newline() {
 	local file=$'b.secret\n' line
+	needs_file_name "${file}"
 	new_repo repo
 	# *.secret does not match a name that ends in a newline.
 	printf 'b.secret? filter=sops diff=sops\n' >>.gitattributes
@@ -614,7 +616,7 @@ test_clean_stops_when_stored_version_cannot_be_decrypted() {
 	run env SOPS_AGE_KEY_FILE="${NO_KEY}" git commit -q -am "no real change"
 	assert_ne "${RC}" "0" "git commit -a without the decryption key"
 
-	# With the key the file is simply unchanged.
+	# With the key the file is unchanged.
 	assert_eq "$(git status --porcelain)" "" "git status with the key"
 }
 
@@ -625,7 +627,8 @@ test_clean_stops_when_stored_version_cannot_be_decrypted() {
 # way it gives to commit must work.
 test_clean_names_a_rule_that_does_not_list_your_key() {
 	new_repo repo
-	printf 'creation_rules:\n  - path_regex: ^prod/\n    age: %s\n  - path_regex: .*\n    age: %s\n' \
+	# [/\\], not /: on Windows sops matches the path with backslashes.
+	printf 'creation_rules:\n  - path_regex: ^prod[/\\\\]\n    age: %s\n  - path_regex: .*\n    age: %s\n' \
 		"${AGE_PUB_B}" "${AGE_PUB_A}" >.sops.yaml
 	printf 'prod/*.env filter=sops diff=sops\n' >>.gitattributes
 	git add .sops.yaml .gitattributes
@@ -647,7 +650,7 @@ test_clean_names_a_rule_that_does_not_list_your_key() {
 	run env SOPS_FILTER_FORCE_REENCRYPT=1 git commit -q -m "add the deploy key"
 	assert_eq "${RC}" "0" "git commit as the message says"
 	assert_eq "$(git cat-file blob HEAD:prod/deploy.env |
-		SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary /dev/stdin)" \
+		SOPS_AGE_KEY_FILE="${AGE_KEY_B}" sops decrypt --input-type json --output-type binary)" \
 		"TOKEN=1" "key B decrypts the committed blob"
 
 	# The README's way to stop the checks that fail while the plaintext is
@@ -732,7 +735,7 @@ test_clean_format_change_needs_the_override() {
 
 test_clean_refuses_ciphertext_in_the_other_format() {
 	new_repo repo
-	printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin >x.secret
+	printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env >x.secret
 	run git add x.secret
 	assert_ne "${RC}" "0" "git add exit status"
 	assert_contains "${OUT}" "in the dotenv format" "filter message"
@@ -760,6 +763,7 @@ test_clean_empty_file_keeps_its_blob() {
 # re-encrypted, so the file never stops showing as modified.
 test_clean_path_that_looks_like_an_index_stage() {
 	local file id
+	needs_file_name '2:prod.secret'
 	new_repo repo
 	printf '1:x filter=sops diff=sops\n' >>.gitattributes
 	git add .gitattributes
@@ -841,7 +845,7 @@ test_clean_dotenv_refuses_content_with_nul_bytes() {
 test_clean_does_not_reuse_a_stored_blob_with_nul_bytes() {
 	new_repo repo
 	printf 'a\0b\n' | sops encrypt --input-type binary --output-type json \
-		--filename-override bin.secret /dev/stdin >../bin.enc
+		--filename-override bin.secret >../bin.enc
 	git update-index --add --cacheinfo "100644,$(git hash-object -w ../bin.enc),bin.secret"
 	git commit -q -m "a binary secret stored without the filter"
 	local before
@@ -901,6 +905,7 @@ edit_same_size() {
 # stores it.
 test_clean_cache_counts_sops_calls() {
 	local format mode id
+	needs_cache
 	counting_sops
 	for format in json dotenv; do
 		for mode in 1 0; do
@@ -961,16 +966,17 @@ test_clean_cache_counts_sops_calls() {
 # plain_of_stored_blob [format]   (blob on stdin) : decrypt it
 plain_of_stored_blob() {
 	if [[ "${1:-json}" == "dotenv" ]]; then
-		sops decrypt --input-type dotenv --output-type dotenv /dev/stdin
+		sops decrypt --input-type dotenv --output-type dotenv
 	else
-		sops decrypt --input-type json --output-type binary /dev/stdin
+		sops decrypt --input-type json --output-type binary
 	fi
 }
 
 # What is on disk: MACs and object ids, in a directory of mode 0700 with
-# files of mode 0600. Not the plaintext, not a plain hash of it.
+# files of mode 0600, and neither the plaintext nor a plain hash of it.
 test_clean_cache_holds_no_plaintext() {
 	local dir file secret='hunter2-S3cr3t' sum
+	needs_cache
 	new_repo repo
 	printf 'A=1\n' >.env
 	git add .env
@@ -981,9 +987,11 @@ test_clean_cache_holds_no_plaintext() {
 	git add .env
 	dir="$(cache_dir)"
 	[[ -f "${dir}/key" ]] || fail "test fixture: no key in ${dir}"
-	assert_eq "$(mode_of "${dir}")" "700" "mode of the cache directory"
+	# Where the file system keeps Unix modes (not on Windows, where Git
+	# Bash makes them up and the NTFS permissions of the folder decide).
+	assert_mode "${dir}" "700" "mode of the cache directory"
 	for file in "${dir}"/*; do
-		assert_eq "$(mode_of "${file}")" "600" "mode of ${file##*/}"
+		assert_mode "${file}" "600" "mode of ${file##*/}"
 	done
 	assert_eq "$(grep -rl "${secret}" "${dir}" || true)" "" "files that hold the plaintext"
 	# Not a plain SHA-256 of it either, in any form a tool prints.
@@ -1003,6 +1011,7 @@ test_clean_cache_holds_no_plaintext() {
 # one is not given, and the forced one is not remembered.
 test_clean_cache_is_bypassed_by_force_reencrypt() {
 	local id entries
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1026,6 +1035,7 @@ test_clean_cache_is_bypassed_by_force_reencrypt() {
 # recipients it names, and says which keys that adds (audit A-15); the
 # run after it gives that encryption again, with the same line.
 test_clean_cache_follows_a_change_of_sops_yaml() {
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1066,6 +1076,7 @@ STUB
 # a blob for the recipients of the new ones.
 test_clean_cache_keeps_no_encryption_for_rules_changed_while_sops_ran() {
 	local entries
+	needs_cache
 	rewriting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1120,6 +1131,7 @@ rewrite_entries() {
 # document is not used. The filter then works as without it.
 test_clean_cache_ignores_entries_it_cannot_trust() {
 	local plain_id now
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1176,6 +1188,9 @@ test_clean_cache_ignores_entries_it_cannot_trust() {
 # nothing is written there); the filter still works.
 test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink() {
 	local dir what
+	needs_cache
+	# chmod is the test (on Windows it changes nothing)
+	needs_file_modes
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1211,6 +1226,7 @@ test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink() {
 # they leave behind is a cache the next run can use.
 test_clean_cache_two_commands_at_once() {
 	local round status1 status2 pid1 pid2
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=00\n' >.env
@@ -1246,6 +1262,9 @@ test_clean_cache_two_commands_at_once() {
 # cache: the filter works as before, and remembers nothing.
 test_clean_cache_without_a_sha256_tool() {
 	local bin entries
+	needs_cache
+	# path_without links every command on PATH
+	needs_symlinks
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env

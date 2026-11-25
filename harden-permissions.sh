@@ -4,12 +4,12 @@
 # ║  Tighten permissions on SOPS-managed working-tree files          ║
 # ║                                                                  ║
 # ║  Git stores only the executable bit, so it cannot round-trip     ║
-# ║  0600. Every smudge — clone, checkout, merge, the re-smudge      ║
-# ║  pass in install.sh — recreates decrypted secrets with the       ║
-# ║  caller's umask, which is 0644 on a default workstation. A       ║
-# ║  deploy key, an API key, a kubeconfig or a Talos secrets bundle  ║
-# ║  then sits world-readable in the working tree, and OpenSSH will  ║
-# ║  refuse a 0644 private key outright.                             ║
+# ║  0600. Every smudge (clone, checkout, merge, the re-smudge pass  ║
+# ║  in install.sh) recreates decrypted secrets with the caller's    ║
+# ║  umask, which is 0644 on a default workstation. A deploy key, an ║
+# ║  API key, a kubeconfig or a Talos secrets bundle then sits       ║
+# ║  world-readable in the working tree, and OpenSSH refuses a 0644  ║
+# ║  private key outright.                                           ║
 # ║                                                                  ║
 # ║  This script chmods every tracked file whose git attribute is    ║
 # ║  filter=sops to 0600 (override with SOPS_FILE_MODE in            ║
@@ -19,10 +19,10 @@
 # ║  value still leaves the files at 0600 (0700) and exits 1.        ║
 # ║  A path that is a symlink, or lies in a symlinked directory, is  ║
 # ║  left alone: git does not follow it either.                      ║
-# ║  It is idempotent and safe to run often —                        ║
-# ║  install.sh runs it, and the hooks it installs (post-checkout,   ║
-# ║  post-merge, post-rewrite, post-applypatch, post-commit) run it  ║
-# ║  again after a checkout, merge, rebase, `git am` and commit.     ║
+# ║  It is idempotent and safe to run often: install.sh runs it,     ║
+# ║  and the hooks it installs (post-checkout, post-merge,           ║
+# ║  post-rewrite, post-applypatch, post-commit) run it again after  ║
+# ║  a checkout, merge, rebase, `git am` and commit.                 ║
 # ║                                                                  ║
 # ║  Usage:                                                          ║
 # ║    harden-permissions.sh [--root <repo>] [--quiet]               ║
@@ -67,8 +67,8 @@ fi
 
 # ── Target mode (override in .sops-filter.conf) ────
 # Default 0600. A repo whose decrypted files must be readable by a
-# second local account (a deploy daemon, say) can widen it — but that
-# is the exception, and it is recorded in a tracked file.
+# second local account (a deploy daemon, say) can widen it. That is the
+# exception, and it is recorded in a tracked file.
 FILE_MODE="600"
 if [[ -f "${TARGET_ROOT}/.sops-filter.conf" ]]; then
 	conf_mode=$({ grep -E '^SOPS_FILE_MODE=' "${TARGET_ROOT}/.sops-filter.conf" || true; } |
@@ -111,6 +111,11 @@ unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PA
 hardened=0
 failed=0
 previous=""
+# "no" when the first chmod did not change the mode the file shows: the
+# file system keeps no Unix modes. NTFS through Git Bash (Windows) is
+# one: chmod succeeds there and changes nothing, and saying "set to 600"
+# would be false. Asked once: one stat, not one per file.
+modes_kept=""
 
 # below_a_symlink <path> : true when a directory on <path> (relative to
 # TARGET_ROOT, as git lists it) is a symlink. Git does not follow one: it
@@ -146,13 +151,27 @@ while IFS= read -r -d '' record; do
 
 	if chmod "${mode}" "${f}" 2>/dev/null; then
 		hardened=$((hardened + 1))
+		if [[ -z "${modes_kept}" ]]; then
+			modes_kept=yes
+			# GNU and busybox stat, then BSD stat
+			shown="$(stat -c %a "${f}" 2>/dev/null || stat -f %Lp "${f}" 2>/dev/null || true)"
+			if [[ "${shown}" =~ ^[0-7]+$ ]] && ((8#${shown} != 8#${mode})); then
+				modes_kept=no
+			fi
+		fi
 	else
 		failed=$((failed + 1))
 		echo "⚠  Could not chmod ${mode} ${path}" >&2
 	fi
 done < <(git -C "${TARGET_ROOT}" ls-files -s -z -- ':(attr:filter=sops)')
 
-if [[ "${QUIET}" -eq 0 ]]; then
+if [[ "${modes_kept}" == "no" ]]; then
+	if [[ "${QUIET}" -eq 0 ]]; then
+		echo "⚠  Permissions: this file system keeps no Unix file modes (chmod ${FILE_MODE} changed nothing)." >&2
+		echo "   ${hardened} SOPS-managed file(s) can be read by whoever the folder lets read them" >&2
+		echo "   (on Windows: the NTFS permissions of the folder, which the files inherit)." >&2
+	fi
+elif [[ "${QUIET}" -eq 0 ]]; then
 	echo "Permissions: ${hardened} SOPS-managed file(s) set to ${FILE_MODE}."
 fi
 

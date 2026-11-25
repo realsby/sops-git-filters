@@ -23,8 +23,14 @@ sgf_test_setup() {
 }
 
 # ── Assertions (a failed assertion ends the test) ────
+# The output of the last `run` goes to the log too: on a CI runner it is
+# all there is to see.
 fail() {
 	echo "ASSERTION FAILED: $*" >&2
+	if [[ -n "${OUT:-}" ]]; then
+		echo "output of the last command run (RC=${RC:-}):" >&2
+		printf '%s\n' "${OUT}" | sed 's/^/  > /' >&2
+	fi
 	exit 1
 }
 
@@ -78,10 +84,60 @@ write_sops_yaml() {
 	} >.sops.yaml
 }
 
+# git_init <dir> : a new repository whose first branch is main. Not only
+# through init.defaultBranch (sgf_test_setup): that came with git 2.28,
+# and older git names the branch master.
+git_init() {
+	git init -q "$1"
+	git -C "$1" symbolic-ref HEAD refs/heads/main
+}
+
+# git_at_least <major.minor> : true when the git on PATH is that version
+# or newer. For a test of a git feature that came with that version.
+git_at_least() {
+	git --version | awk -v want="$1" '{
+		split($3, have, ".")
+		split(want, w, ".")
+		exit !(have[1] + 0 > w[1] + 0 || (have[1] + 0 == w[1] + 0 && have[2] + 0 >= w[2] + 0))
+	}'
+}
+
+# env_with_config <key> <value> <command...> : env <command...> with
+# <key>=<value> in git's config for that run only, from the environment
+# as `git -c` gives it: GIT_CONFIG_COUNT (git 2.31 and later), else
+# GIT_CONFIG_PARAMETERS, which `git -c` sets and every git reads.
+env_with_config() {
+	local key="$1" value="$2"
+	shift 2
+	if git_at_least 2.31; then
+		env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="${key}" GIT_CONFIG_VALUE_0="${value}" "$@"
+	else
+		env GIT_CONFIG_PARAMETERS="'${key}=${value}'" "$@"
+	fi
+}
+
+# merge_driver_needs_ort [stash] : skip the rest of the test with a git
+# that merges with its "recursive" strategy: git merge, rebase and
+# cherry-pick before 2.34, git stash pop before 2.37 ("stash"). That
+# strategy runs the clean filter on the file the merge driver merged and
+# aborts the merge when the result is not the blob the driver handed
+# back, and a secret encrypted again never is: "add_cacheinfo failed to
+# refresh". The "ort" strategy, the default since, does not. README,
+# Requirements.
+merge_driver_needs_ort() {
+	local version
+	version="$(git --version | awk '{print $3}')"
+	if [[ "${1:-}" == "stash" ]]; then
+		git_at_least 2.37 || skip "git ${version} pops a stash with the recursive strategy, which cannot take a secret the merge driver merged (git 2.37 or later)"
+	else
+		git_at_least 2.34 || skip "git ${version} merges with the recursive strategy, which cannot take a secret the merge driver merged (git 2.34 or later)"
+	fi
+}
+
 # new_repo <dir> [json|dotenv] : create a configured repository and cd into it
 new_repo() {
 	local dir="$1" format="${2:-json}"
-	git init -q "${dir}"
+	git_init "${dir}"
 	cd "${dir}" || exit 1
 	vendor_tool
 	# shellcheck disable=SC2119  # no extra recipients here
@@ -103,12 +159,21 @@ fresh_clone() {
 
 # path_with_only <dir> <command...> : link the named commands into <dir>
 # and print its path. As PATH it hides every other command (sops, say).
+# Where ln -s makes no symlink (Git Bash on Windows) a script that runs
+# the command takes its place: a copy of git.exe or bash.exe does not
+# find the DLLs next to the original.
 path_with_only() {
-	local dir="$1" cmd
+	local dir="$1" cmd links=1
 	shift
 	mkdir -p "${dir}"
+	symlinks_work || links=0
 	for cmd in "$@"; do
-		ln -sf "$(command -v "${cmd}")" "${dir}/${cmd}"
+		if [[ "${links}" -eq 1 ]]; then
+			ln -sf "$(command -v "${cmd}")" "${dir}/${cmd}"
+		else
+			printf '#!/bin/sh\nexec '\''%s'\'' "$@"\n' "$(command -v "${cmd}")" >"${dir}/${cmd}"
+			chmod +x "${dir}/${cmd}"
+		fi
 	done
 	(CDPATH='' cd -- "${dir}" && pwd)
 }
@@ -116,9 +181,13 @@ path_with_only() {
 # path_without <dir> <command...> : link every command on PATH into <dir>
 # except the ones named, and print its path. As PATH it is the same PATH
 # without those commands (the first of each name wins, as for PATH).
+# It skips the test where ln -s makes no symlink: Git Bash on Windows
+# would copy every file of every directory on PATH, C:\Windows\System32
+# too, and fill the disk.
 path_without() {
 	local dir="$1" entry IFS=:
 	shift
+	symlinks_work || skip "this system makes no symbolic links (ln -s), and a copy of PATH is too big"
 	mkdir -p "${dir}"
 	for entry in ${PATH}; do
 		[[ -d "${entry}" ]] || continue
@@ -139,9 +208,9 @@ stored() {
 # plain_of_stored <path> [format] : decrypt the index blob of <path>
 plain_of_stored() {
 	if [[ "${2:-json}" == "dotenv" ]]; then
-		stored "$1" | sops decrypt --input-type dotenv --output-type dotenv /dev/stdin
+		stored "$1" | sops decrypt --input-type dotenv --output-type dotenv
 	else
-		stored "$1" | sops decrypt --input-type json --output-type binary /dev/stdin
+		stored "$1" | sops decrypt --input-type json --output-type binary
 	fi
 }
 
@@ -186,6 +255,153 @@ INSTALLED_CMD_PREFIX='"$(git rev-parse --git-common-dir)"/sops-git-filters'
 # mode_of <file> : permission bits as octal digits (GNU and BSD stat)
 mode_of() {
 	stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+# ── What the file system can hold ────
+# Git Bash on Windows (NTFS) keeps no Unix file modes, makes no symbolic
+# links (ln -s copies the target, or fails when there is none) and takes
+# no file name with a colon, a backslash or a control character. A test
+# of such a feature asks first and skips itself where it is missing;
+# tests/run.sh lets the Windows job skip exactly those (SGF_ALLOW_SKIP).
+
+# file_modes_work : true when chmod 600 leaves a file at mode 600
+file_modes_work() {
+	local f rc=0
+	f="$(mktemp)"
+	chmod 600 "${f}"
+	[[ "$(mode_of "${f}")" == "600" ]] || rc=1
+	rm -f "${f}"
+	return "${rc}"
+}
+
+# needs_file_modes : skip the rest of the test where file_modes_work fails
+needs_file_modes() {
+	file_modes_work || skip "this file system keeps no Unix file modes (chmod 600 changes nothing)"
+}
+
+# needs_cache : skip the rest of the test where the clean filter keeps
+# no cache: sgf_cache_open (lib.sh) refuses a directory that others can
+# open, and where the file system keeps no Unix modes (Windows) every
+# directory looks open.
+needs_cache() {
+	local probe ok=0
+	probe="$(mktemp -d)"
+	(
+		export LC_ALL=C
+		# shellcheck source=lib.sh
+		. "${SGF_TOOL_DIR}/lib.sh"
+		sgf_cache_open "${probe}"
+	) >/dev/null 2>&1 && ok=1
+	rm -rf "${probe}"
+	[[ "${ok}" -eq 1 ]] || skip "the clean filter keeps no cache here: its directory cannot be closed to others (no Unix file modes)"
+}
+
+# assert_mode <file> <mode> <what> : the mode of <file>, where the file
+# system keeps modes. Where it keeps none there is no mode to check: the
+# tests of harden-permissions.sh skip themselves there, and a test of
+# something else (a worktree, a merge) goes on.
+assert_mode() {
+	file_modes_work || return 0
+	assert_eq "$(mode_of "$1")" "$2" "$3"
+}
+
+# symlinks_work : true when ln -s makes a symbolic link
+symlinks_work() {
+	local dir rc=0
+	dir="$(mktemp -d)"
+	{ ln -s target "${dir}/link" && [[ -L "${dir}/link" ]]; } 2>/dev/null || rc=1
+	rm -f "${dir}/link"
+	rmdir "${dir}"
+	return "${rc}"
+}
+
+# needs_symlinks : skip the rest of the test where symlinks_work fails
+needs_symlinks() {
+	symlinks_work || skip "this system makes no symbolic links (ln -s)"
+}
+
+# guard_hook : encryption-guard.sh as the pre-commit hook of the
+# repository at hand: a symlink, as the README says. Where ln -s makes
+# none (Git Bash on Windows), a hook that runs it, as the README says
+# for Windows.
+guard_hook() {
+	mkdir -p .git/hooks
+	if symlinks_work; then
+		ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	else
+		printf '#!/bin/sh\nexec %s/encryption-guard.sh\n' "${TOOL}" >.git/hooks/pre-commit
+		chmod +x .git/hooks/pre-commit
+	fi
+}
+
+# file_system_takes <name...> : sort the names into TAKEN and REFUSED:
+# can a file of that name be made here, and does git list it under that
+# very name? Git Bash on Windows makes a file for a name with a colon,
+# but under another name (the colon becomes a private-use character).
+TAKEN=()
+REFUSED=()
+file_system_takes() {
+	local dir name
+	TAKEN=()
+	REFUSED=()
+	dir="$(mktemp -d)"
+	git init -q "${dir}"
+	for name in "$@"; do
+		if (cd "${dir}" && mkdir -p "$(dirname "./${name}")" && printf 'x\n' >"./${name}") 2>/dev/null &&
+			[[ "$(git -C "${dir}" ls-files -o -z -- ":(literal)${name}" 2>/dev/null | tr '\0' '/')" == "${name}/" ]]; then
+			TAKEN+=("${name}")
+		else
+			REFUSED+=("${name}")
+		fi
+	done
+	rm -rf "${dir}"
+}
+
+# index_takes <name...> : the same for an index entry alone, with no
+# file: git for Windows refuses a name NTFS cannot hold even there
+# (core.protectNTFS), and a name that is not UTF-8 reaches it as another
+# one (Windows passes the arguments of a program as UTF-16).
+index_takes() {
+	local dir name oid
+	TAKEN=()
+	REFUSED=()
+	dir="$(mktemp -d)"
+	git init -q "${dir}"
+	oid="$(printf 'x\n' | git -C "${dir}" hash-object -w --stdin)"
+	for name in "$@"; do
+		if git -C "${dir}" update-index --add --cacheinfo "100644,${oid},${name}" 2>/dev/null &&
+			[[ "$(git -C "${dir}" ls-files -z -- ":(literal)${name}" 2>/dev/null | tr '\0' '/')" == "${name}/" ]]; then
+			TAKEN+=("${name}")
+		else
+			REFUSED+=("${name}")
+		fi
+	done
+	rm -rf "${dir}"
+}
+
+# names_taken <name...> : the names both the file system and the index
+# take (file_system_takes, index_takes), in TAKEN, the others in REFUSED
+names_taken() {
+	local refused=()
+	file_system_takes "$@"
+	[[ ${#REFUSED[@]} -eq 0 ]] || refused=("${REFUSED[@]}")
+	if [[ ${#TAKEN[@]} -gt 0 ]]; then
+		index_takes "${TAKEN[@]}"
+	fi
+	[[ ${#refused[@]} -eq 0 ]] || REFUSED+=("${refused[@]}")
+}
+
+# needs_file_name <name> : skip the rest of the test where the file
+# system does not take that name (file_system_takes)
+needs_file_name() {
+	file_system_takes "$1"
+	[[ ${#REFUSED[@]} -eq 0 ]] || skip "this file system takes no file named $(printf '%q' "$1")"
+}
+
+# skip_if_refused : at the end of a test that ran with the names the file
+# system takes, skip if it refused any (the others passed)
+skip_if_refused() {
+	[[ ${#REFUSED[@]} -eq 0 ]] || skip "this file system takes no file named $(printf '%q ' "${REFUSED[@]}")(the other names passed)"
 }
 
 # add_index_entries <count> : put <count> more files into the index, the
