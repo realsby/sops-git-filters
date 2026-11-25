@@ -69,7 +69,10 @@
 # ║  other repositories use too, nothing is written there (a hook    ║
 # ║  in it runs for every one of them); the line to add by hand is   ║
 # ║  printed instead. Hooks that an older install.sh wrote into      ║
-# ║  such a directory are removed.                                   ║
+# ║  such a directory are removed. In the repository's own           ║
+# ║  directory, an existing hook is replaced only when it is, byte   ║
+# ║  for byte, one that install.sh wrote; for any other the line is  ║
+# ║  printed too.                                                    ║
 # ║                                                                  ║
 # ║  core.trustctime is set to false. The chmod changes a file's     ║
 # ║  inode change time, and git would take the secret for locally    ║
@@ -661,7 +664,9 @@ EOF
 # of before v3.0.0 only line 12 may differ, the one that names
 # harden-permissions.sh. A symlink, a file with one more line, or a hook
 # of another tool that merely mentions sops-git-filters is not one. This
-# is the test before a file is removed.
+# is the test before a file is removed, and before one is overwritten
+# (audit S8). When hook_text changes, its text of today must stay here as
+# an earlier release: it is the hook of v3.0.0.
 is_generated_hook() {
 	local file="$1" name="$2" assign content
 	[[ -f "${file}" && ! -L "${file}" ]] || return 1
@@ -835,6 +840,7 @@ else
 	mkdir -p "${HOOKS_DIR}"
 	installed_hooks=""
 	foreign_hooks=""
+	changed_hooks=""
 	for hook_name in ${HOOK_NAMES}; do
 		hook_path="${HOOKS_DIR}/${hook_name}"
 
@@ -845,6 +851,15 @@ else
 		if [[ -L "${hook_path}" ]] ||
 			{ [[ -e "${hook_path}" ]] && ! grep -qF "${HOOK_MARKER}" "${hook_path}" 2>/dev/null; }; then
 			foreign_hooks="${foreign_hooks} ${hook_name}"
+			continue
+		fi
+		# Nor one it wrote that was changed since. The marker line alone
+		# does not make a hook replaceable: only a file that is, byte for
+		# byte, a hook of this script (now or in an earlier release), the
+		# same test as before a hook is taken out of a shared directory
+		# (audit S8). Lines a user added stay.
+		if [[ -e "${hook_path}" ]] && ! is_generated_hook "${hook_path}" "${hook_name}"; then
+			changed_hooks="${changed_hooks} ${hook_name}"
 			continue
 		fi
 
@@ -858,6 +873,12 @@ else
 	if [[ -n "${foreign_hooks}" ]]; then
 		echo "⚠  These hooks exist and are not managed by sops-git-filters:${foreign_hooks}" >&2
 		echo "   Not overwriting. Add this line to each of them by hand:" >&2
+		echo "     ${HARDEN_HINT} --quiet || true" >&2
+	fi
+	if [[ -n "${changed_hooks}" ]]; then
+		echo "⚠  These hooks carry the sops-git-filters marker but were changed by hand:${changed_hooks}" >&2
+		echo "   They differ from every hook install.sh wrote, so they are not overwritten." >&2
+		echo "   Make sure each of them runs this line, or delete it and re-run this script:" >&2
 		echo "     ${HARDEN_HINT} --quiet || true" >&2
 	fi
 fi
