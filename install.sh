@@ -713,9 +713,9 @@ machine_wide_hooks_dirs() {
 		git config --global --includes --type=path --get-all core.hooksPath 2>/dev/null || true
 		git config --system --includes --type=path --get-all core.hooksPath 2>/dev/null || true
 	} | while IFS= read -r value; do
-		case "${value}" in
-		/*) physical_path "${value}" || true ;;
-		esac
+		if sgf_is_absolute "${value}"; then
+			physical_path "${value}" || true
+		fi
 	done
 }
 
@@ -774,10 +774,10 @@ HOOKS_DIR="$(git -C "${TARGET_ROOT}" config --type=path --get core.hooksPath 2>/
 if [[ -z "${HOOKS_DIR}" ]]; then
 	HOOKS_DIR="$(git -C "${TARGET_ROOT}" rev-parse --git-path hooks)"
 fi
-case "${HOOKS_DIR}" in
-/*) ;;
-*) HOOKS_DIR="${TARGET_ROOT}/${HOOKS_DIR}" ;;
-esac
+# C:/... on Windows is absolute too (lib.sh): taken for a relative path,
+# a machine-wide ~/.githooks was a directory inside this repository, and
+# the hooks went there, where git never runs them.
+sgf_is_absolute "${HOOKS_DIR}" || HOOKS_DIR="${TARGET_ROOT}/${HOOKS_DIR}"
 HOOKS_DIR_P="$(physical_path "${HOOKS_DIR}" || true)"
 HOOKS_DIR_OWN=0
 if [[ -n "${HOOKS_DIR_P}" ]] && hooks_dir_is_own "${HOOKS_DIR_P}"; then
@@ -792,10 +792,7 @@ fi
 SEEN_HOOKS_DIRS=""
 while IFS= read -r candidate; do
 	[[ -n "${candidate}" ]] || continue
-	case "${candidate}" in
-	/*) ;;
-	*) candidate="${TARGET_ROOT}/${candidate}" ;;
-	esac
+	sgf_is_absolute "${candidate}" || candidate="${TARGET_ROOT}/${candidate}"
 	candidate_p="$(physical_path "${candidate}" || true)"
 	[[ -n "${candidate_p}" ]] || continue
 	case "${SEEN_HOOKS_DIRS}" in

@@ -233,6 +233,27 @@ sgf_unquote_path() {
 	REPLY="${out}"
 }
 
+# ── An absolute path ──────────────────────────────────────────────
+# sgf_is_absolute <path>
+# True for an absolute path. On Windows git is a Windows program: Git
+# Bash runs these scripts, but git prints an absolute path with a drive
+# letter, "C:/Users/...", and such a path does not start with a slash.
+# Bash takes it as it is ([[ -d ]], cd, and `pwd -P` turns it into
+# /c/Users/...). Only there: elsewhere "C:/x" is a relative path.
+sgf_is_absolute() {
+	case "$1" in
+	/*) return 0 ;;
+	esac
+	case "${OSTYPE:-}" in
+	msys* | cygwin* | win*)
+		case "$1" in
+		[A-Za-z]:[/\\]*) return 0 ;;
+		esac
+		;;
+	esac
+	return 1
+}
+
 # ── Paths in the commands a message prints ────────────────────────
 # A message that tells the user what to run gives the full path in single
 # quotes, so the line can be pasted as it is, from any directory of the

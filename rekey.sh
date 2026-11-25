@@ -181,10 +181,11 @@ rekey_entry() {
 # list the index or answers out of order, nothing is staged.
 SPEC=()
 for item in ${LIMIT[@]+"${LIMIT[@]}"}; do
-	case "${item}" in
-	/*) SPEC[${#SPEC[@]}]="${item}" ;;
-	*) SPEC[${#SPEC[@]}]="${CALLER_PREFIX}${item}" ;;
-	esac
+	if sgf_is_absolute "${item}"; then
+		SPEC[${#SPEC[@]}]="${item}"
+	else
+		SPEC[${#SPEC[@]}]="${CALLER_PREFIX}${item}"
+	fi
 done
 if ! LISTING="$(sgf_managed_entries "${PROJECT_ROOT}" rekey.sh "nothing was re-keyed" ${SPEC[@]+"${SPEC[@]}"})"; then
 	echo "Error: could not list the SOPS-managed files of the index (see above). Nothing was re-keyed." >&2

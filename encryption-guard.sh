@@ -286,7 +286,7 @@ attribute_overrides() {
 	# path is made absolute, so none is taken for an assignment itself.
 	for file in "system=${system}" "global=${global}" "info=${info}"; do
 		[[ -n "${file#*=}" ]] || continue
-		[[ "${file#*=}" == /* ]] || file="${file%%=*}=${PROJECT_ROOT}/${file#*=}"
+		sgf_is_absolute "${file#*=}" || file="${file%%=*}=${PROJECT_ROOT}/${file#*=}"
 		[[ -e "${file#*=}" ]] || continue
 		if [[ -d "${file#*=}" || ! -r "${file#*=}" ]]; then
 			echo "encryption-guard: cannot read ${file#*=}, an attributes file git reads too" >&2

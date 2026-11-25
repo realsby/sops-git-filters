@@ -311,6 +311,27 @@ test_lib_paste_path_and_pathspec() {
 	[[ ! -e pwned ]] || fail "a name was run as a command"
 }
 
+# On Windows git prints an absolute path with a drive letter, C:/Users/...
+# Taken for a relative path, a machine-wide core.hooksPath of ~/.githooks
+# became a directory inside the repository: install.sh wrote the hooks
+# there, where git never runs them, instead of leaving that shared
+# directory alone (and the guard skipped the global attributes file).
+test_lib_absolute_path() {
+	load_lib
+	is sgf_is_absolute /home/me/.githooks
+	is_not sgf_is_absolute .git/hooks
+	is_not sgf_is_absolute ./hooks
+	is_not sgf_is_absolute ''
+	OSTYPE=msys
+	is sgf_is_absolute C:/Users/me/.githooks
+	is sgf_is_absolute 'C:\Users\me\.githooks'
+	is sgf_is_absolute /c/Users/me/.githooks
+	is_not sgf_is_absolute .git/hooks
+	is_not sgf_is_absolute C:hooks
+	OSTYPE=linux-gnu
+	is_not sgf_is_absolute C:/Users/me/.githooks
+}
+
 test_lib_store_format() {
 	load_lib
 	mkdir repo
