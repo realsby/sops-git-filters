@@ -153,12 +153,21 @@ fresh_clone() {
 
 # path_with_only <dir> <command...> : link the named commands into <dir>
 # and print its path. As PATH it hides every other command (sops, say).
+# Where ln -s makes no symlink (Git Bash on Windows) a script that runs
+# the command takes its place: a copy of git.exe or bash.exe does not
+# find the DLLs next to the original.
 path_with_only() {
-	local dir="$1" cmd
+	local dir="$1" cmd links=1
 	shift
 	mkdir -p "${dir}"
+	symlinks_work || links=0
 	for cmd in "$@"; do
-		ln -sf "$(command -v "${cmd}")" "${dir}/${cmd}"
+		if [[ "${links}" -eq 1 ]]; then
+			ln -sf "$(command -v "${cmd}")" "${dir}/${cmd}"
+		else
+			printf '#!/bin/sh\nexec '\''%s'\'' "$@"\n' "$(command -v "${cmd}")" >"${dir}/${cmd}"
+			chmod +x "${dir}/${cmd}"
+		fi
 	done
 	(CDPATH='' cd -- "${dir}" && pwd)
 }
@@ -313,6 +322,26 @@ file_system_takes() {
 	for name in "$@"; do
 		if (cd "${dir}" && printf 'x\n' >"./${name}") 2>/dev/null &&
 			[[ "$(git -C "${dir}" ls-files -o -z -- ":(literal)${name}" | tr '\0' '/')" == "${name}/" ]]; then
+			TAKEN+=("${name}")
+		else
+			REFUSED+=("${name}")
+		fi
+	done
+	rm -rf "${dir}"
+}
+
+# index_takes <name...> : the same for an index entry alone, with no
+# file: git for Windows refuses a name NTFS cannot hold even there
+# (core.protectNTFS).
+index_takes() {
+	local dir name oid
+	TAKEN=()
+	REFUSED=()
+	dir="$(mktemp -d)"
+	git init -q "${dir}"
+	oid="$(printf 'x\n' | git -C "${dir}" hash-object -w --stdin)"
+	for name in "$@"; do
+		if git -C "${dir}" update-index --add --cacheinfo "100644,${oid},${name}" 2>/dev/null; then
 			TAKEN+=("${name}")
 		else
 			REFUSED+=("${name}")

@@ -488,7 +488,13 @@ test_guard_names_plaintext_files_with_awkward_names() {
 		'"starts with a quote.secret'
 		'sub dir/"quoted" dir/x.secret'
 	)
-	local name oid i=0
+	# The names git takes into the index here (git for Windows refuses
+	# those NTFS cannot hold); the others are named in a skip at the end.
+	local name oid i=0 tab_plain=$'tab\tplain.txt'
+	index_takes "${tab_plain}"
+	[[ ${#REFUSED[@]} -eq 0 ]] || tab_plain=""
+	index_takes "${names[@]}"
+	names=("${TAKEN[@]}")
 	for name in "${names[@]}"; do
 		i=$((i + 1))
 		oid="$(printf 'PW=hunter%s\n' "${i}" | git hash-object -w --stdin)"
@@ -496,7 +502,7 @@ test_guard_names_plaintext_files_with_awkward_names() {
 	done
 	oid="$(printf 'not a secret\n' | git hash-object -w --stdin)"
 	git update-index --add --cacheinfo "100644,${oid},plain.txt"
-	git update-index --add --cacheinfo "100644,${oid},"$'tab\tplain.txt'
+	[[ -z "${tab_plain}" ]] || git update-index --add --cacheinfo "100644,${oid},${tab_plain}"
 	git update-index --add --cacheinfo "100644,${oid},"$'caf\303\251.txt'
 
 	run "${TOOL}/encryption-guard.sh"
@@ -508,6 +514,7 @@ test_guard_names_plaintext_files_with_awkward_names() {
 	assert_not_contains "${OUT}" $'caf\303\251.txt' "guard output"
 	assert_not_contains "${OUT}" "hunter" "guard output"
 	assert_eq "$(printf '%s\n' "${OUT}" | grep -c '^   - ')" "${#names[@]}" "lines that name a file"
+	skip_if_refused
 }
 
 # sops_blob <text> : write an encrypted SOPS document (json) of <text>
@@ -528,27 +535,31 @@ set_stage() {
 # git quotes.
 test_guard_checks_every_stage_of_an_unmerged_path() {
 	unfiltered_repo
-	local name stage plain
-	for name in c.secret $'tab\t"q".secret'; do
+	local name stage plain entries
+	# The names git takes into the index here (see test_guard_names_...).
+	index_takes c.secret $'tab\t"q".secret'
+	entries="$((3 * ${#TAKEN[@]}))"
+	for name in "${TAKEN[@]}"; do
 		for stage in 1 2 3; do
 			set_stage "${name}" "${stage}" "$(sops_blob "stage ${stage}")"
 		done
 	done
-	assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "6" "test fixture: unmerged entries"
+	assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "${entries}" "test fixture: unmerged entries"
 	run "${TOOL}/encryption-guard.sh"
 	assert_eq "${RC}" "0" "guard exit status when every stage is encrypted"
 
 	plain="$(printf 'PW=hunter2\n' | git hash-object -w --stdin)"
-	for name in c.secret $'tab\t"q".secret'; do
+	for name in "${TAKEN[@]}"; do
 		for stage in 1 2 3; do
 			set_stage "${name}" "${stage}" "${plain}"
-			assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "6" "test fixture: unmerged entries"
+			assert_eq "$(git ls-files -u | wc -l | tr -d ' ')" "${entries}" "test fixture: unmerged entries"
 			run "${TOOL}/encryption-guard.sh"
 			assert_ne "${RC}" "0" "guard exit status with plaintext in stage ${stage} of [${name}]"
 			assert_contains "${OUT}" $'\n'"   - ${name}  (" "guard names [${name}] (stage ${stage})"
 			set_stage "${name}" "${stage}" "$(sops_blob "stage ${stage}")"
 		done
 	done
+	skip_if_refused
 }
 
 # Intent to add is told from a staged empty file under names git quotes:
