@@ -83,8 +83,15 @@
 # ║                                                                  ║
 # ║  Exit status:                                                    ║
 # ║    0  filters and hooks are in place, nothing left to do         ║
-# ║    1  nothing was installed (not a repo, sops missing or too     ║
-# ║       old, bad .sops-filter.conf, conflicting git config)        ║
+# ║    1  the filters were not set up (not a repo, sops missing or   ║
+# ║       too old, bad .sops-filter.conf, filter.sops.process set    ║
+# ║       outside .git/config). The repository is as it was, except  ║
+# ║       that one set up before gets filter.sops.required=true      ║
+# ║       back, which keeps git fail-closed. One exit 1 comes later: ║
+# ║       when another git config file overrides the filter          ║
+# ║       settings. Then .git/config holds them already, and         ║
+# ║       .git/sops-git-filters/ the scripts, but no hooks were      ║
+# ║       installed and no file was decrypted.                       ║
 # ║    3  filters and hooks are in place, but files need attention:  ║
 # ║       tracked in plaintext, still stored in the other storage    ║
 # ║       format, not decrypted because sops could not (keys or      ║
@@ -144,7 +151,12 @@ fi
 # Only when a clean or smudge command is set: required=true with no
 # command makes git fail on every SOPS-managed file, and a clone that
 # never had the filters must keep working if this script cannot finish.
-if git -C "${TARGET_ROOT}" config --get-regexp '^filter\.sops\.(clean|smudge)$' >/dev/null 2>&1; then
+# Set in a config file, that is: a command given for this one run
+# (`git -c`, GIT_CONFIG_COUNT) is gone afterwards, the flag would stay.
+if (
+	unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+	git -C "${TARGET_ROOT}" config --get-regexp '^filter\.sops\.(clean|smudge)$' >/dev/null 2>&1
+); then
 	git -C "${TARGET_ROOT}" config --local filter.sops.required true
 fi
 
@@ -235,6 +247,30 @@ MERGE_CMD="${INSTALLED_Q}/merge-driver.sh %O %A %B %L %P"
 # (A `sops decrypt` textconv double-decrypts and errors on plaintext.)
 TEXTCONV_CMD="cat"
 
+# ── git config helpers (local to the target repo only) ────
+git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
+# The value git will really use: a worktree-level or included config can
+# override .git/config.
+git_effective() { git -C "${TARGET_ROOT}" config "$@" 2>/dev/null || true; }
+
+# ── A long-running filter under the same name ────
+# filter.<driver>.process (a long-running filter) wins over clean/smudge.
+# One left behind by another tool under the same driver name would bypass
+# clean-filter.sh completely. One in .git/config is removed further down.
+# One anywhere else (the global config, a worktree's, an included file,
+# `git -c`, GIT_CONFIG_COUNT) is not this script's to change: stop here,
+# before the copy below and before any setting is written, so that this
+# exit leaves the repository as it was (audit A-03). Every value git
+# reads, compared with those of .git/config alone (no includes): any
+# difference is a value from somewhere else.
+if [[ "$(git_effective --get-all filter.sops.process)" != "$(git_cfg --get-all filter.sops.process 2>/dev/null || true)" ]]; then
+	echo "Error: filter.sops.process is set outside this repository's .git/config:" >&2
+	git -C "${TARGET_ROOT}" config --show-origin --get-all filter.sops.process >&2 || true
+	echo "Git prefers it over the clean/smudge filters, so clean-filter.sh would never run." >&2
+	echo "Remove that setting and re-run this script." >&2
+	exit 1
+fi
+
 # ── Install the copy that git runs ────
 # Before any git setting is written: a setting that points at a script
 # which is not there yet would make every git command on a secret fail.
@@ -286,32 +322,25 @@ fi
 HARDEN_SCRIPT="${INSTALL_DIR}/harden-permissions.sh"
 
 # ── Configure git (local to the target repo only) ────
-git_cfg() { git -C "${TARGET_ROOT}" config --local "$@"; }
-# The value git will really use: a worktree-level or included config can
-# override .git/config.
-git_effective() { git -C "${TARGET_ROOT}" config "$@" 2>/dev/null || true; }
-
 # required=true: fail the operation if the filter fails — never silently
-# commit plaintext because sops or the script is broken. Written FIRST
-# and on EVERY run, outside the "already configured" test below: with
-# the two commands in place and this flag missing, git treats a failing
-# filter as no filter at all and stages the plaintext. (An existing
-# setup already got it further up, before the checks that can exit.)
+# commit plaintext because sops or the script is broken. Written on EVERY
+# run, outside the "already configured" test below: with the two
+# commands in place and this flag missing, git treats a failing filter
+# as no filter at all and stages the plaintext. (An existing setup
+# already got it further up, before the checks that can exit.)
+#
+# Not earlier than here: required=true with no command makes git fail on
+# every SOPS-managed file the user edits (`git status`, `git add`: exit
+# 128). From here on nothing stops this script before the commands are
+# in .git/config, so a clone that never had the filters is not left in
+# that state (audit A-03). And before the commands, not after them: in
+# between they would be there without the flag.
 git_cfg filter.sops.required true
 
-# filter.<driver>.process (a long-running filter) wins over clean/smudge.
-# One left behind by another tool under the same driver name would bypass
-# clean-filter.sh completely.
+# The filter.sops.process of .git/config (see above).
 if git_cfg --get filter.sops.process >/dev/null 2>&1; then
 	git_cfg --unset-all filter.sops.process
 	echo "Removed filter.sops.process from .git/config (it overrides the clean/smudge filters)."
-fi
-if [[ -n "$(git_effective --get filter.sops.process)" ]]; then
-	echo "Error: filter.sops.process is set outside this repository's .git/config:" >&2
-	git -C "${TARGET_ROOT}" config --show-origin --get-all filter.sops.process >&2 || true
-	echo "Git prefers it over the clean/smudge filters, so clean-filter.sh would never run." >&2
-	echo "Remove that setting and re-run this script." >&2
-	exit 1
 fi
 
 # Idempotency: write the settings only when one of them differs: a first
@@ -342,12 +371,17 @@ else
 	echo "SOPS git filters configured (format: ${STORE_FORMAT})."
 fi
 
-# Last check: what was just written must be what git will use.
+# Last check: what was just written must be what git will use. The one
+# exit 1 that comes after .git/config was changed: the settings stay
+# there (they are right, and they keep an existing setup fail-closed), and
+# the message says what was not done.
 if [[ "$(git_effective --bool --get filter.sops.required)" != "true" ||
 	"$(git_effective --get filter.sops.clean)" != "${CLEAN_CMD}" ||
 	"$(git_effective --get filter.sops.smudge)" != "${SMUDGE_CMD}" ]]; then
 	echo "Error: another git config file overrides the filter settings written to .git/config:" >&2
 	git -C "${TARGET_ROOT}" config --show-origin --get-regexp '^filter\.sops\.' >&2 || true
+	echo "The settings in .git/config and the scripts under ${INSTALL_DIR} are in place," >&2
+	echo "but git uses the overriding entries. Not done yet: no hooks were installed and no file was decrypted." >&2
 	echo "Remove the overriding entries and re-run this script." >&2
 	exit 1
 fi

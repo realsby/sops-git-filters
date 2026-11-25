@@ -198,7 +198,7 @@ pre-commit install
 """
 ```
 
-`install.sh` exits 3 when the filters and hooks are installed but something is left to do: files it could not decrypt (no key, expired cloud session), files tracked in plaintext, or a storage-format change that is not finished. It prints which. A setup task that should carry on in that case can run `./utilities/sops-git-filters/install.sh || [ $? -eq 3 ]`. Exit status 1 means nothing was installed.
+`install.sh` exits 3 when the filters and hooks are installed but something is left to do: files it could not decrypt (no key, expired cloud session), files tracked in plaintext, or a storage-format change that is not finished. It prints which. A setup task that should carry on in that case can run `./utilities/sops-git-filters/install.sh || [ $? -eq 3 ]`. Exit status 1 means the filters were not set up (sops missing or too old, a bad `.sops-filter.conf`, a `filter.sops.process` setting outside `.git/config`, ...) and the repository is as it was, except that one whose filters were set up before gets `filter.sops.required=true` back, so that a failing filter still stops git. One exit 1 comes later, with the message "another git config file overrides the filter settings": a filter setting from a place that outranks `.git/config` (a worktree's config, `git -c`, `GIT_CONFIG_COUNT`). By then `.git/config` holds the new settings and `.git/sops-git-filters/` the scripts, but no hooks were installed and no file was decrypted. Remove the override and run `install.sh` again.
 
 ## Storage formats: json vs dotenv
 

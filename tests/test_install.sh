@@ -61,6 +61,70 @@ test_install_that_stops_early_leaves_a_new_clone_unconfigured() {
 	assert_eq "$(git status --porcelain)" "" "git status still works"
 }
 
+# A filter.sops.process that outranks .git/config (GIT_CONFIG_COUNT,
+# `git -c`, a worktree's config) stops install.sh with exit 1. A clone
+# that never had the filters must come out of that unchanged: with
+# filter.sops.required=true and no filter command, the first edit of a
+# secret made `git status` and `git add` fail with exit 128 (audit A-03).
+test_install_stopped_by_an_overriding_process_filter_leaves_a_new_clone_working() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.process GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status"
+	assert_contains "${OUT}" "filter.sops.process is set outside" "install.sh message"
+	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
+	[[ ! -e "$(git rev-parse --git-common-dir)/sops-git-filters" ]] || fail "exit 1 left the scripts under .git/"
+
+	printf 'A=2\n' >>.env
+	run git status --short
+	assert_eq "${RC}" "0" "git status after an edit of the secret"
+	assert_eq "${OUT}" " M .env" "git status after an edit of the secret"
+
+	# The same with a clean or smudge command that is there for this one
+	# run only: it is no setup to keep fail-closed.
+	git checkout -q -- .env
+	run env PATH="$(path_with_only ../nosops git bash dirname)" \
+		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status without sops"
+	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
+}
+
+# The one exit 1 that comes after the settings are written: a filter
+# command in a config file that outranks .git/config. The settings are in
+# .git/config and work; the message says what was left undone.
+test_install_stopped_by_an_overriding_smudge_filter_says_what_it_left() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+
+	fresh_clone origin clone
+	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	assert_eq "${RC}" "1" "install.sh exit status"
+	assert_contains "${OUT}" "another git config file overrides" "install.sh message"
+	assert_contains "${OUT}" "no hooks were installed and no file was decrypted" "install.sh message"
+	assert_eq "$(git config --local --get filter.sops.required)" "true" "filter.sops.required"
+	assert_eq "$(git config --local --get filter.sops.clean)" "${INSTALLED_CMD_PREFIX}/clean-filter.sh %f" "clean filter command"
+	[[ ! -e "$(git rev-parse --git-path hooks)/post-checkout" ]] || fail "a hook was installed"
+
+	printf 'A=2\n' >.env
+	run git status --short
+	assert_eq "${RC}" "0" "git status after an edit of the secret"
+	git add .env
+	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "index blob"
+	assert_not_contains "$(stored .env)" 'A=2' "index blob"
+
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status without the override"
+	assert_contains "$(cat "$(git rev-parse --git-path hooks)/post-checkout")" 'managed by sops-git-filters' "the hook"
+}
+
 # filter.<driver>.process takes precedence over clean/smudge.
 test_install_removes_local_process_filter() {
 	new_repo repo
