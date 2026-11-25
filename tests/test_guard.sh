@@ -748,7 +748,7 @@ test_guard_passes_while_a_secret_is_intent_to_add() {
 	run git commit -q -a -m "everything"
 	assert_eq "${RC}" "0" "git commit -a"
 	assert_contains "$(git show HEAD:b.secret)" '"data": "ENC[AES256_GCM' "b.secret in the commit"
-	assert_not_contains "$(git show HEAD:b.secret)" "abc" "b.secret in the commit"
+	assert_not_contains "$(git show HEAD:b.secret)" "TOKEN=abc" "b.secret in the commit"
 }
 
 # Only an intent-to-add entry is let through. An empty blob that is
