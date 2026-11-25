@@ -412,6 +412,7 @@ What you must still do:
 - **`git add -p` stages a managed file whole.** Git shows the ciphertext, not your plaintext edit, and cannot stage part of the file. Stage the whole file with `git add`.
 - **Mode 0600 does not come back after every command.** Git runs no hook after `git stash`, `git stash pop`, `git reset --hard` and `git sparse-checkout add`. A secret that one of them writes again has your umask mode (usually `0644`) until the next commit, checkout or merge, or until you run `harden-permissions.sh`. A new secret has the umask mode until its first commit.
 - **A secret with uncommitted changes costs key-service calls each time git looks at it.** Git runs the clean filter again whenever it compares the file: twice for one `git diff`, up to once for one `git status` (measured with git 2.54). Each run decrypts the stored version and encrypts the new one. Nothing is cached, on purpose: a cache would put data derived from the plaintext on disk.
+- **A commit can take its own secret out of the guard's view.** The guard checks the paths that the `.gitattributes` of the commit marks `filter=sops`. A commit that stages `.env -filter` in `.gitattributes` together with a plaintext `.env` passes it: in that commit the path is not SOPS-managed, and git did what the attributes say. Review changes to `.gitattributes` as you review changes to `.sops.yaml` (CODEOWNERS, a required review).
 
 ## Troubleshooting
 
