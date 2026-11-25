@@ -23,8 +23,14 @@ sgf_test_setup() {
 }
 
 # ── Assertions (a failed assertion ends the test) ────
+# The output of the last `run` goes to the log too: on a CI runner it is
+# all there is to see.
 fail() {
 	echo "ASSERTION FAILED: $*" >&2
+	if [[ -n "${OUT:-}" ]]; then
+		echo "output of the last command run (RC=${RC:-}):" >&2
+		printf '%s\n' "${OUT}" | sed 's/^/  > /' >&2
+	fi
 	exit 1
 }
 
@@ -321,7 +327,7 @@ file_system_takes() {
 	git init -q "${dir}"
 	for name in "$@"; do
 		if (cd "${dir}" && printf 'x\n' >"./${name}") 2>/dev/null &&
-			[[ "$(git -C "${dir}" ls-files -o -z -- ":(literal)${name}" | tr '\0' '/')" == "${name}/" ]]; then
+			[[ "$(git -C "${dir}" ls-files -o -z -- ":(literal)${name}" 2>/dev/null | tr '\0' '/')" == "${name}/" ]]; then
 			TAKEN+=("${name}")
 		else
 			REFUSED+=("${name}")
@@ -332,7 +338,8 @@ file_system_takes() {
 
 # index_takes <name...> : the same for an index entry alone, with no
 # file: git for Windows refuses a name NTFS cannot hold even there
-# (core.protectNTFS).
+# (core.protectNTFS), and a name that is not UTF-8 reaches it as another
+# one (Windows passes the arguments of a program as UTF-16).
 index_takes() {
 	local dir name oid
 	TAKEN=()
@@ -341,7 +348,8 @@ index_takes() {
 	git init -q "${dir}"
 	oid="$(printf 'x\n' | git -C "${dir}" hash-object -w --stdin)"
 	for name in "$@"; do
-		if git -C "${dir}" update-index --add --cacheinfo "100644,${oid},${name}" 2>/dev/null; then
+		if git -C "${dir}" update-index --add --cacheinfo "100644,${oid},${name}" 2>/dev/null &&
+			[[ "$(git -C "${dir}" ls-files -z -- ":(literal)${name}" 2>/dev/null | tr '\0' '/')" == "${name}/" ]]; then
 			TAKEN+=("${name}")
 		else
 			REFUSED+=("${name}")
