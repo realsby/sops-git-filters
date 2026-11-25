@@ -1,5 +1,3 @@
 {
-  "skipReview": "AUTOMATIC",
-  "triggerOnUpdates": false,
-  "triggerOnDrafts": false
+  "autoReview": []
 }
