@@ -123,6 +123,60 @@ test_guard_checks_files_named_like_an_index_stage() {
 	assert_contains "${OUT}" "2:prod.secret" "guard names the file"
 }
 
+# stage_raw <path> <file> : put the bytes of <file> into the index as
+# <path>, the way a clone without the filters stages a file. No filter
+# runs, and the content is stored byte for byte.
+stage_raw() {
+	local oid
+	oid="$(git hash-object -w --no-filters -- "$2")"
+	git update-index --add --cacheinfo "100644,${oid},$1"
+}
+
+# The awk of macOS ends a line at a NUL byte and never sees the rest of
+# it. A complete SOPS document with plaintext hidden behind a NUL byte
+# must still be refused (audit A-12).
+test_guard_blocks_plaintext_after_a_nul_byte() {
+	unfiltered_repo dotenv
+	{
+		printf 'A=1\n' | sops encrypt --input-type dotenv --output-type dotenv --filename-override any.env /dev/stdin
+		printf '\000DB_PASSWORD=hunter2\n'
+	} >../dotenv.blob
+	stage_raw .env ../dotenv.blob
+	assert_eq "$(stored .env | tr -cd '\000' | wc -c | tr -d ' ')" "1" "test fixture: one NUL byte in the index"
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status (dotenv)"
+	assert_contains "${OUT}" "- .env  (it holds NUL bytes (1)" "guard names the file and the cause"
+	assert_not_contains "${OUT}" "hunter2" "guard output"
+	cd ..
+
+	# json: the NUL byte follows a valid line of the document.
+	git init -q repo2
+	cd repo2 || exit 1
+	vendor_tool
+	write_sops_yaml
+	printf '*.secret filter=sops diff=sops\n' >.gitattributes
+	git add -A
+	git commit -q -m scaffold
+	printf 'x\n' | sops encrypt --input-type binary --output-type json --filename-override any.secret /dev/stdin >../doc.json
+	assert_contains "$(sed -n 2p ../doc.json)" '"data": "ENC[AES256_GCM' "test fixture: line 2 holds the data"
+	{
+		sed -n 1p ../doc.json
+		sed -n 2p ../doc.json | tr -d '\n'
+		printf '\000 DB_PASSWORD=hunter2\n'
+		sed -n '3,$p' ../doc.json
+	} >../json.blob
+	stage_raw key.secret ../json.blob
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status (json)"
+	assert_contains "${OUT}" "- key.secret  (it holds NUL bytes (1)" "guard names the file and the cause"
+	assert_not_contains "${OUT}" "hunter2" "guard output"
+
+	# The same document without the NUL byte and the plaintext passes.
+	stage_raw key.secret ../doc.json
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status for the plain document"
+}
+
 # Git never filters a symlink, so there is nothing to encrypt.
 test_guard_ignores_symlinks() {
 	unfiltered_repo

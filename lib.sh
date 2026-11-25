@@ -515,19 +515,60 @@ sgf_is_sops_doc() {
 # sgf_blob_is_sops_doc <format> <object id> [git -C dir]
 # Checks a blob straight from the object store. Returns 2 when the blob
 # cannot be read, 1 when it is not a SOPS document.
+#
+# A blob with a NUL byte is never one (audit A-12). sops writes none,
+# and the clean filter refuses content that has any. Above all, the awk
+# of macOS ends a line at a NUL byte and never looks at the rest of it:
+# a complete SOPS document followed by "\0DB_PASSWORD=hunter2" would
+# pass the document check there. So the NUL bytes are counted, in the
+# same single read of the blob: tee hands it to the document check
+# (fd 3) and to tr, which keeps the NUL bytes only, and wc counts them.
+# The verdict is "doc" from the check and the count from wc, in either
+# order; anything else (a read that failed, a check that failed, a count
+# that is not 0) is "not a SOPS document".
 sgf_blob_is_sops_doc() {
-	local format="$1" oid="$2" dir="${3:-.}"
+	local format="$1" oid="$2" dir="${3:-.}" verdict
 	git -C "${dir}" cat-file -e "${oid}" 2>/dev/null || return 2
 	case "${format}" in
-	json) git -C "${dir}" cat-file blob "${oid}" | sgf_json_envelope_kind >/dev/null ;;
-	dotenv) git -C "${dir}" cat-file blob "${oid}" | sgf_is_sops_dotenv ;;
+	json | dotenv) ;;
+	*) return 1 ;;
+	esac
+	verdict="$(
+		{
+			{
+				git -C "${dir}" cat-file blob "${oid}" | tee /dev/fd/3 | tr -cd '\000' | wc -c >&4
+			} 3>&1 | sgf_doc_check "${format}" >/dev/null && echo doc
+		} 4>&1
+	)" || return 1
+	case "${verdict//[[:space:]]/}" in
+	0doc | doc0) return 0 ;;
 	*) return 1 ;;
 	esac
 }
 
+# sgf_doc_check <format>   (document on stdin)
+# sgf_json_envelope_kind or sgf_is_sops_dotenv, by format.
+sgf_doc_check() {
+	case "$1" in
+	json) sgf_json_envelope_kind ;;
+	dotenv) sgf_is_sops_dotenv ;;
+	*) cat >/dev/null && return 1 ;;
+	esac
+}
+
 # sgf_blob_problem <format> <object id> [git -C dir]
-# sgf_doc_problem for a blob in the object store.
+# sgf_doc_problem for a blob in the object store. A blob with NUL bytes
+# is named as such: the document check cannot be trusted with one (see
+# sgf_blob_is_sops_doc). Only called for a blob that failed that check,
+# so reading it twice costs nothing on the common path.
 sgf_blob_problem() {
+	local nuls
+	nuls="$(git -C "${3:-.}" cat-file blob "$2" 2>/dev/null | tr -cd '\000' | wc -c)" || nuls=""
+	nuls="${nuls//[!0-9]/}"
+	if [[ -n "${nuls}" && "${nuls}" != "0" ]]; then
+		echo "it holds NUL bytes (${nuls}), which a SOPS document never has"
+		return 0
+	fi
 	git -C "${3:-.}" cat-file blob "$2" 2>/dev/null | sgf_doc_problem "$1"
 }
 

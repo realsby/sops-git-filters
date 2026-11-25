@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib.sh: the document checks, without git or sops.
+# lib.sh: the document checks, without sops.
 # shellcheck disable=SC2154  # SGF_TOOL_DIR comes from tests/run.sh
 
 ENC='ENC[AES256_GCM,data:abc+/=,iv:AAAA,tag:BBBB==,type:str]'
@@ -311,6 +311,39 @@ test_lib_counts_nul_bytes_and_keeps_the_content() {
 	is_not sgf_split_counted
 	SGF_CAPTURED=""
 	is_not sgf_split_counted
+}
+
+# A blob with a NUL byte is never a SOPS document: the awk of macOS does
+# not look past a NUL byte on its line (audit A-12). The check of a blob
+# reads it once, and still tells "cannot read" (2) from "not one" (1).
+test_lib_blob_with_a_nul_byte_is_not_a_document() {
+	load_lib
+	git init -q repo
+	cd repo || exit 1
+	local good dotenv status
+	good="$(envelope "${ENC}" | git hash-object -w --stdin)"
+	dotenv="$(printf 'A=%s\nsops_mac=%s\nsops_version=3.13.3\n' "${ENC}" "${ENC}" | git hash-object -w --stdin)"
+	is sgf_blob_is_sops_doc json "${good}"
+	is sgf_blob_is_sops_doc dotenv "${dotenv}"
+	assert_eq "$(sgf_blob_problem json "${good}")" "" "problem of a good blob"
+
+	local nul_json nul_dotenv
+	nul_json="$({
+		envelope "${ENC}"
+		printf '\000"pw": "hunter2"\n'
+	} | git hash-object -w --stdin)"
+	nul_dotenv="$({
+		printf 'A=%s\nsops_mac=%s\nsops_version=3.13.3\n' "${ENC}" "${ENC}"
+		printf 'B=%s\000PW=hunter2\n' "${ENC}"
+	} | git hash-object -w --stdin)"
+	is_not sgf_blob_is_sops_doc json "${nul_json}"
+	is_not sgf_blob_is_sops_doc dotenv "${nul_dotenv}"
+	assert_eq "$(sgf_blob_problem json "${nul_json}")" "it holds NUL bytes (1), which a SOPS document never has" "problem"
+	assert_eq "$(sgf_blob_problem dotenv "${nul_dotenv}")" "it holds NUL bytes (1), which a SOPS document never has" "problem"
+
+	status=0
+	sgf_blob_is_sops_doc json 0123456789abcdef0123456789abcdef01234567 || status=$?
+	assert_eq "${status}" "2" "status for a blob that is not there"
 }
 
 # ── The version line of a checkout, read as text ────
