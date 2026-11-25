@@ -86,9 +86,10 @@ test_rekey_follows_path_rules() {
 	git add team/shared.secret private.secret
 	git commit -q -m "two secrets, key A only"
 
+	# [/\\], not /: on Windows sops matches the path with backslashes.
 	cat >.sops.yaml <<YAML
 creation_rules:
-  - path_regex: ^team/
+  - path_regex: ^team[/\\\\]
     key_groups:
       - age:
           - ${AGE_PUB_A}

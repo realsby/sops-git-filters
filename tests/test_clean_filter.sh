@@ -626,7 +626,8 @@ test_clean_stops_when_stored_version_cannot_be_decrypted() {
 # way it gives to commit must work.
 test_clean_names_a_rule_that_does_not_list_your_key() {
 	new_repo repo
-	printf 'creation_rules:\n  - path_regex: ^prod/\n    age: %s\n  - path_regex: .*\n    age: %s\n' \
+	# [/\\], not /: on Windows sops matches the path with backslashes.
+	printf 'creation_rules:\n  - path_regex: ^prod[/\\\\]\n    age: %s\n  - path_regex: .*\n    age: %s\n' \
 		"${AGE_PUB_B}" "${AGE_PUB_A}" >.sops.yaml
 	printf 'prod/*.env filter=sops diff=sops\n' >>.gitattributes
 	git add .sops.yaml .gitattributes
