@@ -137,3 +137,26 @@ jobs:
           git commit -q -m "add .env"
           git cat-file blob HEAD:.env | grep -q 'ENC\[AES256_GCM,'
           "${tool}/encryption-guard.sh"
+
+  # Git for Windows: the scripts run in its bash (MSYS2), git and sops
+  # are Windows programs. Not a required check.
+  windows:
+    name: tests (windows-latest, Git Bash, sops 3.13.3)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      SOPS_VERSION: "3.13.3"
+      SGF_NO_SKIP: "1"
+      SGF_HOOK_RUNNER: prek
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download sops, age and prek (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "$(cygpath -u "${RUNNER_TEMP}")/tools"
+      - name: Run the tests
+        run: |
+          export PATH="$(cygpath -u "${RUNNER_TEMP}")/tools:${PATH}"
+          git --version
+          uname -a
+          tests/run.sh
