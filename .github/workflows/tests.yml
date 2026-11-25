@@ -160,3 +160,44 @@ jobs:
           git --version
           uname -a
           tests/run.sh
+
+  # Alpine, where awk, sed, grep, find and the rest are busybox: the
+  # scripts must not need GNU tools, nor the awk of macOS. Not a
+  # required check.
+  busybox:
+    name: tests (Alpine 3.24, busybox awk)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOPS_VERSION: "3.13.3"
+      # By digest: the tag is a mutable pointer.
+      ALPINE_IMAGE: alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # On the runner: the Linux binaries are static and run on Alpine.
+      - name: Download sops, age and prek (SHA-256 verified)
+        run: tests/ci-install-tools.sh "${SOPS_VERSION}" "${RUNNER_TEMP}/tools"
+      - name: Run the tests in Alpine
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/src:ro" \
+            --volume "${RUNNER_TEMP}/tools:/tools:ro" \
+            --env SGF_NO_SKIP=1 --env SGF_HOOK_RUNNER=prek \
+            "${ALPINE_IMAGE}" sh -euc '
+              apk add --no-cache --quiet bash git
+              # What this job is for: awk must be the one of busybox.
+              awk="$(readlink -f "$(command -v awk)")"
+              if [ "${awk}" != /bin/busybox ]; then
+                echo "::error::awk is ${awk}, not busybox"
+                exit 1
+              fi
+              busybox | head -1
+              # Not as root: one test needs a file that it cannot read.
+              adduser -D tester
+              cp -R /src /home/tester/sgf
+              chown -R tester /home/tester/sgf
+              su tester -c "cd /home/tester/sgf && PATH=/tools:\${PATH} bash tests/run.sh"
+            '
+
