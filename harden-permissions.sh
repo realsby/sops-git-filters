@@ -111,6 +111,11 @@ unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PA
 hardened=0
 failed=0
 previous=""
+# "no" when the first chmod did not change the mode the file shows: the
+# file system keeps no Unix modes. NTFS through Git Bash (Windows) is
+# one: chmod succeeds there and changes nothing, and saying "set to 600"
+# would be false. Asked once: one stat, not one per file.
+modes_kept=""
 
 # below_a_symlink <path> : true when a directory on <path> (relative to
 # TARGET_ROOT, as git lists it) is a symlink. Git does not follow one: it
@@ -146,13 +151,27 @@ while IFS= read -r -d '' record; do
 
 	if chmod "${mode}" "${f}" 2>/dev/null; then
 		hardened=$((hardened + 1))
+		if [[ -z "${modes_kept}" ]]; then
+			modes_kept=yes
+			# GNU and busybox stat, then BSD stat
+			shown="$(stat -c %a "${f}" 2>/dev/null || stat -f %Lp "${f}" 2>/dev/null || true)"
+			if [[ "${shown}" =~ ^[0-7]+$ ]] && ((8#${shown} != 8#${mode})); then
+				modes_kept=no
+			fi
+		fi
 	else
 		failed=$((failed + 1))
 		echo "⚠  Could not chmod ${mode} ${path}" >&2
 	fi
 done < <(git -C "${TARGET_ROOT}" ls-files -s -z -- ':(attr:filter=sops)')
 
-if [[ "${QUIET}" -eq 0 ]]; then
+if [[ "${modes_kept}" == "no" ]]; then
+	if [[ "${QUIET}" -eq 0 ]]; then
+		echo "⚠  Permissions: this file system keeps no Unix file modes (chmod ${FILE_MODE} changed nothing)." >&2
+		echo "   ${hardened} SOPS-managed file(s) can be read by whoever the folder lets read them" >&2
+		echo "   (on Windows: the NTFS permissions of the folder, which the files inherit)." >&2
+	fi
+elif [[ "${QUIET}" -eq 0 ]]; then
 	echo "Permissions: ${hardened} SOPS-managed file(s) set to ${FILE_MODE}."
 fi
 

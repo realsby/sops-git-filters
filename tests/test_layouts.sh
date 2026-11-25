@@ -515,3 +515,26 @@ test_layout_install_refuses_its_own_checkout_through_a_symlink() {
 	assert_contains "${OUT}" "inside the sops-git-filters checkout itself" "install.sh message"
 	assert_eq "$(git config --local --get filter.sops.clean || true)" "" "the tool's checkout is not configured"
 }
+
+# A file system that keeps no Unix modes (NTFS through Git Bash on
+# Windows): chmod succeeds and changes nothing. The message must not say
+# the files were set to 600. A chmod that does nothing stands in for it.
+test_perms_says_when_the_file_system_keeps_no_modes() {
+	umask 022
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	chmod 644 .env
+	stub "${PWD}/../bin" chmod <<'STUB'
+exit 0
+STUB
+	run env PATH="${PWD}/../bin:${PATH}" "${TOOL}/harden-permissions.sh"
+	assert_eq "${RC}" "0" "harden-permissions.sh exit status"
+	assert_contains "${OUT}" "this file system keeps no Unix file modes" "message"
+	assert_not_contains "${OUT}" "set to 600" "message"
+
+	needs_file_modes
+	run "${TOOL}/harden-permissions.sh"
+	assert_contains "${OUT}" "Permissions: 1 SOPS-managed file(s) set to 600." "message with a chmod that works"
+}
