@@ -96,6 +96,27 @@ sgf_ls_managed() {
 	)
 }
 
+# ── A path that leads through a symlink ───────────────────────────
+# sgf_through_symlink <repo root> <path>
+# True when <path>, relative to <repo root> as git lists it (no "." or
+# ".." parts), is a symlink itself or lies below a directory that is
+# one. Git does not follow such a path: it lists the entry as deleted or
+# as a type change and writes nothing there. A script that writes to
+# "<root>/<path>" would follow it, to wherever the link leads, out of the
+# working tree too (audit A-06, A-14). Only the parts below <repo root>
+# are looked at: the root itself may be reached any way. Builtins only,
+# one lstat per part. harden-permissions.sh has a copy of it: it runs
+# without this file.
+sgf_through_symlink() {
+	local dir="$1" rest="$2"
+	while [[ "${rest}" == */* ]]; do
+		dir="${dir}/${rest%%/*}"
+		rest="${rest#*/}"
+		[[ ! -L "${dir}" ]] || return 0
+	done
+	[[ -L "${dir}/${rest}" ]]
+}
+
 # ── One encrypted value ───────────────────────────────────────────
 # An awk function shared by the two document checks below. True when
 # the string is exactly one SOPS ciphertext value, as aes/cipher.go of

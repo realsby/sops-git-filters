@@ -447,3 +447,54 @@ test_install_does_not_write_a_file_with_nul_bytes_damaged() {
 	assert_eq "$(git hash-object --no-filters bin.secret)" "$(blob_id bin.secret)" "the binary one is left as ciphertext"
 	assert_eq "$(git status --porcelain)" "" "git status"
 }
+
+# The re-smudge pass writes the plaintext where the working copy is. A
+# working copy that is a symlink, that lies in a directory reached
+# through one, or that has a second name (a hard link) leads out of the
+# working tree: there it is left as ciphertext and reported (audit A-06,
+# A-14). Git does not follow such a path either. The permission pass
+# does not chmod through a symlinked directory.
+test_install_does_not_write_through_a_link() {
+	new_repo origin
+	mkdir secrets
+	printf 'A=1\n' >.env
+	printf 'B=2\n' >secrets/app.secret
+	printf 'C=3\n' >hard.secret
+	printf 'D=4\n' >plain.secret
+	git add .env secrets/app.secret hard.secret plain.secret
+	git commit -q -m "four secrets"
+	cd ..
+
+	fresh_clone origin clone
+	mkdir ../outside
+	# The working copy itself is a symlink to a copy of the ciphertext.
+	cp .env ../outside/target.txt
+	rm .env
+	ln -s ../outside/target.txt .env
+	# A directory on the path is a symlink.
+	mv secrets/app.secret ../outside/app.secret
+	rmdir secrets
+	ln -s ../outside secrets
+	# A second name, outside the working tree.
+	ln hard.secret ../outside/hard.txt
+	chmod 644 ../outside/target.txt ../outside/app.secret
+
+	run "${TOOL}/install.sh"
+	assert_eq "${RC}" "3" "install.sh exit status"
+	assert_contains "${OUT}" "REACHED THROUGH A LINK" "install.sh report"
+	local name
+	for name in .env secrets/app.secret hard.secret; do
+		assert_contains "${OUT}" "   - ${name}" "install.sh report"
+		assert_not_contains "${OUT}" "Re-smudged ${name}" "install.sh output"
+	done
+	assert_eq "$(git hash-object --no-filters ../outside/target.txt)" "$(blob_id .env)" "the target of the symlink"
+	assert_eq "$(git hash-object --no-filters ../outside/app.secret)" "$(blob_id secrets/app.secret)" "the file in the symlinked directory"
+	assert_eq "$(git hash-object --no-filters ../outside/hard.txt)" "$(blob_id hard.secret)" "the other name of the hard link"
+	assert_eq "$(mode_of ../outside/target.txt)" "644" "mode of the target of the symlink"
+	assert_eq "$(mode_of ../outside/app.secret)" "644" "mode of the file in the symlinked directory"
+	[[ -L .env && -L secrets ]] || fail "a symlink was replaced"
+	# The secret without a link is decrypted as before.
+	assert_contains "${OUT}" "Re-smudged plain.secret" "install.sh output"
+	assert_eq "$(cat plain.secret)" "D=4" "working copy of the secret without a link"
+	assert_eq "$(mode_of plain.secret)" "600" "mode of the secret without a link"
+}

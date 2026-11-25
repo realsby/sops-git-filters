@@ -17,6 +17,8 @@
 # ║  the owner execute bit too (0700), so git sees no mode change.   ║
 # ║  SOPS_FILE_MODE may hold owner and group bits only; a refused    ║
 # ║  value still leaves the files at 0600 (0700) and exits 1.        ║
+# ║  A path that is a symlink, or lies in a symlinked directory, is  ║
+# ║  left alone: git does not follow it either.                      ║
 # ║  It is idempotent and safe to run often —                        ║
 # ║  install.sh runs it, and the hooks it installs (post-checkout,   ║
 # ║  post-merge, post-rewrite, post-applypatch, post-commit) run it  ║
@@ -110,6 +112,22 @@ hardened=0
 failed=0
 previous=""
 
+# below_a_symlink <path> : true when a directory on <path> (relative to
+# TARGET_ROOT, as git lists it) is a symlink. Git does not follow one: it
+# lists the path as deleted, and the file found there is outside the
+# working tree, maybe one that another program reads at a mode of its
+# own (audit A-14). sgf_through_symlink of lib.sh without the last part:
+# this script runs without lib.sh.
+below_a_symlink() {
+	local dir="${TARGET_ROOT}" rest="$1"
+	while [[ "${rest}" == */* ]]; do
+		dir="${dir}/${rest%%/*}"
+		rest="${rest#*/}"
+		[[ ! -L "${dir}" ]] || return 0
+	done
+	return 1
+}
+
 while IFS= read -r -d '' record; do
 	# "<mode> <object id> <stage>" TAB <path>. An unmerged path is listed
 	# once per stage; the first entry decides.
@@ -117,9 +135,11 @@ while IFS= read -r -d '' record; do
 	[[ "${path}" != "${previous}" ]] || continue
 	previous="${path}"
 	f="${TARGET_ROOT}/${path}"
-	# Regular files only: never chmod through a symlink, and skip paths
-	# deleted or not yet checked out.
+	# Regular files only: never chmod through a symlink, in the file's
+	# place or on a directory of its path, and skip paths deleted or not
+	# yet checked out.
 	[[ -f "${f}" && ! -L "${f}" ]] || continue
+	! below_a_symlink "${path}" || continue
 
 	mode="${FILE_MODE}"
 	[[ "${record:0:6}" == "100755" ]] && mode="${EXEC_MODE}"

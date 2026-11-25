@@ -52,7 +52,8 @@
 # ║  checked out BEFORE the filters were configured still hold raw   ║
 # ║  ciphertext in the working tree — they are decrypted in place    ║
 # ║  (only when the working copy is byte-identical to the stored     ║
-# ║  blob, so local edits are never touched).                        ║
+# ║  blob, so local edits are never touched, and never through a     ║
+# ║  symlink or a hard link, which could lead out of the tree).      ║
 # ║                                                                  ║
 # ║  Then permissions are tightened: git cannot store mode 0600, so  ║
 # ║  smudged secrets land with the caller's umask (0644 by default   ║
@@ -95,8 +96,9 @@
 # ║    3  filters and hooks are in place, but files need attention:  ║
 # ║       tracked in plaintext, still stored in the other storage    ║
 # ║       format, not decrypted because sops could not (keys or      ║
-# ║       credentials missing), or holding NUL bytes. See the lists  ║
-# ║       printed at the end.                                        ║
+# ║       credentials missing) or because the working copy is        ║
+# ║       reached through a symlink or a hard link, or holding NUL   ║
+# ║       bytes. See the lists printed at the end.                   ║
 # ║                                                                  ║
 # ║  Requires:                                                       ║
 # ║    - sops >= 3.11.0 on PATH                                      ║
@@ -421,6 +423,7 @@ OTHER_FORMAT_IN_GIT=""
 STILL_ENCRYPTED=""
 STILL_ENCRYPTED_KEY_TYPES=""
 HOLDS_NUL_BYTES=""
+THROUGH_A_LINK=""
 previous_path=""
 while IFS= read -r -d '' record; do
 	# "<mode> <object id> <stage>" TAB <path> (lib.sh). An unmerged path
@@ -483,7 +486,20 @@ while IFS= read -r -d '' record; do
 	worktree_sha=$(git hash-object --no-filters -- "${f}")
 	[[ "${worktree_sha}" == "${index_sha}" ]] || continue
 
-	# Working copy == stored ciphertext → smudge never ran. Decrypt it.
+	# Working copy == stored ciphertext → smudge never ran. Decrypt it,
+	# but not through a link. The plaintext is written to "${f}", and that
+	# write follows a symlink in its place or on a directory of its path
+	# (a shared or a dotfiles folder, say), and reaches every other name
+	# of a hard link: it would land in a file outside the working tree,
+	# where .gitignore does not reach (audit A-06, A-14). Git does not
+	# write there either (it lists such a path as deleted or as a type
+	# change). The file is left as it is and listed at the end.
+	if sgf_through_symlink "${TARGET_ROOT}" "${path}" ||
+		[[ -n "$(find "${f}" -prune -links +1 2>/dev/null)" ]]; then
+		THROUGH_A_LINK="${THROUGH_A_LINK}   - ${path}"$'\n'
+		continue
+	fi
+
 	# sops' own error is shown for the first file that fails (it says why:
 	# no key, expired session, ...); the files after it are only listed.
 	decrypt_stderr=/dev/stderr
@@ -906,6 +922,31 @@ if [[ -n "${STILL_ENCRYPTED}" ]]; then
 		sgf_credential_hint "   " ${STILL_ENCRYPTED_KEY_TYPES}
 		echo " Until then git sees those files as unchanged, and nothing is"
 		echo " encrypted a second time."
+		echo "========================================================"
+	} >&2
+	ATTENTION=1
+fi
+
+# The working copy of these files is still ciphertext too, on purpose.
+if [[ -n "${THROUGH_A_LINK}" ]]; then
+	{
+		echo ""
+		echo "========================================================"
+		echo " NOT DECRYPTED: REACHED THROUGH A LINK"
+		echo "========================================================"
+		echo ""
+		echo " The working copy of these files holds the ciphertext git holds,"
+		echo " but it is a symbolic link, lies in a directory that is one, or"
+		echo " has a second name (a hard link). The plaintext would land where"
+		echo " the link leads, maybe outside this working tree, so they were"
+		echo " left encrypted:"
+		echo ""
+		printf '%s' "${THROUGH_A_LINK}"
+		echo ""
+		echo " Git does not write through a symbolic link either: git status"
+		echo " lists such a path as deleted or as a type change. Put the file"
+		echo " itself in its place (for a hard link: a copy), or the directory"
+		echo " itself instead of the link, and re-run this script."
 		echo "========================================================"
 	} >&2
 	ATTENTION=1

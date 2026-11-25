@@ -510,3 +510,25 @@ test_lib_version_of_reads_a_bounded_piece_of_a_regular_file() {
 	assert_eq "$(sgf_version_of evil.sh)" "" "a version line that is no version"
 	[[ ! -e PWNED ]] || fail "the version line was executed"
 }
+
+# A symlink anywhere below the root, in a directory's place or in the
+# file's, is found; one above the root is not looked at (audit A-14).
+test_lib_through_symlink() {
+	load_lib
+	mkdir -p root/a/b elsewhere/b
+	: >root/a/b/file
+	: >root/top
+	: >elsewhere/b/file
+	ln -s ../elsewhere root/linked-dir
+	ln -s ../elsewhere/b/file root/a/linked-file
+	ln -s root via-link
+	is_not sgf_through_symlink root a/b/file
+	is_not sgf_through_symlink root top
+	is_not sgf_through_symlink root a/missing/file
+	is sgf_through_symlink root linked-dir/b/file
+	is sgf_through_symlink root linked-dir
+	is sgf_through_symlink root a/linked-file
+	is_not sgf_through_symlink via-link a/b/file
+	is sgf_through_symlink via-link linked-dir/b/file
+	is sgf_through_symlink "${PWD}/root" 'linked-dir/b/file'
+}
