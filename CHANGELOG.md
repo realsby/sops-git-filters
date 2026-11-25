@@ -2,7 +2,11 @@
 
 Every release is a tag. The same notes are on the [releases page](https://github.com/realsby/sops-git-filters/releases). After an update, run `install.sh` again in every clone.
 
-## Unreleased
+## v3.2.0 — 2026-11-25
+
+[All changes since v3.1.0](https://github.com/realsby/sops-git-filters/compare/v3.1.0...v3.2.0)
+
+After the update, run `install.sh` again in every clone: git runs the copy under the git directory, and that copy stays at v3.1.0 until `install.sh` replaces it. The clean filter, the smudge filter, the merge driver and the hooks say so on stderr until then.
 
 ### Security
 
