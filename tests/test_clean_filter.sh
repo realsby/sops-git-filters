@@ -557,6 +557,39 @@ test_clean_empty_file_keeps_its_blob() {
 	assert_eq "$(git status --porcelain)" "" "git status"
 }
 
+# ":2:prod.secret" is stage 2 of prod.secret to git, not the index entry
+# of a file named "2:prod.secret". The filter must find the version git
+# holds of the file it was given: else a staged new file looks new at
+# every git status, and a staged edit is compared with HEAD's version and
+# re-encrypted, so the file never stops showing as modified.
+test_clean_path_that_looks_like_an_index_stage() {
+	local file id
+	new_repo repo
+	printf '1:x filter=sops diff=sops\n' >>.gitattributes
+	git add .gitattributes
+	git commit -q -m "1:x is a secret"
+	for file in '2:prod.secret' '1:x'; do
+		printf 'A=1\n' >"${file}"
+		git add -- "${file}"
+		id="$(blob_id "${file}")"
+		touch "${file}"
+		git add -- "${file}"
+		assert_eq "$(blob_id "${file}")" "${id}" "blob of the new file after touch + add (${file})"
+		assert_eq "$(git status --porcelain -- "${file}" 2>/dev/null)" "A  ${file}" "git status of the new file (${file})"
+		git commit -q -m "add ${file}"
+
+		printf 'A=2\n' >"${file}"
+		git add -- "${file}"
+		id="$(blob_id "${file}")"
+		assert_eq "$(plain_of_stored "${file}")" "A=2" "plaintext of the staged blob (${file})"
+		touch "${file}"
+		git add -- "${file}"
+		assert_eq "$(blob_id "${file}")" "${id}" "blob of the staged edit after touch + add (${file})"
+		assert_eq "$(git status --porcelain -- "${file}" 2>/dev/null)" "M  ${file}" "git status of the staged edit (${file})"
+		git commit -q -m "edit ${file}"
+	done
+}
+
 # ── Content with NUL bytes (audit F9) ────
 # File content passes through shell variables, and a shell variable cannot
 # hold a NUL byte. Before, `git add` exited 0 and stored the file without

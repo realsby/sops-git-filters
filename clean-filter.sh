@@ -145,7 +145,7 @@ esac
 OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
 # ── The version git holds ────
-# The INDEX version first (`:path`), then HEAD. Why index over HEAD?
+# The INDEX version first (`:0:path`), then HEAD. Why index over HEAD?
 # During pre-commit's stash/unstash cycle:
 #   1. You stage the file (index has encrypted blob A)
 #   2. Pre-commit stashes unstaged changes, clean filter runs again
@@ -154,7 +154,14 @@ OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 #   4. New-IV blob ≠ stash blob → `git stash pop` sees a conflict
 # By comparing against the index we reuse blob A → stash pop is clean.
 # Empty when the file is new (in neither).
-STORED_ID="$(git rev-parse -q --verify ":${FILENAME}" 2>/dev/null ||
+#
+# ":0:path", not ":path": git reads ":2:prod.secret" as stage 2 of
+# prod.secret, so a file named "2:prod.secret" was never found in the
+# index (its new version looked new at every git status, an edit was
+# compared with HEAD's version and re-encrypted each time). Stage 0 is
+# the entry of a path outside a merge conflict, the one git status and
+# git add compare with. "HEAD:path" has no such reading.
+STORED_ID="$(git rev-parse -q --verify ":0:${FILENAME}" 2>/dev/null ||
 	git rev-parse -q --verify "HEAD:${FILENAME}" 2>/dev/null || true)"
 
 # ── Input that already is ciphertext ────
