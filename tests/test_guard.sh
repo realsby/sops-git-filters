@@ -146,6 +146,23 @@ test_guard_blocks_plaintext_tracked_earlier() {
 	assert_contains "${OUT}" "- .env" "guard names the file"
 }
 
+# The commit carries the .gitattributes of the index. A local edit that
+# takes filter=sops off a path, and is not staged, also keeps `git add`
+# from running the filter: the guard must not take its cue from that
+# same unstaged file (audit A-11).
+test_guard_reads_the_attributes_of_the_index() {
+	new_repo repo
+	echo '.env -filter' >>.gitattributes
+	printf 'PW=hunter2\n' >.env
+	git add .env
+	assert_contains "$(stored .env)" "hunter2" "test fixture: plaintext in the index"
+	assert_contains "$(git show :.gitattributes)" ".env filter=sops" "test fixture: the index marks .env"
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "- .env" "guard names the file"
+	assert_not_contains "${OUT}" "hunter2" "guard output"
+}
+
 # If the guard cannot read the attributes it must not wave the commit through.
 test_guard_fails_closed_when_check_attr_fails() {
 	unfiltered_repo

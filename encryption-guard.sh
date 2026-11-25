@@ -12,7 +12,9 @@
 # ║  What is checked: EVERY entry in the index whose filter          ║
 # ║  attribute is "sops", not only the paths staged for this         ║
 # ║  commit. A secret that was committed in plaintext long ago is    ║
-# ║  reported until it is fixed.                                     ║
+# ║  reported until it is fixed. The attribute is read from the      ║
+# ║  .gitattributes files in the index, the ones the commit          ║
+# ║  carries, not from the working tree.                             ║
 # ║                                                                  ║
 # ║  How: each blob is read by object id and must be a completely    ║
 # ║  encrypted SOPS document in the repository's storage format      ║
@@ -187,10 +189,17 @@ check_index() {
 	done
 	[[ "${n}" -gt 0 ]] || return 0
 
+	# --cached: the attributes come from the .gitattributes files in the
+	# index, the ones this commit carries. Without it git reads the
+	# working tree, and a local edit that is not staged (".env -filter",
+	# left from debugging) would decide which blobs are checked. That
+	# same edit keeps `git add` from running the filter, so the plaintext
+	# it stages would pass unseen (audit A-11).
+	#
 	# pipefail: a failing check-attr fails this pipeline even when
 	# check_entries saw nothing wrong in the part it received.
 	printf '%s\0' "${INDEX_PATHS[@]}" |
-		git -C "${PROJECT_ROOT}" check-attr --stdin -z filter |
+		git -C "${PROJECT_ROOT}" check-attr --cached --stdin -z filter |
 		check_entries
 }
 
