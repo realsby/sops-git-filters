@@ -150,22 +150,12 @@ jobs:
       SGF_HOOK_RUNNER: prek
       # The tests of what NTFS through Git Bash cannot have skip
       # themselves, and may here: Unix file modes (chmod 600 changes
-      # nothing; a file of mode 000 is readable; so the clean filter
-      # keeps no cache, whose directory must be closed to others),
-      # symbolic links (ln -s copies), file names with : \ * ? " | or a
-      # control character.
+      # nothing; a file of mode 000 is readable), symbolic links (ln -s
+      # copies), file names with : \ * ? " | or a control character.
       SGF_ALLOW_SKIP: >-
-        test_clean_cache_counts_sops_calls
-        test_clean_cache_holds_no_plaintext
-        test_clean_cache_is_bypassed_by_force_reencrypt
-        test_clean_cache_follows_a_change_of_sops_yaml
-        test_clean_cache_keeps_no_encryption_for_rules_changed_while_sops_ran
-        test_clean_cache_ignores_entries_it_cannot_trust
         test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink
-        test_clean_cache_two_commands_at_once
         test_clean_cache_without_a_sha256_tool
         test_lib_cache_private
-        test_lib_cache_sweeps_old_and_surplus_entries
         test_rekey_handles_awkward_names
         test_perms_install_and_checkout_leave_0600
         test_perms_executable_secret_keeps_its_execute_bit
