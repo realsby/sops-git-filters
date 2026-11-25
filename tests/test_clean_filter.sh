@@ -214,6 +214,160 @@ test_clean_encrypts_an_envelope_with_plaintext_added() {
 	assert_contains "$(plain_of_stored two.secret)" '"password": "hunter2"' "decrypted blob of the edited envelope"
 }
 
+# ── A SOPS document that is not the version git holds (audit A-13) ────
+# Only the ciphertext git already holds (index or HEAD) is stored as it is.
+# Before, any SOPS document was: one copied from another project, or a
+# forged one, was committed with exit status 0, and the next checkout of
+# every teammate stopped half-way.
+
+# encrypt_for <json|dotenv> <age recipient>[,<recipient>...]   (plaintext on
+# stdin) : a SOPS document for exactly those keys, whatever .sops.yaml says
+encrypt_for() {
+	local type=binary out=json
+	if [[ "$1" == "dotenv" ]]; then
+		type=dotenv
+		out=dotenv
+	fi
+	sops encrypt --age "$2" --input-type "${type}" --output-type "${out}" --filename-override any.secret /dev/stdin
+}
+
+# A file copied from another project, encrypted for that project's key
+# only (key B stands in for it). .sops.yaml names key A; the user holds A.
+test_clean_refuses_a_sops_document_for_other_keys() {
+	local format id
+	for format in json dotenv; do
+		new_repo "${format}" "${format}"
+		printf 'A=1\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+		id="$(blob_id .env)"
+
+		printf 'A=from-another-project\n' | encrypt_for "${format}" "${AGE_PUB_B}" >../foreign
+		cp ../foreign .env
+		run git add .env
+		assert_ne "${RC}" "0" "git add exit status (${format})"
+		assert_contains "${OUT}" "does not decrypt with your keys" "filter message (${format})"
+		assert_contains "${OUT}" "another project" "filter message names the likely causes (${format})"
+		assert_eq "$(blob_id .env)" "${id}" "index blob (${format})"
+		run git commit -q -am "commit the copy"
+		assert_ne "${RC}" "0" "git commit -a exit status (${format})"
+		assert_eq "$(git rev-parse HEAD:.env)" "${id}" "committed blob (${format})"
+
+		# A new file: nothing to compare with, the same refusal.
+		cp ../foreign new.secret
+		run git add new.secret
+		assert_ne "${RC}" "0" "git add of a new file (${format})"
+		assert_eq "$(git ls-files -s -- new.secret)" "" "nothing staged (${format})"
+		cd ..
+	done
+}
+
+# A real document with its ciphertext replaced by hand: the structure is
+# right, the MAC no longer matches. Only a decrypt notices.
+# TXlQYXNzd29yZDEy is "MyPassword12" in base64.
+test_clean_refuses_a_forged_sops_document() {
+	local format id blob data
+	for format in json dotenv; do
+		new_repo "${format}" "${format}"
+		printf 'A=1\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+		id="$(blob_id .env)"
+
+		blob="$(stored .env)"
+		data="$(printf '%s\n' "${blob}" | grep -o 'ENC\[AES256_GCM,data:[^,]*' | head -1)"
+		data="${data#ENC[AES256_GCM,data:}"
+		printf '%s\n' "${blob}" | swap "data:${data}," "data:TXlQYXNzd29yZDEy," >.env
+		assert_contains "$(cat .env)" "data:TXlQYXNzd29yZDEy," "test fixture (${format})"
+		run git add .env
+		assert_ne "${RC}" "0" "git add exit status (${format})"
+		assert_contains "${OUT}" "forged" "filter message names the likely causes (${format})"
+		assert_not_contains "${OUT}" "MyPassword" "filter message (${format})"
+		assert_eq "$(blob_id .env)" "${id}" "index blob (${format})"
+		cd ..
+	done
+}
+
+# The case the shortcut is for: install.sh ran without the key, and the
+# working copy still holds the ciphertext git holds. It is stored as it
+# is, without the key and without a call to sops (with a KMS key, every
+# call is a request to the key service). The dotenv files are refreshed
+# by git while install.sh works on the others: that must work too.
+test_clean_stores_the_held_ciphertext_without_a_key() {
+	local format id out
+	stub fakebin sops <<'STUB'
+printf '%s\n' "$*" >>"${SOPS_CALLS}"
+exec "${REAL}" "$@"
+STUB
+	for format in json dotenv; do
+		new_repo "origin-${format}" "${format}"
+		printf 'A=1\n' >.env
+		printf 'B=2\n' >b.secret
+		git add .env b.secret
+		git commit -q -m "two secrets"
+		cd ..
+		fresh_clone "origin-${format}" "clone-${format}"
+		run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+		assert_eq "${RC}" "3" "install.sh without the key (${format})"
+		id="$(blob_id .env)"
+
+		: >../calls
+		touch .env b.secret
+		out="$(env SOPS_AGE_KEY_FILE="${NO_KEY}" SOPS_CALLS="${PWD}/../calls" PATH="${PWD}/../fakebin:${PATH}" \
+			git status --porcelain 2>/dev/null)"
+		assert_eq "${out}" "" "git status without the key (${format})"
+		echo note >note.txt
+		touch .env b.secret
+		run env SOPS_AGE_KEY_FILE="${NO_KEY}" SOPS_CALLS="${PWD}/../calls" PATH="${PWD}/../fakebin:${PATH}" \
+			git add -A
+		assert_eq "${RC}" "0" "git add -A without the key (${format})"
+		assert_contains "${OUT}" "holds the ciphertext git holds" "the filter saw the ciphertext (${format})"
+		assert_eq "$(blob_id .env)" "${id}" "blob of .env (${format})"
+		assert_contains "$(cat .env)" "ENC[AES256_GCM,data:" "working copy (${format})"
+		assert_not_contains "$(cat ../calls)" "decrypt" "calls to sops (${format})"
+		cd ..
+	done
+}
+
+# A SOPS document that is not the version git holds, but that decrypts
+# with the user's keys, is content like any other: its plaintext is
+# compared with the stored version and, when it differs, encrypted for
+# the recipients of .sops.yaml (audit A-13). Here: copies encrypted for
+# keys A and B while .sops.yaml names A only, and an old version taken
+# from history as ciphertext.
+test_clean_reencrypts_a_sops_document_it_can_decrypt() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	local id
+	id="$(blob_id .env)"
+
+	# The same plaintext for other keys: the stored blob is kept.
+	printf 'A=1\n' | encrypt_for json "${AGE_PUB_A},${AGE_PUB_B}" >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add of the same content for other keys"
+	assert_eq "$(blob_id .env)" "${id}" "the stored blob is reused"
+	assert_eq "$(git status --porcelain)" "" "git status"
+
+	# Other content: encrypted for the recipients of .sops.yaml only.
+	printf 'A=2\n' | encrypt_for json "${AGE_PUB_A},${AGE_PUB_B}" >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add of new content for other keys"
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+	assert_contains "$(stored .env)" "${AGE_PUB_A}" "the recipient .sops.yaml names"
+	assert_not_contains "$(stored .env)" "${AGE_PUB_B}" "a recipient .sops.yaml does not name"
+	git commit -q -m "A=2"
+
+	# An old version, taken from history as ciphertext.
+	git cat-file blob HEAD~1:.env >.env
+	run git add .env
+	assert_eq "${RC}" "0" "git add of an old version"
+	assert_eq "$(plain_of_stored .env)" "A=1" "plaintext of the staged blob"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard"
+}
+
 # Plaintext in the working copy, but the stored version cannot be decrypted
 # (key missing). The filter must stop, not re-encrypt an unchanged file.
 test_clean_stops_when_stored_version_cannot_be_decrypted() {

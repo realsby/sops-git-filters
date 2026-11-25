@@ -65,15 +65,6 @@ test_guard_blocks_envelope_with_plaintext_data() {
 	assert_ne "${RC}" "0" "guard exit status"
 }
 
-# swap <old> <new>   (text on stdin) : the first <old> becomes <new>, as text
-swap() {
-	awk -v old="$1" -v new="$2" '!done && (i = index($0, old)) {
-		$0 = substr($0, 1, i - 1) new substr($0, i + length(old))
-		done = 1
-	}
-	{ print }'
-}
-
 # A hand-made ENC[...] value in a real document (audit A-16): a password
 # in the place of the ciphertext, or after a real value. Every value the
 # check reads is tried: "data" and "mac" (json); a value, a comment and

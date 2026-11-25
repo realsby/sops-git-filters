@@ -127,6 +127,15 @@ plain_of_stored() {
 	fi
 }
 
+# swap <old> <new>   (text on stdin) : the first <old> becomes <new>, as text
+swap() {
+	awk -v old="$1" -v new="$2" '!done && (i = index($0, old)) {
+		$0 = substr($0, 1, i - 1) new substr($0, i + length(old))
+		done = 1
+	}
+	{ print }'
+}
+
 blob_id() { # <path> : object id of the index entry
 	git ls-files -s -- "$1" | awk '{print $2}'
 }

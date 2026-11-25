@@ -142,9 +142,9 @@ function is_token(s,    f) {
 # ── The metadata sops writes ──────────────────────────────────────
 # A document is accepted only when its metadata holds nothing but the
 # names sops itself writes. Anything else next to them could be a
-# secret in clear, and both the guard and the clean filter (which
-# stores a working copy that already is a SOPS document unchanged)
-# rely on this check.
+# secret in clear, and both the guard and the clean filter (which tells
+# a working copy that holds ciphertext from plaintext with it) rely on
+# this check.
 #
 # The names come from stores/stores.go of sops. No release from 3.5.0 to
 # 3.13.3 writes a name that is not listed here, so documents written

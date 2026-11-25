@@ -30,9 +30,12 @@
 # ║  SOPS_FILTER_FORCE_REENCRYPT=1 skips the comparison on purpose   ║
 # ║  (storage-format change, fresh data keys).                       ║
 # ║                                                                  ║
-# ║  The filter is also idempotent: input that already is a SOPS     ║
-# ║  document (a working copy that still holds ciphertext) is        ║
-# ║  stored unchanged, never encrypted a second time.                ║
+# ║  The filter is also idempotent: input that is the ciphertext     ║
+# ║  git holds (a working copy that was never decrypted) is stored   ║
+# ║  unchanged, never encrypted a second time. Any other SOPS        ║
+# ║  document must decrypt with your keys first; its plaintext is    ║
+# ║  then handled like any edit. One that does not decrypt (another  ║
+# ║  project's keys, a forged one) is refused.                       ║
 # ║                                                                  ║
 # ║  Failure policy: this filter FAILS HARD. If sops is missing or   ║
 # ║  .sops.yaml is absent, it exits non-zero and (combined with      ║
@@ -82,14 +85,16 @@ INPUT="${SGF_CONTENT}"
 # A shell variable cannot hold a NUL byte, so INPUT has already lost
 # them: encrypting it would store a damaged file with exit status 0, and
 # the next checkout would replace the good working copy with it.
-if [[ "${SGF_NUL_COUNT}" != "0" ]]; then
-	echo "ERROR: ${FILENAME} holds NUL bytes (${SGF_NUL_COUNT}) — refusing to stage it." >&2
+# refuse_nul_bytes <what holds them> : say why, and stop
+refuse_nul_bytes() {
+	echo "ERROR: $1 holds NUL bytes (${SGF_NUL_COUNT}) — refusing to stage it." >&2
 	echo "       sops-git-filters handles text files only: a binary file (a keystore, a DER" >&2
 	echo "       certificate) or UTF-16 text would be stored damaged. Store a text form" >&2
 	echo "       instead (base64 or PEM; UTF-8 for text), or keep the file out of the sops" >&2
 	echo "       filter and encrypt it with sops by hand." >&2
 	exit 1
-fi
+}
+[[ "${SGF_NUL_COUNT}" == "0" ]] || refuse_nul_bytes "${FILENAME}"
 
 # Git runs clean filters from the top level of the working tree, but
 # resolve the root explicitly so this also works when invoked by hand.
@@ -133,18 +138,84 @@ dotenv)
 esac
 OTHER_FORMAT="$(sgf_other_format "${STORE_FORMAT}")"
 
+# ── The version git holds ────
+# The INDEX version first (`:path`), then HEAD. Why index over HEAD?
+# During pre-commit's stash/unstash cycle:
+#   1. You stage the file (index has encrypted blob A)
+#   2. Pre-commit stashes unstaged changes, clean filter runs again
+#   3. Comparing against HEAD (old blob) → plaintext differs →
+#      re-encrypt with a new IV
+#   4. New-IV blob ≠ stash blob → `git stash pop` sees a conflict
+# By comparing against the index we reuse blob A → stash pop is clean.
+# Empty when the file is new (in neither).
+STORED_ID="$(git rev-parse -q --verify ":${FILENAME}" 2>/dev/null ||
+	git rev-parse -q --verify "HEAD:${FILENAME}" 2>/dev/null || true)"
+
 # ── Input that already is ciphertext ────
 # The working copy can hold a SOPS document instead of plaintext: a clone
 # made before install.sh ran, or one where install.sh could not decrypt
 # (keys or credentials missing). Encrypting that again would nest
-# ciphertext in ciphertext. Store it unchanged instead: git then sees no
-# change, and install.sh can still decrypt the working copy later.
+# ciphertext in ciphertext.
+#
+# That copy is the very blob git holds, so it is stored unchanged when its
+# bytes are those of the stored version (the one the comparison below
+# uses: the index version, else HEAD's): git sees no change, no key is
+# needed (no call to sops, which with a KMS key is a request to the key
+# service), and install.sh can still decrypt the working copy later.
+# Equal to HEAD's version while the index holds another is not enough:
+# after rekey.sh, say, the old ciphertext in the working copy would then
+# look like an edit that undoes the re-key. The decrypt below finds that
+# its plaintext is the same.
+#
+# Any other SOPS document is not taken on trust (audit A-13). It may have
+# been copied from another project, encrypted for keys that nobody listed
+# in .sops.yaml holds, or have been forged: its structure is right, but
+# only a decrypt checks the MAC. Stored as it is, it went in with exit
+# status 0 and stopped the next checkout of every teammate half-way. So
+# it must decrypt with your keys, and its plaintext then goes the way of
+# any edit below: compared with the stored version (unchanged → the
+# stored blob is reused), else encrypted for the recipients .sops.yaml
+# names. Its own recipients are not kept: .sops.yaml alone decides who
+# can read a secret of this repository (see the next sections).
 if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
-	echo "sops clean filter: ${FILENAME} already is a SOPS document (the working copy holds ciphertext) — storing it unchanged" >&2
-	printf '%s' "${INPUT}"
-	exit 0
-fi
-if sgf_is_sops_doc "${OTHER_FORMAT}" "${INPUT}"; then
+	# --stdin: no filter runs (that would be this one again).
+	input_id="$(printf '%s' "${INPUT}" | git hash-object --stdin 2>/dev/null || true)"
+	if [[ -n "${input_id}" && "${input_id}" == "${STORED_ID}" ]]; then
+		echo "sops clean filter: ${FILENAME} holds the ciphertext git holds (the working copy was never decrypted) — storing it unchanged" >&2
+		printf '%s' "${INPUT}"
+		exit 0
+	fi
+
+	echo "sops clean filter: ${FILENAME} is a SOPS document, but not the version git holds — decrypting it to check it" >&2
+	# sops' stderr is left alone: if this fails, its message is the reason.
+	# (pipefail: the status of the pipeline is that of sops.)
+	if ! SGF_CAPTURED=$(printf '%s' "${INPUT}" | sops decrypt \
+		"${DECRYPT_ARGS[@]}" \
+		--filename-override "${FILENAME}" \
+		/dev/stdin | sgf_cat_counting_nuls) || ! sgf_split_counted; then
+		echo "ERROR: ${FILENAME} is a SOPS document that does not decrypt with your keys, and not" >&2
+		echo "       the version git holds (sops' message is above). Refusing to stage it: nobody" >&2
+		echo "       could check it, and it would stop the checkout of everyone who cannot decrypt it." >&2
+		echo "       Likely causes:" >&2
+		echo "         - it was copied from another project, encrypted for that project's keys" >&2
+		echo "         - it was edited or forged by hand: its MAC or a value no longer matches" >&2
+		echo "         - your keys or credentials are not available right now:" >&2
+		# shellcheck disable=SC2046  # one word per key type
+		sgf_credential_hint "             " $(printf '%s' "${INPUT}" | sgf_doc_key_types) >&2
+		echo "       To store its content: decrypt it where its keys are (in its own project) and" >&2
+		echo "       save the plaintext here in its place; git add encrypts it for .sops.yaml." >&2
+		if [[ -n "${STORED_ID}" ]]; then
+			echo "       To get back the version git holds:  rm ${FILENAME} && git checkout -- ${FILENAME}" >&2
+		fi
+		# SOPS_FILTER_FORCE_REENCRYPT is no way out here: re-encrypting
+		# needs the plaintext, and that needs this decrypt.
+		exit 1
+	fi
+	[[ "${SGF_NUL_COUNT}" == "0" ]] || refuse_nul_bytes "the decrypted content of ${FILENAME}"
+	INPUT="${SGF_CONTENT}"
+	echo "sops clean filter: it decrypts with your keys; its content is stored like any edit (recipients from .sops.yaml)." >&2
+	echo "  The working copy keeps that ciphertext. For the plaintext there: rm ${FILENAME} && git checkout -- ${FILENAME}" >&2
+elif sgf_is_sops_doc "${OTHER_FORMAT}" "${INPUT}"; then
 	echo "ERROR: the working copy of ${FILENAME} is a SOPS document in the ${OTHER_FORMAT} format," >&2
 	echo "       but .sops-filter.conf says ${STORE_FORMAT}. Refusing to encrypt ciphertext again." >&2
 	echo "       Decrypt the working copy first, then stage it." >&2
@@ -209,10 +280,8 @@ encrypt_input() {
 }
 
 # ── New file: no previous version in the index or HEAD ────────
-# git cat-file -e checks if the object exists without reading it.
 # For new files there is nothing to compare — just encrypt and exit.
-if ! git cat-file -e ":${FILENAME}" 2>/dev/null &&
-	! git cat-file -e "HEAD:${FILENAME}" 2>/dev/null; then
+if [[ -z "${STORED_ID}" ]]; then
 	echo "sops clean filter: encrypting new file ${FILENAME}" >&2
 	encrypt_input
 	exit 0
@@ -228,18 +297,8 @@ if [[ "${SOPS_FILTER_FORCE_REENCRYPT:-}" == "1" ]]; then
 fi
 
 # ── Existing file: compare before re-encrypting ────────
-
-# Compare against the INDEX version first (`:path`), then fall back to
-# HEAD. Why index over HEAD? During pre-commit's stash/unstash cycle:
-#   1. You stage the file (index has encrypted blob A)
-#   2. Pre-commit stashes unstaged changes, clean filter runs again
-#   3. Comparing against HEAD (old blob) → plaintext differs →
-#      re-encrypt with a new IV
-#   4. New-IV blob ≠ stash blob → `git stash pop` sees a conflict
-# By comparing against the index we reuse blob A → stash pop is clean.
-EXISTING_ENCRYPTED=$( (git cat-file -p ":${FILENAME}" 2>/dev/null ||
-	git cat-file -p "HEAD:${FILENAME}" 2>/dev/null ||
-	true) && printf x)
+# The stored version (index, else HEAD: see "The version git holds").
+EXISTING_ENCRYPTED=$( (git cat-file -p "${STORED_ID}" 2>/dev/null || true) && printf x)
 EXISTING_ENCRYPTED="${EXISTING_ENCRYPTED%x}"
 
 # ── The stored version is not a SOPS document in this format ────

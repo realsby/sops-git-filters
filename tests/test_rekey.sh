@@ -187,3 +187,27 @@ test_rekey_fails_when_the_index_cannot_be_written() {
 	assert_contains "${OUT}" "re-keyed  .env" "rekey.sh output"
 	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
 }
+
+# rekey.sh while the working copy still holds the old ciphertext (install.sh
+# ran without the key). That copy is a SOPS document, but no longer the
+# version git holds: git status must not take it for an edit that undoes
+# the re-key. It decrypts to the same plaintext, so the re-keyed blob
+# stays (audit A-13).
+test_rekey_with_the_old_ciphertext_in_the_working_copy() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	cd ..
+	fresh_clone origin clone
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+	assert_contains "$(cat .env)" 'ENC[AES256_GCM' "working copy still holds ciphertext"
+
+	write_sops_yaml "${AGE_PUB_B}"
+	run "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "0" "rekey.sh exit status"
+	assert_eq "$(git status --porcelain -- .env)" "M  .env" "git status of .env"
+	git add -A
+	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob after git add -A"
+	assert_eq "$(stored .env | decrypt_as_b)" "A=1" "key B decrypts the staged blob"
+}
