@@ -954,7 +954,12 @@ if [[ -n "${STILL_ENCRYPTED}" ]]; then
 		# shellcheck disable=SC2086  # one word per key type
 		sgf_credential_hint "   " ${STILL_ENCRYPTED_KEY_TYPES}
 		echo " Until then git sees those files as unchanged, and nothing is"
-		echo " encrypted a second time."
+		echo " encrypted a second time, as long as each holds what the index"
+		echo " holds. A command that moves only the index (git reset HEAD~1,"
+		echo " git reset <commit> -- <file>, git restore --staged) ends that:"
+		echo " git status, git add and git commit -a then fail on such a file"
+		echo " until your keys are back. Without them, put the version git holds"
+		echo " in its place with the git cat-file line that error prints."
 		echo "========================================================"
 	} >&2
 	ATTENTION=1
