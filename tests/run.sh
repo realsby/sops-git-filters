@@ -16,6 +16,10 @@
 # ║    SGF_KEEP=1           keep the temporary directory             ║
 # ║    SGF_NO_SKIP=1        a test that skips itself fails the run   ║
 # ║                         (CI: nothing may go untested unnoticed)  ║
+# ║    SGF_ALLOW_SKIP="test_a test_b"                                ║
+# ║                         except these: they may skip all the same ║
+# ║                         (CI: a feature the platform does not     ║
+# ║                         have, named one by one)                  ║
 # ║    SGF_HOOK_RUNNER=prek the hook framework for the pre-commit    ║
 # ║                         tests (default: pre-commit, then prek)   ║
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -66,6 +70,7 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		SGF_HOOK_RUNNER="${SGF_HOOK_RUNNER:-}" \
 		bash "${HERE}/run.sh" "$@"
 fi
+		SGF_ALLOW_SKIP="${SGF_ALLOW_SKIP:-}" \
 
 # ── Inner call: run the tests ────
 # shellcheck source=tests/lib.sh
@@ -90,6 +95,15 @@ done
 filter="${1:-}"
 passed=0
 failed=0
+# skip_allowed <test name> : true when that test may skip itself
+skip_allowed() {
+	[[ "${SGF_NO_SKIP:-}" != "1" ]] && return 0
+	case " ${SGF_ALLOW_SKIP//[[:space:]]/ } " in
+	*" $1 "*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 skipped=0
 failed_names=""
 
@@ -116,13 +130,13 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
 	if [[ "${status}" -eq 0 ]]; then
 		passed=$((passed + 1))
 		echo "ok   - ${name}"
-	elif [[ "${status}" -eq 77 && "${SGF_NO_SKIP:-}" != "1" ]]; then
+	elif [[ "${status}" -eq 77 ]] && skip_allowed "${name}"; then
 		skipped=$((skipped + 1))
 		echo "skip - ${name} ($(tail -1 "${dir}.log"))"
 	elif [[ "${status}" -eq 77 ]]; then
 		failed=$((failed + 1))
 		failed_names="${failed_names} ${name}"
-		echo "FAIL - ${name} (it skipped itself, and SGF_NO_SKIP=1 makes that a failure: $(tail -1 "${dir}.log"))"
+		echo "FAIL - ${name} (it skipped itself, and SGF_NO_SKIP=1 makes that a failure unless SGF_ALLOW_SKIP names it: $(tail -1 "${dir}.log"))"
 	else
 		failed=$((failed + 1))
 		failed_names="${failed_names} ${name}"
