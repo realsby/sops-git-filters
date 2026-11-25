@@ -1047,6 +1047,56 @@ test_clean_cache_follows_a_change_of_sops_yaml() {
 	assert_eq "$(stored .env | SOPS_AGE_KEY_FILE="${AGE_KEY_B}" plain_of_stored_blob)" "A=2" "key B decrypts the staged blob"
 }
 
+# rewriting_sops : counting_sops, and on encrypt it first copies the file
+# NEW_RULES names (when set) over .sops.yaml: an editor or a checkout
+# that changes the rules while sops waits for a key service.
+rewriting_sops() {
+	stub fakebin sops <<'STUB'
+printf '%s\n' "$1" >>"${CALL_LOG}"
+if [[ "$1" == "encrypt" && -n "${NEW_RULES:-}" ]]; then
+	cp "${NEW_RULES}" .sops.yaml
+fi
+exec "${REAL}" "$@"
+STUB
+}
+
+# .sops.yaml changed while sops encrypted: sops read the new rules, the
+# question holds the old ones. That encryption is not remembered, so a
+# run with the old rules (in another linked worktree, say) does not get
+# a blob for the recipients of the new ones.
+test_clean_cache_keeps_no_encryption_for_rules_changed_while_sops_ran() {
+	local entries
+	rewriting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	cp .sops.yaml ../old-rules.yaml
+	write_sops_yaml "${AGE_PUB_B}"
+	cp .sops.yaml ../new-rules.yaml
+	cp ../old-rules.yaml .sops.yaml
+	entries="$(ls "$(cache_dir)")"
+
+	calls env NEW_RULES="${PWD}/../new-rules.yaml" git status --porcelain -- .env
+	assert_eq "${OUT}" " M .env" "git status"
+	assert_eq "${CALLS}" "1 1" "git status"
+	assert_eq "$(cat .sops.yaml)" "$(cat ../new-rules.yaml)" "test fixture: the rules changed during the encryption"
+	assert_contains "${ERR}" "added: age ${AGE_PUB_B}" "test fixture: sops encrypted for the new rules"
+	assert_eq "$(ls "$(cache_dir)")" "${entries}" "entries after that git status"
+
+	# The old rules again: a new encryption, for them, remembered as usual.
+	cp ../old-rules.yaml .sops.yaml
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with the old rules"
+	assert_not_contains "${ERR}" "reusing its encryption" "git status with the old rules"
+	calls git add .env
+	assert_eq "${CALLS}" "0 0" "git add after that git status"
+	assert_not_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
+	assert_contains "$(stored .env)" "${AGE_PUB_A}" "recipient A in the staged blob"
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+}
+
 # count_files <path...> : how many of the paths exist (for a glob that
 # may match nothing)
 count_files() {

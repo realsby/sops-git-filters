@@ -404,7 +404,9 @@ is_complete_doc() {
 #                does not keep what the filter returns, so the filter
 #                writes it into the object store itself (ciphertext, as
 #                git add would); before it is given again, it must still
-#                be there and pass the same check as a fresh one.
+#                be there and pass the same check as a fresh one. Only
+#                written when .sops.yaml still holds the text of the
+#                question after sops returned (remember_encryption).
 #
 # Everything that decides what sops would return is part of the
 # question, so an answer given again is one this filter could have given:
@@ -473,11 +475,39 @@ remember() {
 	) >/dev/null 2>&1 || true
 }
 
+# read_sops_yaml <variable> : the whole text of .sops.yaml, byte for byte,
+# into the variable. False when the file cannot be opened, or holds a NUL
+# byte (read stops early, and succeeds, at one).
+read_sops_yaml() {
+	{
+		if IFS= read -r -d '' "$1"; then
+			return 1
+		fi
+	} 2>/dev/null <"${PROJECT_ROOT}/.sops.yaml"
+}
+
 # remember_encryption : the blob encrypt_input returned, written into the
 # object store (--stdin: without a filter), and remembered.
+#
+# Only when .sops.yaml still holds the text of the question. sops reads
+# the file for itself, after this filter did: an editor or a checkout
+# that changed it in between (while a key service was slow to answer)
+# gave this blob the recipients of other rules. This run returns it all
+# the same (that is what sops gave), but remembered under the question
+# of the old rules, it would be given again for 10 minutes to every run
+# that has them, in a linked worktree too. The other parts of the
+# question (plaintext, path, stored version, format, SOPS_* variables)
+# are this run's own and cannot change while it runs. A change undone
+# within the call to sops, every byte as before, is not seen; this run
+# returns that blob too.
+#
+# The answer "unchanged" needs no such check: the decrypt reads the keys
+# from the stored version, not from .sops.yaml, and for any .sops.yaml
+# this filter returns the stored version when the plaintext is the same.
 remember_encryption() {
-	local oid
+	local oid rules
 	[[ -n "${CACHE_NAME}" && -n "${ENCRYPTED}" ]] || return 0
+	read_sops_yaml rules && [[ "${rules}" == "${CACHE_SOPS_YAML}" ]] || return 0
 	oid="$(printf '%s' "${ENCRYPTED}" | git hash-object -w --stdin 2>/dev/null)" || return 0
 	remember "${oid}"
 }
@@ -509,8 +539,7 @@ replay_encryption() {
 if [[ "${SOPS_FILTER_CACHE:-}" != "0" && "${SOPS_FILTER_FORCE_REENCRYPT:-}" != "1" && -z "${SOPS_CONFIG:-}" ]] &&
 	[[ . -ef "${PROJECT_ROOT}" && -r "${PROJECT_ROOT}/.sops.yaml" ]] &&
 	CACHE_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)" && [[ -n "${CACHE_COMMON_DIR}" ]] &&
-	! IFS= read -r -d '' CACHE_SOPS_YAML <"${PROJECT_ROOT}/.sops.yaml"; then
-	# (read stops early, and succeeds, at a NUL byte: no cache for that.)
+	read_sops_yaml CACHE_SOPS_YAML; then
 	# shellcheck disable=SC2046  # hex digits and numbers only
 	cache_answer $(cache_lookup 2>/dev/null || true)
 fi
