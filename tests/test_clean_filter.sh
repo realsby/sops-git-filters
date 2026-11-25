@@ -854,3 +854,413 @@ test_clean_does_not_reuse_a_stored_blob_with_nul_bytes() {
 	assert_ne "$(blob_id bin.secret)" "${before}" "the staged blob is a new one"
 	assert_eq "$(plain_of_stored bin.secret)" "ab" "plaintext of the staged blob"
 }
+
+# ── What a run remembers for the next one (issue #21) ────
+# Git runs the clean filter each time it looks at a secret with
+# uncommitted changes. Each run decrypted the stored version and
+# encrypted the edit again: two requests to a key service, and a new
+# ciphertext every time. A run now remembers its answer for some minutes.
+
+# counting_sops : a sops in fakebin (call it before new_repo) that writes
+# its subcommand to the file CALL_LOG names, then runs the real one. Not
+# a SOPS_* variable: those are part of what the cache remembers.
+counting_sops() {
+	stub fakebin sops <<'STUB'
+printf '%s\n' "$1" >>"${CALL_LOG}"
+exec "${REAL}" "$@"
+STUB
+}
+
+# calls <command...> : run it with the counting sops; never fails. Sets
+# OUT (stdout), ERR (stderr), RC, and CALLS: "<decrypts> <encrypts>".
+calls() {
+	: >../calls
+	RC=0
+	OUT="$(env CALL_LOG="${PWD}/../calls" PATH="${PWD}/../fakebin:${PATH}" "$@" 2>../stderr)" || RC=$?
+	ERR="$(cat ../stderr)"
+	CALLS="$(awk '$1 == "decrypt" { d++ } $1 == "encrypt" { e++ } END { print d + 0, e + 0 }' ../calls)"
+}
+
+# cache_dir : where the clean filter keeps what it remembers
+cache_dir() {
+	printf '%s/sops-git-filters/cache\n' "$(git rev-parse --git-common-dir)"
+}
+
+# edit_same_size <content> <touch time> : write .env, and give it a time
+# that is neither the one git recorded nor recent: git then reads the
+# file at every git status, and never takes it for racily clean.
+edit_same_size() {
+	printf '%s' "$1" >.env
+	touch -t "$2" .env
+}
+
+# The calls per command for one secret with an edit that keeps its size,
+# with the cache and without (SOPS_FILTER_CACHE=0: the counts of before).
+# The edit is encrypted once, and every later command gets that blob:
+# git status, git diff and git add see the same ciphertext, and git add
+# stores it.
+test_clean_cache_counts_sops_calls() {
+	local format mode id
+	counting_sops
+	for format in json dotenv; do
+		for mode in 1 0; do
+			new_repo "${format}-${mode}" "${format}"
+			export SOPS_FILTER_CACHE="${mode}"
+			printf 'A=1\nB=2\n' >.env
+			git add .env
+			git commit -q -m "add .env"
+			edit_same_size $'A=1\nB=3\n' 200001010000
+
+			calls git status --porcelain
+			assert_eq "${OUT}" " M .env" "git status (${format}, cache ${mode})"
+			assert_eq "${CALLS}" "1 1" "first git status (${format}, cache ${mode})"
+			calls git status --porcelain
+			if [[ "${mode}" == "1" ]]; then
+				assert_eq "${CALLS}" "0 0" "second git status (${format}, cache ${mode})"
+				assert_contains "${ERR}" "reusing its encryption of" "message of a remembered run (${format})"
+				id="$(git hash-object .env 2>/dev/null)"
+				assert_eq "$(git hash-object .env 2>/dev/null)" "${id}" "the same blob each time (${format})"
+			else
+				assert_eq "${CALLS}" "1 1" "second git status (${format}, cache ${mode})"
+			fi
+			# git diff: the clean filter twice, and once the smudge filter
+			# for the stored version (the text the diff shows).
+			calls git diff
+			assert_contains "${OUT}" "+B=3" "git diff (${format}, cache ${mode})"
+			[[ "${mode}" == "1" ]] && assert_eq "${CALLS}" "1 0" "git diff (${format}, cache ${mode})"
+			[[ "${mode}" == "0" ]] && assert_eq "${CALLS}" "3 2" "git diff (${format}, cache ${mode})"
+			calls git diff --stat
+			[[ "${mode}" == "1" ]] && assert_eq "${CALLS}" "0 0" "git diff --stat (${format}, cache ${mode})"
+			[[ "${mode}" == "0" ]] && assert_eq "${CALLS}" "2 2" "git diff --stat (${format}, cache ${mode})"
+			calls git add .env
+			[[ "${mode}" == "1" ]] && assert_eq "${CALLS}" "0 0" "git add (${format}, cache ${mode})"
+			[[ "${mode}" == "0" ]] && assert_eq "${CALLS}" "1 1" "git add (${format}, cache ${mode})"
+			[[ "${mode}" == "0" ]] || assert_eq "$(blob_id .env)" "${id}" "git add stores the blob git status saw (${format})"
+			assert_eq "$(plain_of_stored .env "${format}")" $'A=1\nB=3' "plaintext of the staged blob (${format}, cache ${mode})"
+			calls git commit -q -m "B=3"
+			assert_eq "${CALLS}" "0 0" "git commit (${format}, cache ${mode})"
+
+			edit_same_size $'A=1\nB=4\n' 200001020000
+			calls git status --porcelain
+			assert_eq "${CALLS}" "1 1" "git status after the next edit (${format}, cache ${mode})"
+			calls git commit -q -a -m "B=4"
+			[[ "${mode}" == "1" ]] && assert_eq "${CALLS}" "0 0" "git commit -a (${format}, cache ${mode})"
+			[[ "${mode}" == "0" ]] && assert_eq "${CALLS}" "1 1" "git commit -a (${format}, cache ${mode})"
+			assert_eq "$(git cat-file blob HEAD:.env | plain_of_stored_blob "${format}")" $'A=1\nB=4' "committed plaintext (${format}, cache ${mode})"
+			calls git status --porcelain
+			assert_eq "${OUT}" "" "git status after the commit (${format}, cache ${mode})"
+			if [[ "${mode}" == "0" ]]; then
+				[[ ! -e "$(cache_dir)" ]] || fail "SOPS_FILTER_CACHE=0 made $(cache_dir) (${format})"
+			fi
+			unset SOPS_FILTER_CACHE
+			cd ..
+		done
+	done
+}
+
+# plain_of_stored_blob [format]   (blob on stdin) : decrypt it
+plain_of_stored_blob() {
+	if [[ "${1:-json}" == "dotenv" ]]; then
+		sops decrypt --input-type dotenv --output-type dotenv /dev/stdin
+	else
+		sops decrypt --input-type json --output-type binary /dev/stdin
+	fi
+}
+
+# What is on disk: MACs and object ids, in a directory of mode 0700 with
+# files of mode 0600. Not the plaintext, not a plain hash of it.
+test_clean_cache_holds_no_plaintext() {
+	local dir file secret='hunter2-S3cr3t' sum
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	printf 'PW=%s\n' "${secret}" >.env
+	touch -t 200001010000 .env
+	git status --porcelain >/dev/null 2>&1
+	git add .env
+	dir="$(cache_dir)"
+	[[ -f "${dir}/key" ]] || fail "test fixture: no key in ${dir}"
+	assert_eq "$(mode_of "${dir}")" "700" "mode of the cache directory"
+	for file in "${dir}"/*; do
+		assert_eq "$(mode_of "${file}")" "600" "mode of ${file##*/}"
+	done
+	assert_eq "$(grep -rl "${secret}" "${dir}" || true)" "" "files that hold the plaintext"
+	# Not a plain SHA-256 of it either, in any form a tool prints.
+	for sum in "$(printf 'PW=%s\n' "${secret}" | sha256sum 2>/dev/null || true)" \
+		"$(printf 'PW=%s\n' "${secret}" | shasum -a 256 2>/dev/null || true)"; do
+		sum="${sum%% *}"
+		[[ -z "${sum}" ]] || assert_eq "$(grep -rl "${sum:0:32}" "${dir}" || true)" "" "files that hold its SHA-256"
+	done
+	# The entries: "sgf-cache 1 <check> <time> <object id>", nothing else.
+	for file in "${dir}"/e-*; do
+		[[ "$(cat "${file}")" =~ ^sgf-cache\ 1\ [0-9a-f]{32}\ [0-9]+\ [0-9a-f]{40}$ ]] ||
+			fail "an entry that is not as expected: $(cat "${file}")"
+	done
+}
+
+# SOPS_FILTER_FORCE_REENCRYPT=1 asks for a new encryption: the remembered
+# one is not given, and the forced one is not remembered.
+test_clean_cache_is_bypassed_by_force_reencrypt() {
+	local id entries
+	counting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status"
+	id="$(git hash-object .env 2>/dev/null)"
+	entries="$(ls "$(cache_dir)")"
+
+	calls env SOPS_FILTER_FORCE_REENCRYPT=1 git add .env
+	assert_eq "${RC}" "0" "forced git add"
+	assert_eq "${CALLS}" "0 1" "forced git add"
+	assert_ne "$(blob_id .env)" "${id}" "the forced git add encrypted anew"
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+	assert_eq "$(ls "$(cache_dir)")" "${entries}" "entries after the forced git add"
+}
+
+# A change to .sops.yaml is a new question: the next run encrypts for the
+# recipients it names, and says which keys that adds (audit A-15); the
+# run after it gives that encryption again, with the same line.
+test_clean_cache_follows_a_change_of_sops_yaml() {
+	counting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status"
+	assert_not_contains "${ERR}" "added:" "git status before the change"
+
+	write_sops_yaml "${AGE_PUB_B}"
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status after recipient B was added"
+	assert_contains "${ERR}" "added: age ${AGE_PUB_B}" "the added key is named"
+	calls git add .env
+	assert_eq "${CALLS}" "0 0" "git add after that git status"
+	assert_contains "${ERR}" "added: age ${AGE_PUB_B}" "the added key is named again"
+	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
+	assert_eq "$(stored .env | SOPS_AGE_KEY_FILE="${AGE_KEY_B}" plain_of_stored_blob)" "A=2" "key B decrypts the staged blob"
+}
+
+# rewriting_sops : counting_sops, and on encrypt it first copies the file
+# NEW_RULES names (when set) over .sops.yaml: an editor or a checkout
+# that changes the rules while sops waits for a key service.
+rewriting_sops() {
+	stub fakebin sops <<'STUB'
+printf '%s\n' "$1" >>"${CALL_LOG}"
+if [[ "$1" == "encrypt" && -n "${NEW_RULES:-}" ]]; then
+	cp "${NEW_RULES}" .sops.yaml
+fi
+exec "${REAL}" "$@"
+STUB
+}
+
+# .sops.yaml changed while sops encrypted: sops read the new rules, the
+# question holds the old ones. That encryption is not remembered, so a
+# run with the old rules (in another linked worktree, say) does not get
+# a blob for the recipients of the new ones.
+test_clean_cache_keeps_no_encryption_for_rules_changed_while_sops_ran() {
+	local entries
+	rewriting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	cp .sops.yaml ../old-rules.yaml
+	write_sops_yaml "${AGE_PUB_B}"
+	cp .sops.yaml ../new-rules.yaml
+	cp ../old-rules.yaml .sops.yaml
+	entries="$(ls "$(cache_dir)")"
+
+	calls env NEW_RULES="${PWD}/../new-rules.yaml" git status --porcelain -- .env
+	assert_eq "${OUT}" " M .env" "git status"
+	assert_eq "${CALLS}" "1 1" "git status"
+	assert_eq "$(cat .sops.yaml)" "$(cat ../new-rules.yaml)" "test fixture: the rules changed during the encryption"
+	assert_contains "${ERR}" "added: age ${AGE_PUB_B}" "test fixture: sops encrypted for the new rules"
+	assert_eq "$(ls "$(cache_dir)")" "${entries}" "entries after that git status"
+
+	# The old rules again: a new encryption, for them, remembered as usual.
+	cp ../old-rules.yaml .sops.yaml
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with the old rules"
+	assert_not_contains "${ERR}" "reusing its encryption" "git status with the old rules"
+	calls git add .env
+	assert_eq "${CALLS}" "0 0" "git add after that git status"
+	assert_not_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
+	assert_contains "$(stored .env)" "${AGE_PUB_A}" "recipient A in the staged blob"
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+}
+
+# count_files <path...> : how many of the paths exist (for a glob that
+# may match nothing)
+count_files() {
+	local n=0 path
+	for path in "$@"; do
+		[[ ! -e "${path}" && ! -L "${path}" ]] || n=$((n + 1))
+	done
+	echo "${n}"
+}
+
+# rewrite_entries <awk program> : apply it to the line of every entry
+rewrite_entries() {
+	local file
+	for file in "$(cache_dir)"/e-*; do
+		awk "$1" "${file}" >"${file}.new" && mv -f "${file}.new" "${file}"
+	done
+}
+
+# What the cache holds is not trusted: an entry that is too old, does
+# not read as one, or names a blob that is gone or is not a complete SOPS
+# document is not used. The filter then works as without it.
+test_clean_cache_ignores_entries_it_cannot_trust() {
+	local plain_id now
+	counting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "first git status"
+	calls git status --porcelain
+	assert_eq "${CALLS}" "0 0" "test fixture: the answer is remembered"
+
+	# Ten minutes and more.
+	now="$(date +%s)"
+	rewrite_entries "{ \$4 = ${now} - 600; print }"
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with an entry of ten minutes ago"
+	calls git status --porcelain
+	assert_eq "${CALLS}" "0 0" "git status after that: remembered again"
+
+	# Garbage, and a line cut short.
+	# shellcheck disable=SC2016  # the fields belong to awk
+	rewrite_entries '{ print "garbage" }'
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with entries that do not read"
+	# shellcheck disable=SC2016  # the fields belong to awk
+	rewrite_entries '{ print $1, $2, $3, $4 }'
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with entries cut short"
+
+	# A blob that is not a SOPS document (the plaintext itself, say), and
+	# one that is not in the object store.
+	plain_id="$(printf 'A=2\n' | git hash-object -w --stdin)"
+	rewrite_entries "{ \$5 = \"${plain_id}\"; print }"
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with an entry that names a plaintext blob"
+	assert_eq "${OUT}" " M .env" "git status output"
+	# shellcheck disable=SC2016  # the fields belong to awk
+	rewrite_entries '{ $5 = "0123456789012345678901234567890123456789"; print }'
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with an entry that names a missing blob"
+
+	# The entry of another question under this name (its check differs).
+	# shellcheck disable=SC2016  # the fields belong to awk
+	rewrite_entries '{ $3 = "00000000000000000000000000000000"; print }'
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with an entry of another question"
+
+	git add .env
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+}
+
+# The directory and the key must be the user's own and closed to others,
+# and not reached through a symlink. Otherwise the cache is not used (and
+# nothing is written there); the filter still works.
+test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink() {
+	local dir what
+	counting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	calls git status --porcelain
+	dir="$(cache_dir)"
+	for what in dir key; do
+		if [[ "${what}" == "dir" ]]; then chmod 750 "${dir}"; else chmod 640 "${dir}/key"; fi
+		calls git status --porcelain
+		assert_eq "${CALLS}" "1 1" "git status with the ${what} open to the group"
+		calls git status --porcelain
+		assert_eq "${CALLS}" "1 1" "git status again with the ${what} open to the group"
+		assert_eq "${OUT}" " M .env" "git status output"
+		chmod 700 "${dir}"
+		chmod 600 "${dir}/key"
+	done
+
+	mv "${dir}" "${dir}.real"
+	ln -s "$(basename "${dir}").real" "${dir}"
+	rm -f "${dir}.real"/e-*
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status with the directory a symlink"
+	calls git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status again with the directory a symlink"
+	assert_eq "$(count_files "${dir}.real"/e-*)" "0" "entries written through the symlink"
+	git add .env
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+}
+
+# Two git commands at once: neither fails, both see the change, and what
+# they leave behind is a cache the next run can use.
+test_clean_cache_two_commands_at_once() {
+	local round status1 status2 pid1 pid2
+	counting_sops
+	new_repo repo
+	printf 'A=00\n' >.env
+	printf 'B=00\n' >b.secret
+	git add .env b.secret
+	git commit -q -m "two secrets"
+	# The edits keep the size: git has to run the filter to see them.
+	for round in 1 2 3; do
+		edit_same_size "A=${round}x"$'\n' "20000101000${round}"
+		printf 'B=%sx\n' "${round}" >b.secret
+		touch -t "20000101000${round}" b.secret
+		status1=0
+		status2=0
+		git status --porcelain >../out1 2>/dev/null &
+		pid1=$!
+		git status --porcelain >../out2 2>/dev/null &
+		pid2=$!
+		wait "${pid1}" || status1=$?
+		wait "${pid2}" || status2=$?
+		assert_eq "${status1} ${status2}" "0 0" "exit status of the two git status (round ${round})"
+		assert_eq "$(cat ../out1)" $' M .env\n M b.secret' "first git status (round ${round})"
+		assert_eq "$(cat ../out2)" $' M .env\n M b.secret' "second git status (round ${round})"
+		calls git status --porcelain
+		assert_eq "${CALLS}" "0 0" "git status after the two (round ${round})"
+	done
+	assert_eq "$(count_files "$(cache_dir)"/tmp.*)" "0" "temporary files left behind"
+	git add .env b.secret
+	assert_eq "$(plain_of_stored .env)" "A=3x" "plaintext of the staged .env"
+	assert_eq "$(plain_of_stored b.secret)" "B=3x" "plaintext of the staged b.secret"
+}
+
+# Without a tool for SHA-256 (sha256sum, openssl, shasum) there is no
+# cache: the filter works as before, and remembers nothing.
+test_clean_cache_without_a_sha256_tool() {
+	local bin entries
+	counting_sops
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	edit_same_size $'A=2\n' 200001010000
+	bin="$(path_without ../nosha sha256sum openssl shasum)"
+	! PATH="${bin}" command -v sha256sum openssl shasum >/dev/null || fail "test fixture: a SHA-256 tool is still on PATH"
+	entries="$(ls "$(cache_dir)")"
+	calls env PATH="${PWD}/../fakebin:${bin}" git status --porcelain
+	assert_eq "${OUT}" " M .env" "git status"
+	assert_eq "${CALLS}" "1 1" "git status"
+	calls env PATH="${PWD}/../fakebin:${bin}" git status --porcelain
+	assert_eq "${CALLS}" "1 1" "git status again"
+	assert_eq "$(ls "$(cache_dir)")" "${entries}" "what the cache holds"
+	PATH="${bin}" git add .env
+	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
+}

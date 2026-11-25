@@ -83,8 +83,8 @@ sgf_other_format() {
 # every tracked path, which is slow in a large repository (audit A-01).
 # The attribute is read as `git check-attr` reads it by default: from
 # the .gitattributes files of the working tree, and from the index where
-# the working tree has none. (encryption-guard.sh reads the index's
-# only, and lists the entries its own way.)
+# the working tree has none. (encryption-guard.sh and rekey.sh read the
+# index's only: sgf_managed_entries below.)
 #
 # The pathspec settings of the caller are dropped, in a subshell: with
 # GIT_LITERAL_PATHSPECS=1, which `git --literal-pathspecs` exports, git
@@ -94,6 +94,138 @@ sgf_ls_managed() {
 		unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 		git -C "$1" ls-files -s -z -- ':(attr:filter=sops)'
 	)
+}
+
+# ── The SOPS-managed entries of the index, by its own attributes ──
+# sgf_managed_entries <repo root> <who> <what a failure means> [<pathspec>...]
+# Prints one line per index entry whose filter attribute is "sops":
+# "<mode> <object id> <stage>" TAB <path>. Each stage of an unmerged path
+# is an entry of its own. Blobs are later read by object id, so no path
+# is ever turned into a revision (a file named like "2:prod.secret" would
+# otherwise be read as index stage 2). With pathspecs, the entries they
+# match (as `git ls-files -- <pathspec>`, from the top of the working
+# tree). Used by encryption-guard.sh and rekey.sh.
+#
+# Git lists the index (`git ls-files -s`) and answers for the attribute
+# of every path in it (`git check-attr`); awk puts the two together, and
+# only the managed entries reach bash. Reading every entry in bash took
+# 8 seconds with 60,000 tracked files, on every commit; this takes 0.2
+# (audit A-01). The text output is read, not the -z one: the awk of
+# macOS ends a line at a NUL byte. In text, git prints a path as it is,
+# or in double quotes with C-style escapes when it holds a control
+# character, a double quote or a backslash (sgf_unquote_path below). The
+# same path is printed the same way by both commands; core.quotepath=off
+# leaves the bytes above 127 alone, in both.
+#
+# --cached: the attributes come from the .gitattributes files in the
+# index, the ones the next commit carries. Without it git reads the
+# working tree, and a local edit that is not staged (".env -filter", left
+# from debugging) would decide which blobs are checked. That same edit
+# keeps `git add` from running the filter, so the plaintext it stages
+# would pass unseen (audit A-11). For the same reason the list does not
+# come from `git ls-files -- ':(attr:filter=sops)'` (sgf_ls_managed), one
+# call that is faster still: that pathspec reads the attributes of the
+# working tree.
+#
+# -C: from the top of the working tree. `git ls-files` lists only what
+# is below the current directory, so a guard started in a subdirectory
+# would pass over every secret outside it.
+#
+# The index is listed twice: once for the entries, once for check-attr.
+# Answer number i must be about entry number i, and every entry must get
+# one; anything else (an answer cut short, an index that changed in
+# between) is an error: "<who>: ... — <what a failure means>" on stderr,
+# and exit status 2. pipefail: a git command that fails fails the
+# pipeline too.
+sgf_managed_entries() {
+	local root="$1" who="$2" means="$3"
+	shift 3
+	{
+		git -C "${root}" -c core.quotepath=off ls-files -s -- "$@" &&
+			echo &&
+			git -C "${root}" -c core.quotepath=off ls-files -s -- "$@" |
+			awk '{ print substr($0, index($0, "\t") + 1) }' |
+				git -C "${root}" -c core.quotepath=off check-attr --cached --stdin filter
+	} | awk -v who="${who}" -v means="${means}" '
+	# Up to the empty line: the entries. After it: one answer per entry,
+	# "<path>: filter: <value>".
+	BEGIN { listing = 1 }
+	listing {
+		if ($0 == "") {
+			listing = 0
+			next
+		}
+		tab = index($0, "\t")
+		n++
+		meta[n] = substr($0, 1, tab - 1)
+		path[n] = substr($0, tab + 1)
+		next
+	}
+	{
+		i++
+		head = path[i] ": filter: "
+		if (i > n || substr($0, 1, length(head)) != head) {
+			print who ": git check-attr answered out of order — " means | "cat 1>&2"
+			failed = 1
+			exit
+		}
+		if (substr($0, length(head) + 1) == "sops") print meta[i] "\t" path[i]
+	}
+	END {
+		if (failed) exit 2
+		if (listing) {
+			print who ": the list of index entries was cut short — " means | "cat 1>&2"
+			exit 2
+		}
+		if (i != n) {
+			printf "%s: git check-attr answered for %d of %d index entries — %s\n", who, i, n, means | "cat 1>&2"
+			exit 2
+		}
+	}'
+}
+
+# sgf_unquote_path <path as sgf_managed_entries prints it>
+# The path itself, in REPLY. Undoes the quoting of git (quote_c_style):
+# a quoted path is in double quotes, with \a \b \t \n \v \f \r \" \\ and
+# \ooo (three octal digits) for the bytes it escapes. Returns 1 for
+# anything else, which git does not print.
+sgf_unquote_path() {
+	local rest="$1" out="" c
+	if [[ "${rest}" != \"* ]]; then
+		REPLY="${rest}"
+		return 0
+	fi
+	[[ "${#rest}" -ge 2 && "${rest}" == *\" ]] || return 1
+	rest="${rest:1:${#rest}-2}"
+	while [[ -n "${rest}" ]]; do
+		c="${rest:0:1}"
+		if [[ "${c}" != "\\" ]]; then
+			out="${out}${c}"
+			rest="${rest:1}"
+			continue
+		fi
+		c="${rest:1:1}"
+		case "${c}" in
+		a) out="${out}"$'\a' ;;
+		b) out="${out}"$'\b' ;;
+		t) out="${out}"$'\t' ;;
+		n) out="${out}"$'\n' ;;
+		v) out="${out}"$'\v' ;;
+		f) out="${out}"$'\f' ;;
+		r) out="${out}"$'\r' ;;
+		'"' | "\\") out="${out}${c}" ;;
+		[0-3])
+			[[ "${rest:1:3}" == [0-3][0-7][0-7] ]] || return 1
+			# shellcheck disable=SC2059  # the format is the escape itself
+			printf -v c "\\${rest:1:3}"
+			out="${out}${c}"
+			rest="${rest:2}"
+			;;
+		*) return 1 ;;
+		esac
+		rest="${rest:2}"
+	done
+	REPLY="${out}"
 }
 
 # ── Paths in the commands a message prints ────────────────────────
@@ -940,4 +1072,258 @@ sgf_warn_if_outdated() {
 		echo "  The update has no effect until you run ${source}/install.sh (from a checkout you trust)." >&2
 	fi
 	return 0
+}
+
+# ── What the clean filter remembers between two runs ──────────────
+# Git runs the clean filter on a secret with uncommitted changes each
+# time it looks at the file: once for `git status`, twice for `git diff`,
+# once more for `git add` and `git commit -a` (issue #21). Each run
+# decrypted the stored version and encrypted the edit again: two calls to
+# a key service, and a new ciphertext every time. So the filter remembers
+# for a few minutes what a run found, and the next run that is asked the
+# same question gives the same answer without asking sops (see
+# clean-filter.sh for the question and the answers).
+#
+# What is stored, in <git common dir>/sops-git-filters/cache/ (0700):
+#   key          32 random bytes in hex (0600), made at the first use
+#   e-<name>     one answer per file (0600): "sgf-cache 1 <check> <time>
+#                <object id>", the time in seconds since 1970
+#   swept        when old entries were last removed
+# <name> and <check> are the two halves of an HMAC-SHA256 under that key
+# of the question, which holds the plaintext. No plaintext and no plain
+# hash of it is written: a SHA-256 of a short password can be tested
+# offline against guesses, an HMAC cannot be without the key. The answer
+# is the id of a blob in git's object store (ciphertext).
+#
+# The HMAC is computed here from a plain SHA-256 tool, as RFC 2104 says
+# (tested against the vectors of RFC 4231): `openssl dgst -hmac <key>`
+# would put the key in the arguments of a process, which other users of
+# the machine can see. sha256sum (coreutils, busybox), openssl or shasum
+# compute the SHA-256; with none of them the filter works as before,
+# without the cache. The plaintext reaches the tool on stdin only.
+#
+# An entry is used for SGF_CACHE_TTL seconds after it was written, then
+# removed. At most SGF_CACHE_MAX entries are kept. Writes go to a
+# temporary file that is then renamed, so a run never reads half an
+# entry, and two runs at once never fail each other. Anything unexpected
+# turns the cache off for that run, never the filter: no SHA-256 tool, no
+# random source, a directory or key that is a symlink, belongs to someone
+# else or is open to the group or others; an entry that does not read as
+# one is removed.
+#
+# The functions below change the umask and may stop at any error: the
+# clean filter calls them in a subshell, with their output discarded.
+SGF_CACHE_TTL=600
+SGF_CACHE_MAX=512
+SGF_CACHE_DIR=""
+SGF_CACHE_NOW=""
+SGF_SHA256_TOOL=""
+SGF_HMAC_IPAD=""
+SGF_HMAC_OPAD=""
+
+# sgf_sha256   (data on stdin) : prints its SHA-256 in hex
+sgf_sha256() {
+	local out
+	case "${SGF_SHA256_TOOL}" in
+	sha256sum) out="$(sha256sum)" || return 1 ;;
+	openssl) out="$(openssl dgst -sha256)" || return 1 ;;
+	shasum) out="$(shasum -a 256)" || return 1 ;;
+	*) return 1 ;;
+	esac
+	# "<hex>  -" (sha256sum, shasum), "<hex>" (LibreSSL) or
+	# "SHA2-256(stdin)= <hex>" (OpenSSL 3)
+	case "${SGF_SHA256_TOOL}" in
+	openssl) out="${out##* }" ;;
+	*) out="${out%% *}" ;;
+	esac
+	[[ "${#out}" -eq 64 && "${out}" != *[!0-9a-f]* ]] || return 1
+	printf '%s\n' "${out}"
+}
+
+# sgf_sha256_tool : sets SGF_SHA256_TOOL to the first one on PATH
+sgf_sha256_tool() {
+	local tool
+	for tool in sha256sum openssl shasum; do
+		if command -v "${tool}" >/dev/null 2>&1; then
+			SGF_SHA256_TOOL="${tool}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# sgf_hmac_init <key in hex, 1 to 64 bytes>
+# Prepares the two key blocks of HMAC-SHA256 (the key padded with zero
+# bytes to 64, XOR 0x36 and XOR 0x5c), as printf formats of \x escapes.
+sgf_hmac_init() {
+	local key="$1" i byte ipad="" opad=""
+	[[ -n "${key}" && $((${#key} % 2)) -eq 0 && "${#key}" -le 128 && "${key}" != *[!0-9a-f]* ]] || return 1
+	for ((i = 0; i < 128; i += 2)); do
+		byte="${key:i:2}"
+		[[ -n "${byte}" ]] || byte=00
+		printf -v ipad '%s\\x%02x' "${ipad}" "$((16#${byte} ^ 0x36))"
+		printf -v opad '%s\\x%02x' "${opad}" "$((16#${byte} ^ 0x5c))"
+	done
+	SGF_HMAC_IPAD="${ipad}"
+	SGF_HMAC_OPAD="${opad}"
+}
+
+# sgf_hmac_sha256 <command...> : prints the HMAC-SHA256, in hex, of what
+# the command prints, under the key of sgf_hmac_init. The key blocks are
+# written by printf, a builtin: they never appear in the arguments of a
+# process.
+sgf_hmac_sha256() {
+	local inner fmt="" i
+	[[ -n "${SGF_HMAC_IPAD}" && -n "${SGF_HMAC_OPAD}" ]] || return 1
+	# shellcheck disable=SC2059  # the format is the key block: \x escapes only
+	inner="$({ printf "${SGF_HMAC_IPAD}" && "$@"; } | sgf_sha256)" || return 1
+	for ((i = 0; i < 64; i += 2)); do
+		fmt="${fmt}\\x${inner:i:2}"
+	done
+	# shellcheck disable=SC2059  # the formats are \x escapes only
+	{ printf "${SGF_HMAC_OPAD}" && printf "${fmt}"; } | sgf_sha256
+}
+
+# sgf_cache_open <git common dir>
+# Makes the cache directory and its key where they are missing, checks
+# both, and prepares the HMAC. Sets SGF_CACHE_DIR and SGF_CACHE_NOW.
+# Removes old entries once per SGF_CACHE_TTL. Returns 1 when the cache
+# cannot be used; the caller then works without it.
+sgf_cache_open() {
+	local top="$1/sops-git-filters" dir key tmp now
+	dir="${top}/cache"
+	SGF_CACHE_DIR=""
+	umask 077
+	sgf_sha256_tool || return 1
+	now="$(date +%s)" || return 1
+	[[ -n "${now}" && "${now}" != *[!0-9]* && "${#now}" -le 12 ]] || return 1
+	SGF_CACHE_NOW="${now}"
+
+	# The directory of the installed copy (install.sh makes it), and the
+	# cache in it: real directories, owned by the user who runs git.
+	if [[ ! -e "${top}" && ! -L "${top}" ]]; then
+		mkdir -m 700 "${top}" 2>/dev/null || true
+	fi
+	[[ -d "${top}" && ! -L "${top}" && -O "${top}" ]] || return 1
+	if [[ ! -e "${dir}" && ! -L "${dir}" ]]; then
+		mkdir -m 700 "${dir}" 2>/dev/null || true
+	fi
+
+	# The key: written under another name, then linked into place. A link
+	# does not replace a file that is there, so when two runs make a key
+	# at the same moment, one of them wins and both use it.
+	if [[ ! -e "${dir}/key" && ! -L "${dir}/key" ]]; then
+		sgf_private "${dir}" || return 1
+		key="$(od -An -tx1 -N32 /dev/urandom)" || return 1
+		key="${key//[!0-9a-f]/}"
+		[[ "${#key}" -eq 64 ]] || return 1
+		tmp="${dir}/tmp.${now}.$$.key"
+		printf '%s\n' "${key}" >"${tmp}" || return 1
+		ln "${tmp}" "${dir}/key" 2>/dev/null || true
+		rm -f "${tmp}"
+	fi
+	sgf_private "${dir}" "${dir}/key" || return 1
+	IFS= read -r key <"${dir}/key" || return 1
+	[[ "${#key}" -eq 64 ]] || return 1
+	sgf_hmac_init "${key}" || return 1
+	SGF_CACHE_DIR="${dir}"
+
+	if ! IFS= read -r tmp <"${dir}/swept" 2>/dev/null || ! sgf_cache_fresh "${tmp}"; then
+		sgf_cache_sweep
+		printf '%s\n' "${now}" >"${dir}/tmp.${now}.$$.swept" &&
+			mv -f "${dir}/tmp.${now}.$$.swept" "${dir}/swept"
+	fi
+	return 0
+}
+
+# sgf_private <path>... : true when each path is a directory or a regular
+# file, not a symlink, owned by the user who runs this, with no
+# permission bit for the group or others (one call to find for all).
+sgf_private() {
+	local path open
+	for path in "$@"; do
+		[[ (-d "${path}" || -f "${path}") && ! -L "${path}" && -O "${path}" ]] || return 1
+	done
+	open="$(find "$@" -prune \( -perm -0040 -o -perm -0020 -o -perm -0010 \
+		-o -perm -0004 -o -perm -0002 -o -perm -0001 \) -print)" || return 1
+	[[ -z "${open}" ]]
+}
+
+# sgf_cache_fresh <time> : true for a time of the last SGF_CACHE_TTL
+# seconds (SGF_CACHE_NOW is now)
+sgf_cache_fresh() {
+	[[ -n "$1" && "$1" != *[!0-9]* && "${#1}" -le 12 ]] || return 1
+	(((SGF_CACHE_NOW - 10#$1) >= 0 && (SGF_CACHE_NOW - 10#$1) < SGF_CACHE_TTL))
+}
+
+# sgf_is_object_id <text> : 40 (SHA-1) or 64 (SHA-256) lower-case hex digits
+sgf_is_object_id() {
+	[[ ("${#1}" -eq 40 || "${#1}" -eq 64) && "$1" != *[!0-9a-f]* ]]
+}
+
+# sgf_cache_get <name> <check> : prints "<object id> <age in seconds>"
+# for an entry of that name that holds that check and is fresh. Removes
+# an entry that is not.
+sgf_cache_get() {
+	local file="${SGF_CACHE_DIR}/e-$1" tag version check time answer rest
+	[[ -n "${SGF_CACHE_DIR}" && -f "${file}" && ! -L "${file}" ]] || return 1
+	if IFS=' ' read -r tag version check time answer rest <"${file}" &&
+		[[ "${tag} ${version}" == "sgf-cache 1" && "${check}" == "$2" && -z "${rest}" ]] &&
+		sgf_cache_fresh "${time}" && sgf_is_object_id "${answer}"; then
+		printf '%s %s\n' "${answer}" "$((SGF_CACHE_NOW - 10#${time}))"
+		return 0
+	fi
+	rm -f "${file}"
+	return 1
+}
+
+# sgf_cache_put <name> <check> <object id>
+sgf_cache_put() {
+	local tmp="${SGF_CACHE_DIR}/tmp.${SGF_CACHE_NOW}.$$.${RANDOM}"
+	[[ -n "${SGF_CACHE_DIR}" ]] && sgf_is_object_id "$3" || return 1
+	# Too many entries: the old ones go first, all of them if need be.
+	set -- "$@" "${SGF_CACHE_DIR}"/e-*
+	if [[ $# -gt $((SGF_CACHE_MAX + 3)) ]]; then
+		sgf_cache_sweep
+	fi
+	printf 'sgf-cache 1 %s %s %s\n' "$2" "${SGF_CACHE_NOW}" "$3" >"${tmp}" || return 1
+	mv -f "${tmp}" "${SGF_CACHE_DIR}/e-$1" || {
+		rm -f "${tmp}"
+		return 1
+	}
+}
+
+# sgf_cache_sweep : removes the entries that are no longer fresh or do
+# not read as one, and temporary files left behind; all entries when more
+# than SGF_CACHE_MAX remain.
+sgf_cache_sweep() {
+	local file name time tag version check answer rest kept=0
+	local -a old=()
+	for file in "${SGF_CACHE_DIR}"/e-* "${SGF_CACHE_DIR}"/tmp.*; do
+		[[ -e "${file}" || -L "${file}" ]] || continue
+		name="${file##*/}"
+		time=""
+		case "${name}" in
+		tmp.*)
+			time="${name#tmp.}"
+			time="${time%%.*}"
+			;;
+		*)
+			if [[ -f "${file}" && ! -L "${file}" ]]; then
+				IFS=' ' read -r tag version check time answer rest <"${file}" || time=""
+			fi
+			;;
+		esac
+		if sgf_cache_fresh "${time}"; then
+			[[ "${name}" == tmp.* ]] || kept=$((kept + 1))
+		else
+			old[${#old[@]}]="${file}"
+		fi
+	done
+	if [[ "${kept}" -gt "${SGF_CACHE_MAX}" ]]; then
+		for file in "${SGF_CACHE_DIR}"/e-*; do
+			old[${#old[@]}]="${file}"
+		done
+	fi
+	[[ "${#old[@]}" -eq 0 ]] || rm -f -- "${old[@]}"
 }

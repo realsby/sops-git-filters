@@ -34,6 +34,12 @@
 # ║  `git commit -a` it re-encrypts every managed file git checks    ║
 # ║  again, and unchanged secrets get new ciphertext.                ║
 # ║                                                                  ║
+# ║  Git runs this filter again each time it looks at a secret with  ║
+# ║  uncommitted changes. A run remembers its answer for 10 minutes  ║
+# ║  (no plaintext: see "What a run a moment ago found" below), and  ║
+# ║  the next run asked the same question needs no call to sops.     ║
+# ║  SOPS_FILTER_CACHE=0 turns that off.                             ║
+# ║                                                                  ║
 # ║  The filter is also idempotent: input that is the ciphertext     ║
 # ║  git holds (a working copy that was never decrypted, also with   ║
 # ║  the CRLF line endings core.autocrlf adds) is stored unchanged,  ║
@@ -333,6 +339,9 @@ say_key_change() { # <new document>
 	}' >&2
 }
 
+# encrypt_input : encrypt INPUT, check the result, print it. The result
+# stays in ENCRYPTED, for remember_encryption.
+ENCRYPTED=""
 encrypt_input() {
 	local encrypted why
 	# --filename-override tells SOPS which .sops.yaml creation rule to
@@ -347,8 +356,7 @@ encrypt_input() {
 	# ── Never trust the output unseen ────
 	# It must be a SOPS document with every value encrypted, and for a
 	# non-empty file in json mode the "data" value must be ciphertext.
-	if ! sgf_is_sops_doc "${STORE_FORMAT}" "${encrypted}" ||
-		[[ "${STORE_FORMAT}" == "json" && -n "${INPUT}" && "${SGF_DATA_KIND}" != "enc" ]]; then
+	if ! is_complete_doc "${encrypted}"; then
 		echo "ERROR: sops did not encrypt ${FILENAME} completely — refusing to stage it." >&2
 		# What the check found: a line number or a key name, never a value.
 		why="$(printf '%s' "${encrypted}" | sgf_doc_problem "${STORE_FORMAT}")"
@@ -361,14 +369,190 @@ encrypt_input() {
 		return 1
 	fi
 	say_key_change "${encrypted}"
+	ENCRYPTED="${encrypted}"
 	printf '%s' "${encrypted}"
 }
+
+# is_complete_doc <document> : a SOPS document in the storage format with
+# every value encrypted; for a non-empty file in json mode, "data" must be
+# ciphertext too.
+is_complete_doc() {
+	sgf_is_sops_doc "${STORE_FORMAT}" "$1" &&
+		[[ "${STORE_FORMAT}" != "json" || -z "${INPUT}" || "${SGF_DATA_KIND}" == "enc" ]]
+}
+
+# ── What a run a moment ago found ────
+# Git runs this filter again each time it looks at a secret with
+# uncommitted changes (issue #21): `git status`, twice for `git diff`,
+# `git add`, `git commit -a`. Each run decrypted the stored version and
+# encrypted the edit anew: two calls to the key service, and a new
+# ciphertext each time. So a run remembers its answer for some minutes
+# (lib.sh: where, how long, and why nothing there can be read without a
+# key that never leaves the machine), and a later run that is asked the
+# same question gives the same answer without sops:
+#
+#   question   this plaintext, with this stored version (its object id),
+#              this path and storage format, this .sops.yaml (its whole
+#              text), these SOPS_* variables, this version of the tool
+#   answers    the stored version itself: the content is unchanged. Only
+#                written after a decrypt that showed it, so a run never
+#                skips a decrypt that never worked (audit A-04: git add
+#                can encrypt for a rule that does not list your key, and
+#                the next check of the file must say so).
+#              a blob this filter encrypted: the content changed, and the
+#                encryption of a moment ago is given again. git status
+#                does not keep what the filter returns, so the filter
+#                writes it into the object store itself (ciphertext, as
+#                git add would); before it is given again, it must still
+#                be there and pass the same check as a fresh one. Only
+#                written when .sops.yaml still holds the text of the
+#                question after sops returned (remember_encryption).
+#
+# Everything that decides what sops would return is part of the
+# question, so an answer given again is one this filter could have given:
+# a change to .sops.yaml (a recipient added) is a new question, and the
+# next run encrypts for the new recipients. The answer itself is not
+# trusted: a blob is checked again, and anything that does not fit is a
+# question without an answer.
+#
+# Not used:
+#   - with SOPS_FILTER_CACHE=0;
+#   - with SOPS_FILTER_FORCE_REENCRYPT=1, which asks for a new encryption;
+#   - with SOPS_CONFIG set, or outside the top of the working tree: sops
+#     would read another .sops.yaml than the one in the question.
+# Any failure of the cache (see lib.sh) leaves the filter as it was.
+CACHE_COMMON_DIR=""
+CACHE_SOPS_YAML=""
+CACHE_NAME=""
+CACHE_CHECK=""
+CACHE_ANSWER=""
+CACHE_AGE=""
+
+# cache_question : the question, on stdout, for the HMAC. Each field is
+# "<length>:<bytes>" and a newline, and the plaintext comes last: no two
+# questions are written the same way.
+cache_question() {
+	local field name
+	printf 'sops-git-filters clean filter cache 1\n'
+	for field in "${SGF_VERSION}" "${STORE_FORMAT}" "${FILENAME}" "${STORED_ID}" "${CACHE_SOPS_YAML}"; do
+		printf '%s:%s\n' "${#field}" "${field}"
+	done
+	# The SOPS_* variables sops sees (the filter dropped those that name
+	# recipients, above). Their values only go into the HMAC.
+	for name in ${!SOPS_*}; do
+		field="${name}=${!name}"
+		printf '%s:%s\n' "${#field}" "${field}"
+	done
+	printf 'plaintext\n%s' "${INPUT}"
+}
+
+# cache_lookup : prints "<name> <check>" and, when an answer is
+# remembered, " <object id> <age in seconds>". Prints nothing when the
+# cache cannot be used. Runs in a subshell.
+cache_lookup() {
+	local mac answer
+	sgf_cache_open "${CACHE_COMMON_DIR}" || return 1
+	mac="$(sgf_hmac_sha256 cache_question)" || return 1
+	answer="$(sgf_cache_get "${mac:0:32}" "${mac:32:32}")" || answer=""
+	printf '%s %s %s\n' "${mac:0:32}" "${mac:32:32}" "${answer}"
+}
+
+# cache_answer <name> <check> [<object id> <age>] : takes cache_lookup apart
+cache_answer() {
+	CACHE_NAME="${1:-}"
+	CACHE_CHECK="${2:-}"
+	CACHE_ANSWER="${3:-}"
+	CACHE_AGE="${4:-}"
+}
+
+# remember <object id> : the answer of this run, for the next one. After
+# the output is written, so that nothing here can change it.
+remember() {
+	[[ -n "${CACHE_NAME}" ]] || return 0
+	(
+		sgf_cache_open "${CACHE_COMMON_DIR}" &&
+			sgf_cache_put "${CACHE_NAME}" "${CACHE_CHECK}" "$1"
+	) >/dev/null 2>&1 || true
+}
+
+# read_sops_yaml <variable> : the whole text of .sops.yaml, byte for byte,
+# into the variable. False when the file cannot be opened, or holds a NUL
+# byte (read stops early, and succeeds, at one).
+read_sops_yaml() {
+	{
+		if IFS= read -r -d '' "$1"; then
+			return 1
+		fi
+	} 2>/dev/null <"${PROJECT_ROOT}/.sops.yaml"
+}
+
+# remember_encryption : the blob encrypt_input returned, written into the
+# object store (--stdin: without a filter), and remembered.
+#
+# Only when .sops.yaml still holds the text of the question. sops reads
+# the file for itself, after this filter did: an editor or a checkout
+# that changed it in between (while a key service was slow to answer)
+# gave this blob the recipients of other rules. This run returns it all
+# the same (that is what sops gave), but remembered under the question
+# of the old rules, it would be given again for 10 minutes to every run
+# that has them, in a linked worktree too. The other parts of the
+# question (plaintext, path, stored version, format, SOPS_* variables)
+# are this run's own and cannot change while it runs. A change undone
+# within the call to sops, every byte as before, is not seen; this run
+# returns that blob too.
+#
+# The answer "unchanged" needs no such check: the decrypt reads the keys
+# from the stored version, not from .sops.yaml, and for any .sops.yaml
+# this filter returns the stored version when the plaintext is the same.
+remember_encryption() {
+	local oid rules
+	[[ -n "${CACHE_NAME}" && -n "${ENCRYPTED}" ]] || return 0
+	read_sops_yaml rules && [[ "${rules}" == "${CACHE_SOPS_YAML}" ]] || return 0
+	oid="$(printf '%s' "${ENCRYPTED}" | git hash-object -w --stdin 2>/dev/null)" || return 0
+	remember "${oid}"
+}
+
+# replay_encryption <what> : print the blob a run a moment ago encrypted
+# this content to, if there is one and it passes the check of
+# encrypt_input. Never the stored version: that answer means "unchanged",
+# and is taken where the comparison is.
+replay_encryption() {
+	local out header doc
+	[[ -n "${CACHE_ANSWER}" && "${CACHE_ANSWER}" != "${STORED_ID}" ]] || return 1
+	# One read gives the size and the bytes: "<id> blob <size>", a newline,
+	# the content, a newline. The size must be the length of what the
+	# variable holds: a NUL byte the shell dropped would make it shorter.
+	# GIT_NO_LAZY_FETCH: in a partial clone, a blob that is gone is not
+	# asked for from the remote (it never had it).
+	out="$(printf '%s\n' "${CACHE_ANSWER}" |
+		GIT_NO_LAZY_FETCH=1 git cat-file --batch 2>/dev/null && printf x)" || return 1
+	header="${out%%$'\n'*}"
+	doc="${out#*$'\n'}"
+	doc="${doc%$'\n'x}"
+	[[ "${header}" == "${CACHE_ANSWER} blob "* && "${header##* }" == "${#doc}" ]] || return 1
+	is_complete_doc "${doc}" || return 1
+	echo "sops clean filter: $1, reusing its encryption of ${CACHE_AGE} s ago for ${FILENAME}" >&2
+	say_key_change "${doc}"
+	printf '%s' "${doc}"
+}
+
+if [[ "${SOPS_FILTER_CACHE:-}" != "0" && "${SOPS_FILTER_FORCE_REENCRYPT:-}" != "1" && -z "${SOPS_CONFIG:-}" ]] &&
+	[[ . -ef "${PROJECT_ROOT}" && -r "${PROJECT_ROOT}/.sops.yaml" ]] &&
+	CACHE_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)" && [[ -n "${CACHE_COMMON_DIR}" ]] &&
+	read_sops_yaml CACHE_SOPS_YAML; then
+	# shellcheck disable=SC2046  # hex digits and numbers only
+	cache_answer $(cache_lookup 2>/dev/null || true)
+fi
 
 # ── New file: no previous version in the index or HEAD ────────
 # For new files there is nothing to compare — just encrypt and exit.
 if [[ -z "${STORED_ID}" ]]; then
+	if replay_encryption "new file"; then
+		exit 0
+	fi
 	echo "sops clean filter: encrypting new file ${FILENAME}" >&2
 	encrypt_input
+	remember_encryption
 	exit 0
 fi
 
@@ -411,10 +595,31 @@ if ! sgf_is_sops_doc "${STORE_FORMAT}" "${EXISTING_ENCRYPTED}"; then
 	fi
 	# Plaintext committed before the filter existed (or by a clone
 	# without it). There is nothing to compare with: encrypt.
+	if replay_encryption "the stored version is not encrypted"; then
+		exit 0
+	fi
 	echo "sops clean filter: the stored version of ${FILENAME} is not encrypted, encrypting it now" >&2
 	encrypt_input
+	remember_encryption
 	exit 0
 fi
+
+# ── Remembered: the answer of a run a moment ago (see above) ────
+if [[ -n "${CACHE_ANSWER}" && "${CACHE_ANSWER}" == "${STORED_ID}" ]]; then
+	echo "sops clean filter: content unchanged, reusing existing encrypted blob for ${FILENAME} (compared ${CACHE_AGE} s ago)" >&2
+	if [[ -n "${INPUT_WAS_CIPHERTEXT}" ]]; then
+		echo "  Its recipients are not taken over. To change recipients: edit .sops.yaml, run rekey.sh" >&2
+	fi
+	printf '%s' "${EXISTING_ENCRYPTED}"
+	exit 0
+fi
+KEYS_BEFORE="${EXISTING_ENCRYPTED}"
+KEYS_BEFORE_FORMAT="${STORE_FORMAT}"
+if replay_encryption "content changed"; then
+	exit 0
+fi
+KEYS_BEFORE=""
+KEYS_BEFORE_FORMAT=""
 
 # ── Decrypt the stored version to compare plaintext with plaintext ────
 # sops' stderr is left alone: if this fails, its message is the reason.
@@ -451,10 +656,12 @@ if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; the
 		echo "  Its recipients are not taken over. To change recipients: edit .sops.yaml, run rekey.sh" >&2
 	fi
 	printf '%s' "${EXISTING_ENCRYPTED}"
+	remember "${STORED_ID}"
 else
 	# Content actually changed — encrypt the new version.
 	echo "sops clean filter: content changed, re-encrypting ${FILENAME}" >&2
 	KEYS_BEFORE="${EXISTING_ENCRYPTED}"
 	KEYS_BEFORE_FORMAT="${STORE_FORMAT}"
 	encrypt_input
+	remember_encryption
 fi

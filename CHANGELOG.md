@@ -2,6 +2,18 @@
 
 Every release is a tag. The same notes are on the [releases page](https://github.com/realsby/sops-git-filters/releases). After an update, run `install.sh` again in every clone.
 
+## Unreleased
+
+### Performance
+
+- **The clean filter remembers its answer for 10 minutes** ([#21](https://github.com/realsby/sops-git-filters/issues/21)). Git runs it each time it looks at a secret with uncommitted changes, and each run decrypted the stored version and encrypted the edit: two requests to a key service, and a new ciphertext every time. Now the first look after an edit costs that; later `git status`, `git diff --stat`, `git add` and `git commit -a` call `sops` no more, and `git diff` once (for the text it shows). They all see the same ciphertext for the same edit. On disk, in `.git/sops-git-filters/cache/`: HMACs under a random key of the repository, and object ids, never plaintext. `SOPS_FILTER_CACHE=0` turns it off. README: "What the clean filter remembers".
+- **`rekey.sh` lists the SOPS-managed files with one git call**, as the guard does, instead of a bash loop over every tracked file: 0.4 seconds instead of 19 with 60,000 tracked files. When git cannot list the index or answers out of order, it now stages nothing.
+
+### Behaviour changes
+
+- **A comparison that worked is not repeated for 10 minutes.** Keys that become unavailable in that time (an expired session) are noticed at the first run after it, or at once with `SOPS_FILTER_CACHE=0`. A file you can encrypt but not decrypt still fails at its next check, as before.
+- **`git status` and `git diff` write the ciphertext they get into the object store**, as `git add` would, so that the next command can reuse it. `git gc` removes those that nothing refers to.
+
 ## v3.1.0 — 2026-11-25
 
 [All changes since v3.0.0](https://github.com/realsby/sops-git-filters/compare/v3.0.0...v3.1.0)
