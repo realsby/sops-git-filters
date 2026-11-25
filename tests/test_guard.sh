@@ -284,3 +284,81 @@ test_guard_names_an_unfinished_format_change() {
 	assert_contains "${OUT}" "SOPS_FILTER_FORCE_REENCRYPT=1" "guard names the command"
 	assert_not_contains "${OUT}" "are not encrypted" "guard message"
 }
+
+# `git add -N <file>` (intent to add) puts the path in the index with the
+# empty blob, which is no SOPS document. Such an entry never reaches a
+# commit as it is: a plain `git commit` leaves it out, and `git commit -a`
+# or `git commit -- <file>` stage the content, through the filter, before
+# the hook runs. So it must not block a commit (audit A-05).
+test_guard_passes_while_a_secret_is_intent_to_add() {
+	new_repo repo
+	mkdir -p .git/hooks
+	ln -s "../../${TOOL}/encryption-guard.sh" .git/hooks/pre-commit
+	printf 'PW=hunter2\n' >a.secret
+	printf 'TOKEN=abc\n' >b.secret
+	git add -N a.secret b.secret
+
+	echo docs >README.txt
+	git add README.txt
+	run git commit -q -m "readme only"
+	assert_eq "${RC}" "0" "commit of another file"
+	assert_eq "$(git diff-tree --no-commit-id --name-only -r HEAD)" "README.txt" "files in the commit"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard started by hand"
+
+	run git commit -q -m "a.secret" -- a.secret
+	assert_eq "${RC}" "0" "git commit -- a.secret"
+	assert_contains "$(git show HEAD:a.secret)" '"data": "ENC[AES256_GCM' "a.secret in the commit"
+	assert_eq "$(plain_of_stored a.secret)" "PW=hunter2" "a.secret decrypts"
+
+	run git commit -q -a -m "everything"
+	assert_eq "${RC}" "0" "git commit -a"
+	assert_contains "$(git show HEAD:b.secret)" '"data": "ENC[AES256_GCM' "b.secret in the commit"
+	assert_not_contains "$(git show HEAD:b.secret)" "abc" "b.secret in the commit"
+}
+
+# Only an intent-to-add entry is let through. An empty blob that is
+# really staged, and plaintext next to an intent-to-add entry, still
+# block the commit.
+test_guard_blocks_plaintext_next_to_an_intent_to_add_entry() {
+	unfiltered_repo
+	printf 'PW=hunter2\n' >new.secret
+	git add -N new.secret
+	printf 'TOKEN=abc\n' >.env
+	git add .env
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "- .env" "guard names the plaintext file"
+	assert_not_contains "${OUT}" "- new.secret" "guard output"
+
+	git rm -q --cached .env
+	: >empty.secret
+	git add empty.secret
+	assert_eq "$(blob_id empty.secret)" "$(blob_id new.secret)" "test fixture: both hold the empty blob"
+	run "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status for an empty blob that is staged"
+	assert_contains "${OUT}" "- empty.secret" "guard names the empty file"
+	assert_not_contains "${OUT}" "- new.secret" "guard output"
+}
+
+# When the guard cannot tell that an entry is left out of the commit, it
+# checks the entry as before: an empty blob blocks the commit.
+test_guard_fails_closed_when_it_cannot_classify_an_intent_to_add_entry() {
+	unfiltered_repo
+	printf 'PW=hunter2\n' >new.secret
+	git add -N new.secret
+	stub ../fakebin git <<'STUB'
+case " $* " in
+*" write-tree "*)
+	echo "fatal: simulated write-tree failure" >&2
+	exit 128
+	;;
+esac
+exec "${REAL}" "$@"
+STUB
+	run env PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/encryption-guard.sh"
+	assert_ne "${RC}" "0" "guard exit status"
+	assert_contains "${OUT}" "- new.secret" "guard names the entry"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "0" "guard exit status with a working git"
+}

@@ -88,6 +88,11 @@ check_entries() {
 				managed=$((managed + 1))
 				status=0
 				sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}" "${PROJECT_ROOT}" || status=$?
+				if [[ "${status}" -eq 1 ]] && left_out_of_commit "${i}"; then
+					# Intent to add: not part of this commit, see below.
+					managed=$((managed - 1))
+					status=0
+				fi
 				case "${status}" in
 				0) ;;
 				2) unreadable="${unreadable}   - ${path}"$'\n' ;;
@@ -165,6 +170,39 @@ check_entries() {
 		return 1
 	fi
 	return 0
+}
+
+# ── Entries this commit leaves out ───────────────────────────────
+# `git add -N <file>` (intent to add) puts the path in the index with
+# the empty blob, to show the file in `git diff`. That blob is no SOPS
+# document, but it never reaches a commit: a plain `git commit` leaves
+# the entry out, and `git commit -a` or `git commit -- <file>` stage the
+# content, through the filter, before this hook runs. Blocking it would
+# block every commit until the file is staged (audit A-05).
+#
+# left_out_of_commit <index position> succeeds only when the entry holds
+# the empty blob AND is missing from the tree git builds from the index
+# for the commit (`git write-tree`, which skips intent-to-add entries;
+# it also writes that tree to the object store, as the commit will).
+# There is no documented way to read the intent-to-add flag itself. Any
+# answer it cannot get or does not expect counts as "in the commit", so
+# the entry is checked as before: it fails closed. A path with a newline
+# cannot be asked about on the one line `git cat-file --batch-check`
+# reads, and is checked as before too.
+COMMIT_TREE=""
+left_out_of_commit() {
+	local path="${INDEX_PATHS[$1]}" size answer
+	[[ "${path}" != *$'\n'* ]] || return 1
+	size="$(git -C "${PROJECT_ROOT}" cat-file -s "${INDEX_OIDS[$1]}" </dev/null 2>/dev/null)" || return 1
+	[[ "${size}" == "0" ]] || return 1
+	if [[ -z "${COMMIT_TREE}" ]]; then
+		# Fails while a path is unmerged: then nothing is left out.
+		COMMIT_TREE="$(git -C "${PROJECT_ROOT}" write-tree </dev/null 2>/dev/null)" || COMMIT_TREE=""
+		[[ -n "${COMMIT_TREE}" ]] || return 1
+	fi
+	answer="$(printf '%s:%s\n' "${COMMIT_TREE}" "${path}" |
+		git -C "${PROJECT_ROOT}" cat-file --batch-check 2>/dev/null)" || return 1
+	[[ "${answer}" == "${COMMIT_TREE}:${path} missing" ]]
 }
 
 # check_index reads `git ls-files -s -z` on stdin:
