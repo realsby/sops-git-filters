@@ -8,8 +8,8 @@
 # ║  (an expired cloud session, a key that is not on this machine),  ║
 # ║  a pull, checkout or rebase stops half-way: the secret is gone   ║
 # ║  from the working tree, some files are already written, and the  ║
-# ║  plain retry fails. See "When decryption fails half-way" in the  ║
-# ║  README for the way back.                                        ║
+# ║  plain retry fails. "When sops cannot decrypt: preflight and     ║
+# ║  recovery" in the README gives the way back.                     ║
 # ║                                                                  ║
 # ║  This script finds that out first. It decrypts stored blobs to   ║
 # ║  /dev/null: one for every set of keys the tracked SOPS-managed   ║
