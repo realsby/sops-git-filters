@@ -21,8 +21,11 @@
 # ║                                                                  ║
 # ║    ./utilities/sops-git-filters/preflight.sh && git pull         ║
 # ║                                                                  ║
-# ║  What it cannot know: commits you have not fetched yet may name  ║
-# ║  other keys than the files you have now.                         ║
+# ║  It checks the versions in the index, those of the current       ║
+# ║  checkout, and no other commit: not the commits a pull would     ║
+# ║  fetch, and not a local branch, tag or stash you switch to,      ║
+# ║  merge or rebase onto. A file there may name other keys than     ║
+# ║  the files you have now.                                         ║
 # ║                                                                  ║
 # ║  Usage:                                                          ║
 # ║    preflight.sh [--quiet]                                        ║
