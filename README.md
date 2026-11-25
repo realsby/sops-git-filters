@@ -212,8 +212,8 @@ Updating later: check out the latest release tag, not `main` (`main` is where th
 
 ```sh
 git -C utilities/sops-git-filters fetch --tags origin
-git -C utilities/sops-git-filters checkout v3.1.0     # the latest tag on the releases page
-git add utilities/sops-git-filters && git commit -m "sops-git-filters v3.1.0"
+git -C utilities/sops-git-filters checkout v3.2.0     # the latest tag on the releases page
+git add utilities/sops-git-filters && git commit -m "sops-git-filters v3.2.0"
 ./utilities/sops-git-filters/install.sh
 ```
 
@@ -233,7 +233,7 @@ If you only want the commit-time guard (e.g. filters are managed some other way)
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/realsby/sops-git-filters
-    rev: v3.1.0
+    rev: v3.2.0
     hooks:
       - id: sops-encryption-guard
 ```
