@@ -83,8 +83,8 @@ sgf_other_format() {
 # every tracked path, which is slow in a large repository (audit A-01).
 # The attribute is read as `git check-attr` reads it by default: from
 # the .gitattributes files of the working tree, and from the index where
-# the working tree has none. (encryption-guard.sh reads the index's
-# only, and lists the entries its own way.)
+# the working tree has none. (encryption-guard.sh and rekey.sh read the
+# index's only: sgf_managed_entries below.)
 #
 # The pathspec settings of the caller are dropped, in a subshell: with
 # GIT_LITERAL_PATHSPECS=1, which `git --literal-pathspecs` exports, git
@@ -94,6 +94,138 @@ sgf_ls_managed() {
 		unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 		git -C "$1" ls-files -s -z -- ':(attr:filter=sops)'
 	)
+}
+
+# ── The SOPS-managed entries of the index, by its own attributes ──
+# sgf_managed_entries <repo root> <who> <what a failure means> [<pathspec>...]
+# Prints one line per index entry whose filter attribute is "sops":
+# "<mode> <object id> <stage>" TAB <path>. Each stage of an unmerged path
+# is an entry of its own. Blobs are later read by object id, so no path
+# is ever turned into a revision (a file named like "2:prod.secret" would
+# otherwise be read as index stage 2). With pathspecs, the entries they
+# match (as `git ls-files -- <pathspec>`, from the top of the working
+# tree). Used by encryption-guard.sh and rekey.sh.
+#
+# Git lists the index (`git ls-files -s`) and answers for the attribute
+# of every path in it (`git check-attr`); awk puts the two together, and
+# only the managed entries reach bash. Reading every entry in bash took
+# 8 seconds with 60,000 tracked files, on every commit; this takes 0.2
+# (audit A-01). The text output is read, not the -z one: the awk of
+# macOS ends a line at a NUL byte. In text, git prints a path as it is,
+# or in double quotes with C-style escapes when it holds a control
+# character, a double quote or a backslash (sgf_unquote_path below). The
+# same path is printed the same way by both commands; core.quotepath=off
+# leaves the bytes above 127 alone, in both.
+#
+# --cached: the attributes come from the .gitattributes files in the
+# index, the ones the next commit carries. Without it git reads the
+# working tree, and a local edit that is not staged (".env -filter", left
+# from debugging) would decide which blobs are checked. That same edit
+# keeps `git add` from running the filter, so the plaintext it stages
+# would pass unseen (audit A-11). For the same reason the list does not
+# come from `git ls-files -- ':(attr:filter=sops)'` (sgf_ls_managed), one
+# call that is faster still: that pathspec reads the attributes of the
+# working tree.
+#
+# -C: from the top of the working tree. `git ls-files` lists only what
+# is below the current directory, so a guard started in a subdirectory
+# would pass over every secret outside it.
+#
+# The index is listed twice: once for the entries, once for check-attr.
+# Answer number i must be about entry number i, and every entry must get
+# one; anything else (an answer cut short, an index that changed in
+# between) is an error: "<who>: ... — <what a failure means>" on stderr,
+# and exit status 2. pipefail: a git command that fails fails the
+# pipeline too.
+sgf_managed_entries() {
+	local root="$1" who="$2" means="$3"
+	shift 3
+	{
+		git -C "${root}" -c core.quotepath=off ls-files -s -- "$@" &&
+			echo &&
+			git -C "${root}" -c core.quotepath=off ls-files -s -- "$@" |
+			awk '{ print substr($0, index($0, "\t") + 1) }' |
+				git -C "${root}" -c core.quotepath=off check-attr --cached --stdin filter
+	} | awk -v who="${who}" -v means="${means}" '
+	# Up to the empty line: the entries. After it: one answer per entry,
+	# "<path>: filter: <value>".
+	BEGIN { listing = 1 }
+	listing {
+		if ($0 == "") {
+			listing = 0
+			next
+		}
+		tab = index($0, "\t")
+		n++
+		meta[n] = substr($0, 1, tab - 1)
+		path[n] = substr($0, tab + 1)
+		next
+	}
+	{
+		i++
+		head = path[i] ": filter: "
+		if (i > n || substr($0, 1, length(head)) != head) {
+			print who ": git check-attr answered out of order — " means | "cat 1>&2"
+			failed = 1
+			exit
+		}
+		if (substr($0, length(head) + 1) == "sops") print meta[i] "\t" path[i]
+	}
+	END {
+		if (failed) exit 2
+		if (listing) {
+			print who ": the list of index entries was cut short — " means | "cat 1>&2"
+			exit 2
+		}
+		if (i != n) {
+			printf "%s: git check-attr answered for %d of %d index entries — %s\n", who, i, n, means | "cat 1>&2"
+			exit 2
+		}
+	}'
+}
+
+# sgf_unquote_path <path as sgf_managed_entries prints it>
+# The path itself, in REPLY. Undoes the quoting of git (quote_c_style):
+# a quoted path is in double quotes, with \a \b \t \n \v \f \r \" \\ and
+# \ooo (three octal digits) for the bytes it escapes. Returns 1 for
+# anything else, which git does not print.
+sgf_unquote_path() {
+	local rest="$1" out="" c
+	if [[ "${rest}" != \"* ]]; then
+		REPLY="${rest}"
+		return 0
+	fi
+	[[ "${#rest}" -ge 2 && "${rest}" == *\" ]] || return 1
+	rest="${rest:1:${#rest}-2}"
+	while [[ -n "${rest}" ]]; do
+		c="${rest:0:1}"
+		if [[ "${c}" != "\\" ]]; then
+			out="${out}${c}"
+			rest="${rest:1}"
+			continue
+		fi
+		c="${rest:1:1}"
+		case "${c}" in
+		a) out="${out}"$'\a' ;;
+		b) out="${out}"$'\b' ;;
+		t) out="${out}"$'\t' ;;
+		n) out="${out}"$'\n' ;;
+		v) out="${out}"$'\v' ;;
+		f) out="${out}"$'\f' ;;
+		r) out="${out}"$'\r' ;;
+		'"' | "\\") out="${out}${c}" ;;
+		[0-3])
+			[[ "${rest:1:3}" == [0-3][0-7][0-7] ]] || return 1
+			# shellcheck disable=SC2059  # the format is the escape itself
+			printf -v c "\\${rest:1:3}"
+			out="${out}${c}"
+			rest="${rest:2}"
+			;;
+		*) return 1 ;;
+		esac
+		rest="${rest:2}"
+	done
+	REPLY="${out}"
 }
 
 # ── Paths in the commands a message prints ────────────────────────

@@ -118,127 +118,118 @@ rekeyed=0
 unchanged=0
 failed=0
 
-# rekey_entries: stdin is the answer of `git check-attr --cached -z filter` for
-# the index entries collected by rekey_index, in the same order.
+# rekey_entry <mode> <object id> <stage> <path> : one SOPS-managed index
+# entry. It runs with errexit off (see below), so every command that
+# writes is checked by hand: a file counts as re-keyed only when git
+# really took the new version.
+rekey_entry() {
+	local mode="$1" oid="$2" stage="$3" path="$4" copy new_oid output
+	case "${mode}:${stage}" in
+	120000:* | 160000:*) ;; # symlink or submodule: never filtered
+	*:0)
+		copy="${WORK}/${path}"
+		if ! mkdir -p "$(dirname "${copy}")" ||
+			! git cat-file blob "${oid}" >"${copy}"; then
+			echo "FAILED  ${path}: could not copy the stored version (see the message above)" >&2
+			failed=$((failed + 1))
+		elif ! sgf_blob_is_sops_doc "${STORE_FORMAT}" "${oid}"; then
+			echo "FAILED  ${path}: the stored version is not a SOPS document in the ${STORE_FORMAT} format (run install.sh for details)" >&2
+			failed=$((failed + 1))
+		elif ! output="$(sops --config "${WORK}/.sops.yaml" updatekeys --yes --input-type "${STORE_FORMAT}" "${copy}" 2>&1)"; then
+			echo "FAILED  ${path}: sops updatekeys said:" >&2
+			printf '%s\n' "${output}" | sed 's/^/          /' >&2
+			failed=$((failed + 1))
+		elif ! new_oid="$(git hash-object --no-filters -- "${copy}")"; then
+			echo "FAILED  ${path}: could not read what sops updatekeys wrote (see the message above)" >&2
+			failed=$((failed + 1))
+		elif [[ "${new_oid}" == "${oid}" ]]; then
+			unchanged=$((unchanged + 1))
+		elif ! sgf_is_sops_doc "${STORE_FORMAT}" "$(cat "${copy}")"; then
+			echo "FAILED  ${path}: sops updatekeys returned something that is not a SOPS document" >&2
+			failed=$((failed + 1))
+		elif [[ "${DRY_RUN}" -eq 1 ]]; then
+			echo "would re-key  ${path}"
+			rekeyed=$((rekeyed + 1))
+		elif git hash-object -w --no-filters -- "${copy}" >/dev/null &&
+			git update-index --cacheinfo "${mode}" "${new_oid}" "${path}"; then
+			echo "re-keyed  ${path}"
+			rekeyed=$((rekeyed + 1))
+		else
+			echo "FAILED  ${path}: git could not stage the re-keyed version (see the message above); the index still holds the old one" >&2
+			failed=$((failed + 1))
+		fi
+		;;
+	*)
+		echo "FAILED  ${path}: unmerged (conflict in progress); resolve it first" >&2
+		failed=$((failed + 1))
+		;;
+	esac
+}
+
+# ── Which files ────
+# The SOPS-managed entries of the index, as the guard finds them
+# (lib.sh): one `git ls-files` and one `git check-attr --cached` joined
+# in awk, so only those entries reach bash. A bash loop over every
+# tracked path took 19 seconds with 60,000 of them (audit A-01).
+# --cached: the attributes of the .gitattributes files in the index.
+# rekey.sh stages its result, and the commit that follows carries those,
+# not an edit of .gitattributes that is not staged; the guard reads them
+# the same way (audit A-11). Paths given on the command line limit the
+# list, as pathspecs from where the caller stands.
 #
-# This function runs as the last part of a pipeline whose status is
-# taken with `|| status=$?`, and in that position bash does not stop at
-# a failing command (errexit is off). So every command that writes is
-# checked by hand: a file counts as re-keyed only when git really took
-# the new version.
-rekey_entries() {
-	local i=0 path attr value copy new_oid output
-	while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-		if [[ "${path}" != "${INDEX_PATHS[i]:-}" ]]; then
-			echo "Error: git check-attr answered out of order." >&2
-			return 2
-		fi
-		if [[ "${attr}" == "filter" && "${value}" == "sops" ]]; then
-			case "${INDEX_MODES[i]}:${INDEX_STAGES[i]}" in
-			120000:* | 160000:*) ;; # symlink or submodule: never filtered
-			*:0)
-				copy="${WORK}/${path}"
-				if ! mkdir -p "$(dirname "${copy}")" ||
-					! git cat-file blob "${INDEX_OIDS[i]}" >"${copy}"; then
-					echo "FAILED  ${path}: could not copy the stored version (see the message above)" >&2
-					failed=$((failed + 1))
-				elif ! sgf_blob_is_sops_doc "${STORE_FORMAT}" "${INDEX_OIDS[i]}"; then
-					echo "FAILED  ${path}: the stored version is not a SOPS document in the ${STORE_FORMAT} format (run install.sh for details)" >&2
-					failed=$((failed + 1))
-				elif ! output="$(sops --config "${WORK}/.sops.yaml" updatekeys --yes --input-type "${STORE_FORMAT}" "${copy}" 2>&1)"; then
-					echo "FAILED  ${path}: sops updatekeys said:" >&2
-					printf '%s\n' "${output}" | sed 's/^/          /' >&2
-					failed=$((failed + 1))
-				elif ! new_oid="$(git hash-object --no-filters -- "${copy}")"; then
-					echo "FAILED  ${path}: could not read what sops updatekeys wrote (see the message above)" >&2
-					failed=$((failed + 1))
-				else
-					if [[ "${new_oid}" == "${INDEX_OIDS[i]}" ]]; then
-						unchanged=$((unchanged + 1))
-					elif ! sgf_is_sops_doc "${STORE_FORMAT}" "$(cat "${copy}")"; then
-						echo "FAILED  ${path}: sops updatekeys returned something that is not a SOPS document" >&2
-						failed=$((failed + 1))
-					elif [[ "${DRY_RUN}" -eq 1 ]]; then
-						echo "would re-key  ${path}"
-						rekeyed=$((rekeyed + 1))
-					elif git hash-object -w --no-filters -- "${copy}" >/dev/null &&
-						git update-index --cacheinfo "${INDEX_MODES[i]}" "${new_oid}" "${path}"; then
-						echo "re-keyed  ${path}"
-						rekeyed=$((rekeyed + 1))
-					else
-						echo "FAILED  ${path}: git could not stage the re-keyed version (see the message above); the index still holds the old one" >&2
-						failed=$((failed + 1))
-					fi
-				fi
-				;;
-			*)
-				echo "FAILED  ${path}: unmerged (conflict in progress); resolve it first" >&2
-				failed=$((failed + 1))
-				;;
-			esac
-		fi
-		i=$((i + 1))
-	done
-	if [[ "${i}" -ne "${#INDEX_PATHS[@]}" ]]; then
-		echo "Error: git check-attr answered for ${i} of ${#INDEX_PATHS[@]} index entries." >&2
-		return 2
-	fi
-
-	echo
-	if [[ "${DRY_RUN}" -eq 1 ]]; then
-		echo "Dry run: ${rekeyed} file(s) would be re-keyed, ${unchanged} already match .sops.yaml, ${failed} failed."
-	else
-		echo "${rekeyed} file(s) re-keyed and staged, ${unchanged} already match .sops.yaml, ${failed} failed."
-		if [[ "${rekeyed}" -gt 0 ]]; then
-			echo "Review with: git diff --cached --stat    then commit."
-		fi
-	fi
-	[[ "${failed}" -eq 0 ]]
-}
-
-# rekey_index: stdin is `git ls-files -s -z`:
-# "<mode> <object id> <stage>" TAB <path> NUL per entry.
-INDEX_MODES=()
-INDEX_OIDS=()
-INDEX_STAGES=()
-INDEX_PATHS=()
-rekey_index() {
-	local record meta rest n=0
-	while IFS= read -r -d '' record; do
-		meta="${record%%$'\t'*}"
-		INDEX_MODES[n]="${meta%% *}"
-		rest="${meta#* }"
-		INDEX_OIDS[n]="${rest%% *}"
-		INDEX_STAGES[n]="${rest#* }"
-		INDEX_PATHS[n]="${record#*$'\t'}"
-		n=$((n + 1))
-	done
-	if [[ "${n}" -eq 0 ]]; then
-		echo "No tracked files match."
-		return 0
-	fi
-	# --cached: the attributes of the .gitattributes files in the index.
-	# rekey.sh stages its result, and the commit that follows carries
-	# those, not an edit of .gitattributes that is not staged; the guard
-	# reads them the same way (audit A-11).
-	printf '%s\0' "${INDEX_PATHS[@]}" |
-		git check-attr --cached --stdin -z filter |
-		rekey_entries
-}
-
-status=0
-if [[ ${#LIMIT[@]} -gt 0 ]]; then
-	# Turn the caller's paths into paths from the repository root.
-	ROOTED=()
-	for item in "${LIMIT[@]}"; do
-		case "${item}" in
-		/*) ROOTED[${#ROOTED[@]}]="${item}" ;;
-		*) ROOTED[${#ROOTED[@]}]="${CALLER_PREFIX}${item}" ;;
-		esac
-	done
-	git ls-files -s -z -- "${ROOTED[@]}" | rekey_index || status=$?
-else
-	git ls-files -s -z | rekey_index || status=$?
+# The whole list is read before anything is re-keyed: when git cannot
+# list the index or answers out of order, nothing is staged.
+SPEC=()
+for item in ${LIMIT[@]+"${LIMIT[@]}"}; do
+	case "${item}" in
+	/*) SPEC[${#SPEC[@]}]="${item}" ;;
+	*) SPEC[${#SPEC[@]}]="${CALLER_PREFIX}${item}" ;;
+	esac
+done
+if ! LISTING="$(sgf_managed_entries "${PROJECT_ROOT}" rekey.sh "nothing was re-keyed" ${SPEC[@]+"${SPEC[@]}"})"; then
+	echo "Error: could not list the SOPS-managed files of the index (see above). Nothing was re-keyed." >&2
+	exit 1
 fi
 
-[[ "${status}" -eq 0 ]] || exit 1
+ENTRY_MODES=()
+ENTRY_OIDS=()
+ENTRY_STAGES=()
+ENTRY_PATHS=()
+while IFS= read -r line; do
+	[[ -n "${line}" ]] || continue
+	if ! sgf_unquote_path "${line#*$'\t'}"; then
+		echo "Error: cannot read the name git printed for an index entry. Nothing was re-keyed." >&2
+		exit 1
+	fi
+	meta="${line%%$'\t'*}"
+	n="${#ENTRY_PATHS[@]}"
+	ENTRY_PATHS[n]="${REPLY}"
+	ENTRY_MODES[n]="${meta%% *}"
+	meta="${meta#* }"
+	ENTRY_OIDS[n]="${meta%% *}"
+	ENTRY_STAGES[n]="${meta#* }"
+done <<<"${LISTING}"
+
+# Nothing managed: say whether the paths match anything at all.
+if [[ "${#ENTRY_PATHS[@]}" -eq 0 && -z "$(git ls-files -- ${SPEC[@]+"${SPEC[@]}"})" ]]; then
+	echo "No tracked files match."
+	exit 0
+fi
+
+# `|| true`: errexit stays off inside rekey_entry, as it was in the loop
+# this replaces. A command that fails there is reported and counted, and
+# the next file is still tried.
+for ((i = 0; i < ${#ENTRY_PATHS[@]}; i++)); do
+	rekey_entry "${ENTRY_MODES[i]}" "${ENTRY_OIDS[i]}" "${ENTRY_STAGES[i]}" "${ENTRY_PATHS[i]}" || true
+done
+
+echo
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+	echo "Dry run: ${rekeyed} file(s) would be re-keyed, ${unchanged} already match .sops.yaml, ${failed} failed."
+else
+	echo "${rekeyed} file(s) re-keyed and staged, ${unchanged} already match .sops.yaml, ${failed} failed."
+	if [[ "${rekeyed}" -gt 0 ]]; then
+		echo "Review with: git diff --cached --stat    then commit."
+	fi
+fi
+[[ "${failed}" -eq 0 ]] || exit 1

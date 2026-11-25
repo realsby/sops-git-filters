@@ -237,3 +237,161 @@ test_rekey_reads_the_attributes_of_the_index() {
 	assert_contains "$(stored .env)" "${AGE_PUB_B}" "recipient B in the staged blob"
 	assert_eq "$(stored notes.txt)" "not a secret" "notes.txt in the index"
 }
+
+# sops_blob_for_a <text> : a SOPS document (json) of <text> for key A
+# only, written to the object store; prints its object id
+sops_blob_for_a() {
+	printf '%s\n' "$1" |
+		sops encrypt --age "${AGE_PUB_A}" --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		git hash-object -w --stdin
+}
+
+# Names that git quotes in its text output, and names that look like
+# pathspec magic, an option or an index stage: each one is re-keyed under
+# its own name. Staged straight into the index.
+test_rekey_handles_awkward_names() {
+	new_repo repo
+	local names=(
+		'with space.secret'
+		$'tab\there.secret'
+		$'new\nline.secret'
+		'quote"double.secret'
+		"quote'single.secret"
+		'back\slash.secret'
+		$'ctrl\001char.secret'
+		$'cr\rchar.secret'
+		$'caf\303\251.secret'
+		'glob*star[1]?.secret'
+		':colon.secret'
+		'-dash.secret'
+		'2:stage.secret'
+		':(literal)magic.secret'
+		'"starts with a quote.secret'
+		'sub dir/"quoted" dir/x.secret'
+	)
+	local name i=0
+	for name in "${names[@]}"; do
+		i=$((i + 1))
+		git update-index --add --cacheinfo "100644,$(sops_blob_for_a "PW=${i}"),${name}"
+	done
+	git commit -q -m "awkward names"
+	write_sops_yaml "${AGE_PUB_B}"
+
+	run "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "0" "rekey.sh exit status"
+	assert_contains "${OUT}" "${#names[@]} file(s) re-keyed and staged, 0 already match .sops.yaml, 0 failed" "rekey.sh summary"
+	i=0
+	for name in "${names[@]}"; do
+		i=$((i + 1))
+		assert_contains "${OUT}" "re-keyed  ${name}"$'\n' "rekey.sh names [${name}]"
+		assert_eq "$(git cat-file blob ":0:${name}" | decrypt_as_b)" "PW=${i}" "key B decrypts the staged blob of [${name}]"
+	done
+}
+
+# A path in a conflict is not re-keyed: each of its stages is reported,
+# and the other files are re-keyed all the same.
+test_rekey_reports_unmerged_entries() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "add .env"
+	local stage
+	for stage in 1 2 3; do
+		printf '100644 %s %s\tc.secret\n' "$(sops_blob_for_a "stage ${stage}")" "${stage}" | git update-index --index-info
+	done
+	write_sops_yaml "${AGE_PUB_B}"
+
+	run "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "1" "rekey.sh exit status"
+	assert_eq "$(printf '%s\n' "${OUT}" | grep -c '^FAILED  c.secret: unmerged')" "3" "one line per stage"
+	assert_contains "${OUT}" "re-keyed  .env" "the other file is re-keyed"
+	assert_contains "${OUT}" "1 file(s) re-keyed and staged, 0 already match .sops.yaml, 3 failed" "rekey.sh summary"
+}
+
+# Paths on the command line are taken from where rekey.sh is started.
+test_rekey_path_limit_from_a_subdirectory() {
+	new_repo repo
+	mkdir -p team
+	printf 'A=1\n' >team/a.secret
+	printf 'B=1\n' >team/b.secret
+	printf 'C=1\n' >c.secret
+	git add team c.secret
+	git commit -q -m "three secrets"
+	write_sops_yaml "${AGE_PUB_B}"
+	local b_id c_id
+	b_id="$(blob_id team/b.secret)"
+	c_id="$(blob_id c.secret)"
+
+	run sh -c "cd team && '${PWD}/${TOOL}/rekey.sh' a.secret"
+	assert_eq "${RC}" "0" "rekey.sh exit status"
+	assert_contains "${OUT}" "re-keyed  team/a.secret" "rekey.sh output"
+	assert_eq "$(stored team/a.secret | decrypt_as_b)" "A=1" "key B decrypts the named file"
+	assert_eq "$(blob_id team/b.secret)" "${b_id}" "the other file in the directory"
+	assert_eq "$(blob_id c.secret)" "${c_id}" "the file outside the directory"
+
+	run sh -c "cd team && '${PWD}/${TOOL}/rekey.sh' --dry-run nothing-here.secret"
+	assert_eq "${RC}" "0" "rekey.sh exit status for a path that matches nothing"
+	assert_contains "${OUT}" "No tracked files match." "rekey.sh output for a path that matches nothing"
+	run "${TOOL}/rekey.sh" --dry-run notes.txt .gitattributes
+	assert_contains "${OUT}" "0 file(s) would be re-keyed, 0 already match .sops.yaml, 0 failed." "rekey.sh output for files that are not SOPS-managed"
+}
+
+# An answer of git check-attr that does not fit the listing (cut short,
+# or in another order) says nothing about which files are SOPS-managed:
+# rekey.sh fails and stages nothing.
+test_rekey_stages_nothing_when_check_attr_answers_wrong() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	printf 'TOKEN=abc\n' >b.secret
+	git add .env b.secret
+	git commit -q -m "two secrets"
+	write_sops_yaml "${AGE_PUB_B}"
+	local index_before mode
+	index_before="$(git ls-files -s)"
+	stub ../fakebin git <<'STUB'
+case " $* " in
+*" check-attr "*)
+	case "${SGF_STUB_MODE}" in
+	short) "${REAL}" "$@" </dev/null ;;
+	reversed) sort -r | "${REAL}" "$@" ;;
+	esac
+	exit $?
+	;;
+esac
+exec "${REAL}" "$@"
+STUB
+	for mode in short reversed; do
+		run env SGF_STUB_MODE="${mode}" PATH="${PWD}/../fakebin:${PATH}" "${TOOL}/rekey.sh"
+		assert_eq "${RC}" "1" "rekey.sh exit status (${mode})"
+		assert_contains "${OUT}" "Nothing was re-keyed" "rekey.sh message (${mode})"
+		assert_not_contains "${OUT}" "re-keyed  " "rekey.sh output (${mode})"
+		assert_eq "$(git ls-files -s)" "${index_before}" "the index (${mode})"
+	done
+}
+
+# rekey.sh walked every tracked path in bash, twice, the slow pattern the
+# guard lost in audit A-01: 19 seconds with 60,000 tracked files, 50 with
+# the 100,000 here. It now lists the SOPS-managed entries as the guard
+# does, and its time follows their number: 0.6 seconds here on a laptop,
+# for both runs. The limit leaves a slow CI runner six times that.
+test_rekey_is_fast_with_many_tracked_files() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	printf 'TOKEN=abc\n' >deploy.secret
+	git add .env deploy.secret
+	git commit -q -m "two secrets"
+	write_sops_yaml "${AGE_PUB_B}"
+	local before
+	before="$(git ls-files | wc -l)"
+	add_index_entries 100000
+	assert_eq "$(git ls-files | wc -l | tr -d " ")" "$((before + 100000))" "test fixture: tracked files"
+
+	timed "${TOOL}/rekey.sh" --dry-run
+	assert_eq "${RC}" "0" "rekey.sh --dry-run exit status"
+	faster_than "${SECS}" 4 || fail "rekey.sh --dry-run took ${SECS} s for 100,000 tracked files"
+	timed "${TOOL}/rekey.sh"
+	assert_eq "${RC}" "0" "rekey.sh exit status"
+	faster_than "${SECS}" 4 || fail "rekey.sh took ${SECS} s for 100,000 tracked files"
+	assert_eq "$(stored .env | decrypt_as_b)" "A=1" "key B decrypts .env"
+	assert_eq "$(stored deploy.secret | decrypt_as_b)" "TOKEN=abc" "key B decrypts deploy.secret"
+}
