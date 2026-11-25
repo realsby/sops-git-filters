@@ -328,8 +328,12 @@ test_lib_absolute_path() {
 	is sgf_is_absolute /c/Users/me/.githooks
 	is_not sgf_is_absolute .git/hooks
 	is_not sgf_is_absolute C:hooks
+	is sgf_is_absolute '\\server\share\attributes'
+	is sgf_is_absolute //server/share/attributes
+	is_not sgf_is_absolute '\hooks'
 	OSTYPE=linux-gnu
 	is_not sgf_is_absolute C:/Users/me/.githooks
+	is_not sgf_is_absolute '\\server\share\attributes'
 }
 
 test_lib_store_format() {

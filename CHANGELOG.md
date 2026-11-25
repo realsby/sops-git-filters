@@ -6,7 +6,7 @@ Every release is a tag. The same notes are on the [releases page](https://github
 
 ### Security
 
-- **Windows: the guard did not read the global and system attributes files**, because git prints their paths as `C:/...` and the guard took them for relative paths. A macro there that turns `filter` off (`[attr]binary -filter`) let a plaintext secret through. Such a path now counts as absolute.
+- **Windows: the guard did not read the global and system attributes files**, because git prints their paths as `C:/...` and the guard took them for relative paths. A macro there that turns `filter` off (`[attr]binary -filter`) let a plaintext secret through. Such a path now counts as absolute, as does a path on a network share (`\\server\share\...`).
 
 ### Performance
 

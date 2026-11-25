@@ -368,6 +368,22 @@ test_guard_blocks_a_filter_macro_in_core_attributesfile() {
 	run "${TOOL}/encryption-guard.sh"
 	assert_eq "${RC}" "1" "guard exit status with a macro that unsets filter"
 	assert_contains "${OUT}" "global-attributes:2: [attr]binary -diff -merge -text -filter" "guard names the file and the line"
+
+	# On Windows git gives the guard a network path as it was configured,
+	# "\\server\share\...". The runner's own disk, through its admin
+	# share, stands in for a server.
+	case "${OSTYPE:-}" in
+	msys* | cygwin*)
+		local unc
+		unc="$(cygpath -w "${PWD}/../global-attributes")"
+		unc="\\\\localhost\\${unc:0:1}\$${unc:2}"
+		[[ -r "${unc}" ]] || fail "test fixture: cannot read ${unc}"
+		git config core.attributesFile "${unc}"
+		run "${TOOL}/encryption-guard.sh"
+		assert_eq "${RC}" "1" "guard exit status with the macro in ${unc}"
+		assert_contains "${OUT}" "global-attributes:2: [attr]binary -diff -merge -text -filter" "guard names the file on the share and the line"
+		;;
+	esac
 }
 
 # Lines that cannot change the filter attribute of a path do not block,
