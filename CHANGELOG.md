@@ -23,7 +23,7 @@ Every release is a tag. The same notes are on the [releases page](https://github
 - **Windows (Git Bash): every `git add` and checkout of a secret failed.** The scripts gave `sops` the file `/dev/stdin`, which Git Bash hands to a Windows program as `C:\proc\self\fd\0`, a path that does not exist. `sops` now reads stdin itself.
 - **Windows: a machine-wide `core.hooksPath` (`~/.githooks`) was taken for a directory inside the repository**, because git prints it as `C:/...` too: `install.sh` wrote the permission hooks there, where git never runs them, instead of leaving the shared directory alone.
 - **Windows: `install.sh` stopped (exit status 128) at a secret whose path holds a character such as `` ` ``.** Git Bash hands git such an absolute path unconverted, and git cannot open it. It now names the file from the top of the working tree.
-- **`harden-permissions.sh` no longer says "set to 600" where the file system keeps no Unix modes** (Windows); it says that it changed nothing. The clean filter keeps no cache there, for the same reason (its directory must be closed to others).
+- **`harden-permissions.sh` no longer says "set to 600" where the file system keeps no Unix modes** (Windows); it says that it changed nothing.
 - **busybox awk up to 1.30:** the clean filter failed when the keys of a secret changed ("Call to undefined function").
 
 ### Documentation
