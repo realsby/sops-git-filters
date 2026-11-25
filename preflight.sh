@@ -132,7 +132,7 @@ access_of() {
 # exit status is lost. A list that is cut short (an index that cannot be
 # read) must not look like "nothing to check": ask once here, where the
 # status counts.
-if ! git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter >/dev/null; then
+if ! sgf_ls_managed "${TARGET_ROOT}" >/dev/null; then
 	echo "preflight: cannot list the tracked files and their attributes (git's message is above)." >&2
 	exit 2
 fi
@@ -148,14 +148,17 @@ unreadable=0
 not_documents=0
 seen_sets=""
 
-while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
+previous_path=""
+while IFS= read -r -d '' record; do
+	# "<mode> <object id> <stage>" TAB <path> (lib.sh). An unmerged path
+	# is listed once per stage; its first entry stands for it.
+	path="${record#*$'\t'}"
+	[[ "${path}" != "${previous_path}" ]] || continue
+	previous_path="${path}"
 
-	# "<mode> <object id>" of the index entry. GIT_LITERAL_PATHSPECS: the
-	# path is a file name here, not a pattern.
-	entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}') || entry=""
-	mode="${entry%% *}"
-	sha="${entry#* }"
+	mode="${record%% *}"
+	sha="${record#* }"
+	sha="${sha%% *}"
 	if [[ -z "${sha}" ]]; then
 		echo "preflight: cannot read the index entry of ${path}." >&2
 		unreadable=$((unreadable + 1))
@@ -203,7 +206,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 		# shellcheck disable=SC2046  # one word per key type
 		sgf_credential_hint "    " $(git -C "${TARGET_ROOT}" cat-file blob "${sha}" | sgf_doc_key_types)
 	} >&2
-done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
+done < <(sgf_ls_managed "${TARGET_ROOT}")
 
 if [[ "${failed}" -ne 0 ]]; then
 	{

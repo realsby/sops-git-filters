@@ -74,6 +74,28 @@ sgf_other_format() {
 	esac
 }
 
+# ── The SOPS-managed entries of the index ─────────────────────────
+# sgf_ls_managed <repo root>
+# Prints the index entries whose filter attribute is "sops", as
+# `git ls-files -s -z` does: "<mode> <object id> <stage>" TAB <path> NUL,
+# every stage of an unmerged path. One git call does the selection, the
+# pathspec ":(attr:filter=sops)" (git >= 2.13), not a bash loop over
+# every tracked path, which is slow in a large repository (audit A-01).
+# The attribute is read as `git check-attr` reads it by default: from
+# the .gitattributes files of the working tree, and from the index where
+# the working tree has none. (encryption-guard.sh reads the index's
+# only, and lists the entries its own way.)
+#
+# The pathspec settings of the caller are dropped, in a subshell: with
+# GIT_LITERAL_PATHSPECS=1, which `git --literal-pathspecs` exports, git
+# would look for a file named like the pathspec and list nothing.
+sgf_ls_managed() {
+	(
+		unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+		git -C "$1" ls-files -s -z -- ':(attr:filter=sops)'
+	)
+}
+
 # ── One encrypted value ───────────────────────────────────────────
 # An awk function shared by the two document checks below. True when
 # the string is exactly one SOPS ciphertext value:

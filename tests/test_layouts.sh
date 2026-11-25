@@ -119,6 +119,89 @@ test_perms_refused_mode_still_hardens_through_the_hook() {
 	assert_eq "$(mode_of .env)" "600" "mode after git checkout with a refused mode"
 }
 
+# The hooks run after every checkout, merge, rebase and commit. Their
+# time must follow the number of SOPS-managed files, not the number of
+# tracked files (audit A-01: 1.5 s per checkout with 60,000 of them,
+# 2 s with the 100,000 here). The hook needs 0.03 s on a laptop.
+test_perms_hook_is_fast_with_many_tracked_files() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	add_index_entries 100000
+	chmod 644 .env
+
+	timed "${TOOL}/harden-permissions.sh"
+	assert_eq "${RC}" "0" "harden-permissions.sh exit status"
+	assert_eq "$(mode_of .env)" "600" "mode of the secret"
+	faster_than "${SECS}" 1 || fail "harden-permissions.sh took ${SECS} s for 100,000 tracked files"
+}
+
+# Every managed regular file is found, whatever its name; a symlink and
+# a file without the attribute are left alone, an executable keeps its
+# execute bit.
+test_perms_awkward_names_symlinks_and_executables() {
+	new_repo repo
+	local names=(
+		'with space.secret'
+		$'tab\there.secret'
+		$'new\nline.secret'
+		'quote"double.secret'
+		'back\slash.secret'
+		'glob*star[1]?.secret'
+		':colon.secret'
+		'!bang.secret'
+		'-dash.secret'
+		'2:stage.secret'
+		':(literal)magic.secret'
+		$'caf\303\251.secret'
+	)
+	local name
+	for name in "${names[@]}"; do
+		printf 'A=1\n' >"./${name}"
+		git add -- "./${name}"
+	done
+	printf '#!/bin/sh\n' >run.secret
+	chmod 755 run.secret
+	echo docs >other.txt
+	ln -s other.txt link.secret
+	git add run.secret other.txt link.secret
+	git commit -q -m "secrets with awkward names"
+	for name in "${names[@]}"; do
+		chmod 644 "./${name}"
+	done
+	chmod 755 run.secret
+	chmod 644 other.txt
+
+	run "${TOOL}/harden-permissions.sh"
+	assert_eq "${RC}" "0" "harden-permissions.sh exit status"
+	assert_contains "${OUT}" "Permissions: $((${#names[@]} + 1)) SOPS-managed file(s) set to 600." "message"
+	for name in "${names[@]}"; do
+		assert_eq "$(mode_of "./${name}")" "600" "mode of [${name}]"
+	done
+	assert_eq "$(mode_of run.secret)" "700" "mode of the executable secret"
+	assert_eq "$(mode_of other.txt)" "644" "mode of a file without the attribute"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
+
+# A pathspec setting the caller exported (GIT_LITERAL_PATHSPECS=1 also
+# comes from `git --literal-pathspecs`) must not hide the secrets.
+test_perms_hook_ignores_pathspec_settings_of_the_caller() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	printf 'B=1\n' >':(literal)b.secret'
+	git add -- .env './:(literal)b.secret'
+	local setting
+	for setting in GIT_LITERAL_PATHSPECS=1 GIT_GLOB_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1 GIT_ICASE_PATHSPECS=1 \
+		"GIT_GLOB_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1"; do
+		chmod 644 .env ':(literal)b.secret'
+		# shellcheck disable=SC2086  # one or two settings
+		run env ${setting} "${TOOL}/harden-permissions.sh"
+		assert_eq "${RC}" "0" "harden-permissions.sh exit status with ${setting}"
+		assert_eq "$(mode_of .env)" "600" "mode of .env with ${setting}"
+		assert_eq "$(mode_of ':(literal)b.secret')" "600" "mode of :(literal)b.secret with ${setting}"
+	done
+}
+
 test_install_keeps_hooks_it_did_not_write() {
 	git init -q repo
 	cd repo || exit 1

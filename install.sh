@@ -387,17 +387,19 @@ OTHER_FORMAT_IN_GIT=""
 STILL_ENCRYPTED=""
 STILL_ENCRYPTED_KEY_TYPES=""
 HOLDS_NUL_BYTES=""
-while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
+previous_path=""
+while IFS= read -r -d '' record; do
+	# "<mode> <object id> <stage>" TAB <path> (lib.sh). An unmerged path
+	# is listed once per stage; its first entry stands for it.
+	path="${record#*$'\t'}"
+	[[ "${path}" != "${previous_path}" ]] || continue
+	previous_path="${path}"
 	FOUND_ANY=1
 	f="${TARGET_ROOT}/${path}"
 
-	# "<mode> <object id>" of the index entry. GIT_LITERAL_PATHSPECS: the
-	# path is a file name here, not a pattern.
-	index_entry=$(GIT_LITERAL_PATHSPECS=1 git -C "${TARGET_ROOT}" ls-files -s -- "${path}" | awk 'NR == 1 {print $1, $2}')
-	index_mode="${index_entry%% *}"
-	index_sha="${index_entry#* }"
-	[[ -n "${index_sha}" ]] || continue
+	index_mode="${record%% *}"
+	index_sha="${record#* }"
+	index_sha="${index_sha%% *}"
 	# A symlink or a submodule: git never runs a filter on these.
 	[[ "${index_mode}" != "120000" && "${index_mode}" != "160000" ]] || continue
 
@@ -483,7 +485,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 			esac
 		done
 	fi
-done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
+done < <(sgf_ls_managed "${TARGET_ROOT}")
 
 if [[ "${FOUND_ANY}" -eq 0 ]]; then
 	echo "Note: no tracked files carry 'filter=sops' in .gitattributes yet." >&2

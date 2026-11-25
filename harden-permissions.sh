@@ -93,21 +93,36 @@ plain_mode="${FILE_MODE: -3}"
 EXEC_MODE="$((${plain_mode:0:1} | 1))${plain_mode:1}"
 
 # ── Walk every tracked path carrying filter=sops ────
-# check-attr -z emits NUL-separated <path> <attr> <value> triples, so
-# paths with spaces or newlines survive intact.
+# One git call lists them, each with its mode in the index: the pathspec
+# ":(attr:filter=sops)" keeps the entries whose filter attribute is
+# "sops" (git >= 2.13). Git reads the attribute as `git check-attr` does
+# by default: from the .gitattributes files of the working tree, and from
+# the index where the working tree has none. -z keeps paths with spaces
+# or newlines intact. Not a bash loop over every tracked path, which took
+# 1.5 seconds per checkout with 60,000 of them (audit A-01).
+#
+# The pathspec settings of the caller must not change what the pathspec
+# means: with GIT_LITERAL_PATHSPECS=1, which `git --literal-pathspecs`
+# hands to the hooks, git would look for a file named like the pathspec,
+# and every secret would stay at the mode the checkout gave it.
+unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 hardened=0
 failed=0
+previous=""
 
-while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
-	[[ "${attr}" == "filter" && "${value}" == "sops" ]] || continue
+while IFS= read -r -d '' record; do
+	# "<mode> <object id> <stage>" TAB <path>. An unmerged path is listed
+	# once per stage; the first entry decides.
+	path="${record#*$'\t'}"
+	[[ "${path}" != "${previous}" ]] || continue
+	previous="${path}"
 	f="${TARGET_ROOT}/${path}"
 	# Regular files only: never chmod through a symlink, and skip paths
 	# deleted or not yet checked out.
 	[[ -f "${f}" && ! -L "${f}" ]] || continue
 
 	mode="${FILE_MODE}"
-	entry="$(git -C "${TARGET_ROOT}" ls-files -s -- ":(literal)${path}")"
-	[[ "${entry:0:6}" == "100755" ]] && mode="${EXEC_MODE}"
+	[[ "${record:0:6}" == "100755" ]] && mode="${EXEC_MODE}"
 
 	if chmod "${mode}" "${f}" 2>/dev/null; then
 		hardened=$((hardened + 1))
@@ -115,7 +130,7 @@ while IFS= read -r -d '' path && IFS= read -r -d '' attr && IFS= read -r -d '' v
 		failed=$((failed + 1))
 		echo "⚠  Could not chmod ${mode} ${path}" >&2
 	fi
-done < <(git -C "${TARGET_ROOT}" ls-files -z | git -C "${TARGET_ROOT}" check-attr --stdin -z filter)
+done < <(git -C "${TARGET_ROOT}" ls-files -s -z -- ':(attr:filter=sops)')
 
 if [[ "${QUIET}" -eq 0 ]]; then
 	echo "Permissions: ${hardened} SOPS-managed file(s) set to ${FILE_MODE}."

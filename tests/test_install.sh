@@ -258,6 +258,32 @@ test_install_decrypts_several_dotenv_files() {
 	assert_eq "$(cat .env b.secret c.secret)" "$(printf 'A=1\nB=2\nC=3')" "working copies"
 }
 
+# A pathspec setting the caller exported (GIT_LITERAL_PATHSPECS=1 also
+# comes from `git --literal-pathspecs`) must not hide the secrets from
+# install.sh's decrypt pass or from preflight.sh.
+test_install_and_preflight_ignore_pathspec_settings_of_the_caller() {
+	new_repo origin
+	printf 'A=1\n' >.env
+	printf 'B=2\n' >':(literal)b.secret'
+	git add -- .env './:(literal)b.secret'
+	git commit -q -m "two secrets"
+	cd ..
+
+	fresh_clone origin clone
+	run env GIT_LITERAL_PATHSPECS=1 "${TOOL}/install.sh"
+	assert_eq "${RC}" "0" "install.sh exit status"
+	assert_eq "$(cat .env ':(literal)b.secret')" "$(printf 'A=1\nB=2')" "working copies"
+	assert_eq "$(git status --porcelain)" "" "git status"
+
+	local setting
+	for setting in GIT_LITERAL_PATHSPECS=1 "GIT_GLOB_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1"; do
+		# shellcheck disable=SC2086  # one or two settings
+		run env ${setting} "${TOOL}/preflight.sh"
+		assert_eq "${RC}" "0" "preflight.sh exit status with ${setting}"
+		assert_contains "${OUT}" "decryption works (1 set(s) of keys checked)" "preflight.sh with ${setting}"
+	done
+}
+
 # The permission hook chmods a secret right after git wrote it. That
 # changes the file's inode change time, and git took the secret for
 # locally modified: a rebase stopped with "Your local changes to the
