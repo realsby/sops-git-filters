@@ -5,7 +5,7 @@
 # A repository where install.sh never ran: no filter, the guard is the
 # only control. Leaves the caller inside it.
 unfiltered_repo() { # [json|dotenv]
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	write_sops_yaml
@@ -224,7 +224,7 @@ test_guard_blocks_plaintext_after_a_nul_byte() {
 	cd ..
 
 	# json: the NUL byte follows a valid line of the document.
-	git init -q repo2
+	git_init repo2
 	cd repo2 || exit 1
 	vendor_tool
 	write_sops_yaml

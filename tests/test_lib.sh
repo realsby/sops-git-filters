@@ -452,7 +452,7 @@ test_lib_counts_nul_bytes_and_keeps_the_content() {
 # reads it once, and still tells "cannot read" (2) from "not one" (1).
 test_lib_blob_with_a_nul_byte_is_not_a_document() {
 	load_lib
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	local good dotenv status
 	good="$(envelope "${ENC}" | git hash-object -w --stdin)"

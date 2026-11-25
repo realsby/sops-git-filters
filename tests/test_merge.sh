@@ -38,6 +38,7 @@ test_merge_json_combines_changes_to_different_lines() {
 	git checkout -q main
 	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
 
+	merge_driver_needs_ort
 	run git merge --no-edit theirs
 	assert_eq "${RC}" "0" "git merge exit status"
 	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
@@ -54,6 +55,7 @@ test_merge_dotenv_combines_changes_to_different_lines() {
 	git checkout -q main
 	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
 
+	merge_driver_needs_ort
 	run git merge --no-edit theirs
 	assert_eq "${RC}" "0" "git merge exit status"
 	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
@@ -149,6 +151,7 @@ test_merge_rebase_combines_changes() {
 	git checkout -q main
 	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
 
+	merge_driver_needs_ort
 	run git rebase theirs
 	assert_eq "${RC}" "0" "git rebase exit status"
 	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "working copy after rebase"
@@ -161,6 +164,7 @@ test_merge_cherry_pick_combines_changes() {
 	git checkout -q main
 	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
 
+	merge_driver_needs_ort
 	run git cherry-pick theirs
 	assert_eq "${RC}" "0" "git cherry-pick exit status"
 	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "working copy after cherry-pick"
@@ -175,6 +179,7 @@ test_merge_stash_keep_index_then_pop() {
 	git add .env
 	printf 'A=staged\nB=2\nC=unstaged\n' >.env
 
+	merge_driver_needs_ort stash
 	git stash push -q --keep-index -m wip
 	assert_eq "$(cat .env)" $'A=staged\nB=2\nC=3' "working copy while stashed"
 	run git stash pop
@@ -191,6 +196,7 @@ test_merge_keeps_the_files_of_a_merge_that_is_still_running() {
 	git checkout -q main
 	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
 
+	merge_driver_needs_ort
 	local gitdir running gone
 	gitdir="$(git rev-parse --absolute-git-dir)"
 	mkdir "${gitdir}/sops-merge.LIVE01" "${gitdir}/sops-merge.DEAD01" "${gitdir}/sops-merge.OLD001" "${gitdir}/sops-merge.NEW001"
@@ -219,6 +225,7 @@ test_merge_leaves_no_plaintext_under_git_dir() {
 	commit_env "theirs: C" $'A=1\nB=2\nC=theirs\n'
 	git checkout -q main
 	commit_env "ours: A" $'A=ours\nB=2\nC=3\n'
+	merge_driver_needs_ort
 	git merge -q --no-edit theirs
 	assert_eq "$(ls -d .git/sops-merge.* 2>/dev/null || true)" "" "work directory removed"
 	assert_eq "$(find . -maxdepth 1 -name '.merge_file_*' | wc -l | tr -d ' ')" "0" "git's own temporary files removed"

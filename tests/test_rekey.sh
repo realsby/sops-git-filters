@@ -127,7 +127,7 @@ test_rekey_dry_run_and_path_limit() {
 }
 
 test_rekey_reports_a_plaintext_blob() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	printf 'P=legacy\n' >.env
 	git add .env

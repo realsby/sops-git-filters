@@ -37,16 +37,6 @@ test_hooks_keep_0600_after_everyday_commands() {
 	assert_eq "$(mode_of .env)" "600" "mode after git rebase"
 
 	git checkout -q main
-	chmod 644 .env
-	git cherry-pick feature >/dev/null
-	assert_eq "$(cat .env)" "A=2" "working copy after the cherry-pick"
-	assert_eq "$(mode_of .env)" "600" "mode after git cherry-pick"
-
-	chmod 644 .env
-	git revert --no-edit HEAD >/dev/null
-	assert_eq "$(cat .env)" "A=1" "working copy after the revert"
-	assert_eq "$(mode_of .env)" "600" "mode after git revert"
-
 	printf 'A=3\n' >.env
 	git commit -q -am "change the secret again"
 	chmod 644 .env
@@ -63,6 +53,35 @@ test_hooks_keep_0600_after_everyday_commands() {
 	assert_eq "$(git status --porcelain)" "" "git status"
 }
 
+# git cherry-pick and git revert run the post-commit hook since git 2.25.
+# Older git runs no hook after them (README, Limitations).
+test_hooks_keep_0600_after_cherry_pick_and_revert() {
+	git_at_least 2.25 || skip "git $(git --version | awk '{print $3}') runs no hook after a cherry-pick or a revert (git 2.25 or later)"
+	umask 022
+	new_repo repo
+	printf 'A=1\n' >.env
+	git add .env
+	git commit -q -m "base"
+	git checkout -q -b feature
+	printf 'A=2\n' >.env
+	git commit -q -am "feature: change the secret"
+	git checkout -q main
+	printf 'x\n' >other.txt
+	git add other.txt
+	git commit -q -m "main: something else"
+
+	chmod 644 .env
+	git cherry-pick feature >/dev/null
+	assert_eq "$(cat .env)" "A=2" "working copy after the cherry-pick"
+	assert_eq "$(mode_of .env)" "600" "mode after git cherry-pick"
+
+	chmod 644 .env
+	git revert --no-edit HEAD >/dev/null
+	assert_eq "$(cat .env)" "A=1" "working copy after the revert"
+	assert_eq "$(mode_of .env)" "600" "mode after git revert"
+	assert_eq "$(git status --porcelain)" "" "git status"
+}
+
 # ── A hooks directory shared with other repositories (audit N8) ────
 # With a machine-wide core.hooksPath, install.sh wrote its hooks into
 # that directory. They ran in EVERY repository of the user and called
@@ -74,8 +93,10 @@ test_hooks_keep_0600_after_everyday_commands() {
 shared_hooks_home() {
 	export HOME="${PWD}/home"
 	mkdir -p "${HOME}/.githooks"
-	cp "${GIT_CONFIG_GLOBAL}" "${PWD}/gitconfig"
-	export GIT_CONFIG_GLOBAL="${PWD}/gitconfig"
+	# The .gitconfig of the new HOME: git before 2.32 reads that one and
+	# does not know GIT_CONFIG_GLOBAL (see tests/run.sh).
+	cp "${GIT_CONFIG_GLOBAL}" "${HOME}/.gitconfig"
+	export GIT_CONFIG_GLOBAL="${HOME}/.gitconfig"
 	# With the tilde: git expands it, and install.sh must do the same.
 	# shellcheck disable=SC2088  # the tilde is meant to reach git as it is
 	git config --global core.hooksPath '~/.githooks'
@@ -85,7 +106,7 @@ shared_hooks_home() {
 # plain_repo <dir> : a repository with the tool and a managed .env
 # pattern, install.sh not run yet; cd into it
 plain_repo() {
-	git init -q "$1"
+	git_init "$1"
 	cd "$1" || exit 1
 	vendor_tool
 	# shellcheck disable=SC2119  # no extra recipients here
@@ -99,7 +120,7 @@ plain_repo() {
 # hooks call. When it runs, the file PWNED appears next to <dir>.
 hostile_repo() {
 	local marker="${PWD}/PWNED"
-	git init -q "$1"
+	git_init "$1"
 	mkdir -p "$1/${TOOL}"
 	printf '#!/bin/sh\ntouch %s\n' "${marker}" >"$1/${TOOL}/harden-permissions.sh"
 	chmod +x "$1/${TOOL}/harden-permissions.sh"

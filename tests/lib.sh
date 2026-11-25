@@ -78,10 +78,60 @@ write_sops_yaml() {
 	} >.sops.yaml
 }
 
+# git_init <dir> : a new repository whose first branch is main. Not only
+# through init.defaultBranch (sgf_test_setup): that came with git 2.28,
+# and older git names the branch master.
+git_init() {
+	git init -q "$1"
+	git -C "$1" symbolic-ref HEAD refs/heads/main
+}
+
+# git_at_least <major.minor> : true when the git on PATH is that version
+# or newer. For a test of a git feature that came with that version.
+git_at_least() {
+	git --version | awk -v want="$1" '{
+		split($3, have, ".")
+		split(want, w, ".")
+		exit !(have[1] + 0 > w[1] + 0 || (have[1] + 0 == w[1] + 0 && have[2] + 0 >= w[2] + 0))
+	}'
+}
+
+# env_with_config <key> <value> <command...> : env <command...> with
+# <key>=<value> in git's config for that run only, from the environment
+# as `git -c` gives it: GIT_CONFIG_COUNT (git 2.31 and later), else
+# GIT_CONFIG_PARAMETERS, which `git -c` sets and every git reads.
+env_with_config() {
+	local key="$1" value="$2"
+	shift 2
+	if git_at_least 2.31; then
+		env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="${key}" GIT_CONFIG_VALUE_0="${value}" "$@"
+	else
+		env GIT_CONFIG_PARAMETERS="'${key}=${value}'" "$@"
+	fi
+}
+
+# merge_driver_needs_ort [stash] : skip the rest of the test with a git
+# that merges with its "recursive" strategy: git merge, rebase and
+# cherry-pick before 2.34, git stash pop before 2.37 ("stash"). That
+# strategy runs the clean filter on the file the merge driver merged and
+# aborts the merge when the result is not the blob the driver handed
+# back, and a secret encrypted again never is: "add_cacheinfo failed to
+# refresh". The "ort" strategy, the default since, does not. README,
+# Requirements.
+merge_driver_needs_ort() {
+	local version
+	version="$(git --version | awk '{print $3}')"
+	if [[ "${1:-}" == "stash" ]]; then
+		git_at_least 2.37 || skip "git ${version} pops a stash with the recursive strategy, which cannot take a secret the merge driver merged (git 2.37 or later)"
+	else
+		git_at_least 2.34 || skip "git ${version} merges with the recursive strategy, which cannot take a secret the merge driver merged (git 2.34 or later)"
+	fi
+}
+
 # new_repo <dir> [json|dotenv] : create a configured repository and cd into it
 new_repo() {
 	local dir="$1" format="${2:-json}"
-	git init -q "${dir}"
+	git_init "${dir}"
 	cd "${dir}" || exit 1
 	vendor_tool
 	# shellcheck disable=SC2119  # no extra recipients here

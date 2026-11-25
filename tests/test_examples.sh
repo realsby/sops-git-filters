@@ -9,7 +9,7 @@ DOTENV_NAMES=".env .env.local .env.production prod.env deep/er/.env deep/er/.env
 # the template alone. Before, only ".env" was covered: .env.local or
 # prod.env were committed in plaintext without a word.
 test_examples_gitattributes_covers_the_dotenv_names() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	cp "${SGF_TOOL_DIR}/examples/gitattributes" .gitattributes
 

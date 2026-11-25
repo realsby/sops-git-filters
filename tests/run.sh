@@ -51,13 +51,16 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 	root="$(CDPATH='' cd -- "${root}" && pwd -P)"
 	mkdir -p "${root}/home" "${root}/tmp" "${root}/keys" "${root}/work"
 
+	# The global git config is the .gitconfig of that HOME: git before
+	# 2.32 does not know GIT_CONFIG_GLOBAL and reads that file, the same
+	# one newer git reads through the variable.
 	exec env -i \
 		PATH="${PATH}" \
 		HOME="${root}/home" \
 		TMPDIR="${root}/tmp" \
 		LANG=C LC_ALL=C TERM=dumb \
 		GIT_CONFIG_NOSYSTEM=1 \
-		GIT_CONFIG_GLOBAL="${root}/gitconfig" \
+		GIT_CONFIG_GLOBAL="${root}/home/.gitconfig" \
 		GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat \
 		SOPS_AGE_KEY_FILE="${root}/keys/a.txt" \
 		AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
@@ -67,10 +70,10 @@ if [[ "${SGF_TEST_INNER:-}" != "1" ]]; then
 		SGF_TOOL_DIR="${tool_dir}" \
 		SGF_KEEP="${SGF_KEEP:-}" \
 		SGF_NO_SKIP="${SGF_NO_SKIP:-}" \
+		SGF_ALLOW_SKIP="${SGF_ALLOW_SKIP:-}" \
 		SGF_HOOK_RUNNER="${SGF_HOOK_RUNNER:-}" \
 		bash "${HERE}/run.sh" "$@"
 fi
-		SGF_ALLOW_SKIP="${SGF_ALLOW_SKIP:-}" \
 
 # ── Inner call: run the tests ────
 # shellcheck source=tests/lib.sh
@@ -92,9 +95,6 @@ for file in "${HERE}"/test_*.sh; do
 	. "${file}"
 done
 
-filter="${1:-}"
-passed=0
-failed=0
 # skip_allowed <test name> : true when that test may skip itself
 skip_allowed() {
 	[[ "${SGF_NO_SKIP:-}" != "1" ]] && return 0
@@ -104,6 +104,9 @@ skip_allowed() {
 	esac
 }
 
+filter="${1:-}"
+passed=0
+failed=0
 skipped=0
 failed_names=""
 

@@ -203,7 +203,7 @@ test_perms_hook_ignores_pathspec_settings_of_the_caller() {
 }
 
 test_install_keeps_hooks_it_did_not_write() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	write_sops_yaml
@@ -222,7 +222,7 @@ test_install_keeps_hooks_it_did_not_write() {
 }
 
 test_install_can_skip_the_hooks() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	write_sops_yaml
@@ -255,11 +255,11 @@ test_layout_git_run_from_a_subdirectory_or_elsewhere() {
 # started from inside it.
 test_layout_install_from_a_submodule_configures_the_superproject() {
 	local base="${PWD}"
-	git init -q toolrepo
+	git_init toolrepo
 	cp "${SGF_TOOL_DIR}"/*.sh toolrepo/
 	(cd toolrepo && git add -A && git commit -q -m "tool")
 
-	git init -q super
+	git_init super
 	cd super || exit 1
 	git -c protocol.file.allow=always submodule add -q "${base}/toolrepo" utilities/sops-git-filters
 	write_sops_yaml
@@ -278,7 +278,7 @@ test_layout_install_from_a_submodule_configures_the_superproject() {
 }
 
 test_layout_install_refuses_its_own_checkout() {
-	git init -q tool
+	git_init tool
 	cp "${SGF_TOOL_DIR}"/*.sh tool/
 	cd tool || exit 1
 	git add -A
@@ -294,7 +294,7 @@ test_layout_linked_worktree() {
 	git add .env
 	git commit -q -m "add .env"
 
-	git worktree add -q ../linked -b side
+	git worktree add ../linked -b side >/dev/null
 	cd ../linked || exit 1
 	assert_eq "$(cat .env)" "A=1" "working copy in the linked worktree"
 	assert_eq "$(mode_of .env)" "600" "mode in the linked worktree"
@@ -305,6 +305,7 @@ test_layout_linked_worktree() {
 }
 
 test_layout_sparse_checkout() {
+	git_at_least 2.26 || skip "git $(git --version | awk '{print $3}') has no git sparse-checkout add (2.26)"
 	new_repo origin
 	mkdir app conf
 	echo code >app/main.txt
@@ -350,22 +351,25 @@ odd_round_trip() {
 	git checkout -q main
 	printf 'A=ours\nB=2\nC=3\n' >.env
 	git commit -q -am "ours: A"
-	run git merge --no-edit theirs
-	assert_eq "${RC}" "0" "git merge exit status"
-	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
-	assert_eq "$(plain_of_stored .env)" $'A=ours\nB=2\nC=theirs' "merged blob"
 
 	umask 022
 	git checkout -q theirs
 	assert_eq "$(cat .env)" $'A=1\nB=2\nC=theirs' "working copy on the other branch"
 	assert_eq "$(mode_of .env)" "600" "mode after git checkout (the hook ran)"
+	git checkout -q main
+	assert_eq "$(find "${base}" -name 'PWNED*')" "" "files created by the directory name"
 
+	merge_driver_needs_ort
+	run git merge --no-edit theirs
+	assert_eq "${RC}" "0" "git merge exit status"
+	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs' "merged working copy"
+	assert_eq "$(plain_of_stored .env)" $'A=ours\nB=2\nC=theirs' "merged blob"
 	assert_eq "$(find "${base}" -name 'PWNED*')" "" "files created by the directory name"
 }
 
 # odd_repo : a repository with merge=sops on .env, no tool yet; cd into it
 odd_repo() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	# shellcheck disable=SC2119  # no extra recipients here
 	write_sops_yaml
@@ -467,7 +471,7 @@ test_layout_install_through_a_symlinked_path() {
 	mkdir real
 	ln -s real link
 	cd real || exit 1
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	# shellcheck disable=SC2119  # no extra recipients here
@@ -492,7 +496,7 @@ test_layout_install_through_a_symlinked_path() {
 test_layout_install_refuses_its_own_checkout_through_a_symlink() {
 	mkdir real
 	ln -s real link
-	git init -q real/tool
+	git_init real/tool
 	cp "${SGF_TOOL_DIR}"/*.sh real/tool/
 	(cd real/tool && git add -A && git commit -q -m "tool")
 

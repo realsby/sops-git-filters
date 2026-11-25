@@ -74,7 +74,7 @@ test_install_stopped_by_an_overriding_process_filter_leaves_a_new_clone_working(
 	cd ..
 
 	fresh_clone origin clone
-	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.process GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	run env_with_config filter.sops.process cat "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status"
 	assert_contains "${OUT}" "filter.sops.process is set outside" "install.sh message"
 	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
@@ -88,8 +88,8 @@ test_install_stopped_by_an_overriding_process_filter_leaves_a_new_clone_working(
 	# The same with a clean or smudge command that is there for this one
 	# run only: it is no setup to keep fail-closed.
 	git checkout -q -- .env
-	run env PATH="$(path_with_only ../nosops git bash dirname)" \
-		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	run env_with_config filter.sops.smudge cat \
+		env PATH="$(path_with_only ../nosops git bash dirname)" "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status without sops"
 	assert_eq "$(git config --local --get-regexp '^filter\.sops\.' || true)" "" "filter settings after exit 1"
 }
@@ -105,7 +105,7 @@ test_install_stopped_by_an_overriding_smudge_filter_says_what_it_left() {
 	cd ..
 
 	fresh_clone origin clone
-	run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.sops.smudge GIT_CONFIG_VALUE_0=cat "${TOOL}/install.sh"
+	run env_with_config filter.sops.smudge cat "${TOOL}/install.sh"
 	assert_eq "${RC}" "1" "install.sh exit status"
 	assert_contains "${OUT}" "another git config file overrides" "install.sh message"
 	assert_contains "${OUT}" "no hooks were installed and no file was decrypted" "install.sh message"
@@ -211,7 +211,7 @@ test_install_restores_required_flag_with_an_incomplete_copy() {
 # A secret that was committed before the filter existed stays plaintext
 # in git. install.sh must say so, not blame the keys.
 test_install_reports_plaintext_tracked_before_adoption() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	printf 'P=legacy\n' >.env
 	git add .env
@@ -242,7 +242,7 @@ test_install_reports_plaintext_tracked_before_adoption() {
 # then the storage format is changed. The report on the format must not
 # hide that the committed version is readable.
 test_install_reports_a_plaintext_commit_behind_the_other_format() {
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	printf 'P=legacy\n' >.env
 	git add .env

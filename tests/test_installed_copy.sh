@@ -40,6 +40,8 @@ test_copy_a_branch_cannot_swap_the_code_git_runs() {
 	assert_eq "$(plain_of_stored .env)" $'A=1\nB=2\nC=theirs\nD=4' "the installed clean filter encrypted it"
 	git commit -q -m "theirs: D"
 	git checkout -q main
+	[[ ! -e "${marker}" ]] || fail "a script of the branch was executed"
+	merge_driver_needs_ort
 	run git merge --no-edit theirs
 	assert_eq "${RC}" "0" "git merge exit status"
 	assert_eq "$(cat .env)" $'A=ours\nB=2\nC=theirs\nD=4' "merged working copy (the installed merge driver ran)"
@@ -54,7 +56,7 @@ test_copy_a_branch_cannot_swap_the_code_git_runs() {
 # `git submodule update --init`.
 test_copy_works_in_a_linked_worktree_without_the_tool() {
 	umask 022
-	git init -q repo
+	git_init repo
 	cd repo || exit 1
 	vendor_tool
 	# shellcheck disable=SC2119  # no extra recipients here
@@ -69,7 +71,7 @@ test_copy_works_in_a_linked_worktree_without_the_tool() {
 	git add .env
 	git commit -q -m "add .env"
 
-	git worktree add -q ../linked -b side
+	git worktree add ../linked -b side >/dev/null
 	cd ../linked || exit 1
 	[[ ! -e utilities ]] || fail "the tool is in the linked worktree, the test would prove nothing"
 	assert_eq "$(cat .env)" "A=1" "working copy in the linked worktree"
@@ -320,7 +322,7 @@ test_smudge_knows_the_storage_format_before_the_conf_is_checked_out() {
 	git commit -q -m "two dotenv secrets"
 	assert_eq "$(git config --local --get filter.sops.smudge)" "${INSTALLED_CMD_PREFIX}/smudge-filter.sh dotenv %f" "smudge filter command"
 
-	run git worktree add -q ../linked -b side
+	run git worktree add ../linked -b side
 	assert_eq "${RC}" "0" "git worktree add in a repository that stores dotenv"
 	assert_eq "$(cat ../linked/.env)" "A=1" "working copy in the linked worktree"
 	assert_eq "$(cat ../linked/stacks/.env)" "B=2" "working copy in the linked worktree"
