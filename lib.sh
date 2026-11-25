@@ -96,6 +96,30 @@ sgf_ls_managed() {
 	)
 }
 
+# ── Paths in the commands a message prints ────────────────────────
+# A message that tells the user what to run gives the full path in single
+# quotes, so the line can be pasted as it is, from any directory of the
+# working tree, whatever characters the name holds.
+#
+# sgf_paste_path <absolute path> : the path, quoted for a shell. For
+# what takes a file name: rm, a redirection.
+sgf_paste_path() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# sgf_paste_pathspec <absolute path> : the same, for a git command that
+# takes a pathspec (git add, git checkout --). Git reads a pathspec as a
+# pattern: "[ab].env" names a.env too, and `git checkout -- '[ab].env'`
+# would throw away the edits in a.env. A path with a character that git
+# treats as a wildcard (* ? [ \) gets the :(literal) magic; any other
+# stays as it is, easier to read.
+sgf_paste_pathspec() {
+	case "$1" in
+	*[\*\?\[\\]*) sgf_paste_path ":(literal)$1" ;;
+	*) sgf_paste_path "$1" ;;
+	esac
+}
+
 # ── A path that leads through a symlink ───────────────────────────
 # sgf_through_symlink <repo root> <path>
 # True when <path>, relative to <repo root> as git lists it (no "." or

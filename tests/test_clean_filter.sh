@@ -375,6 +375,45 @@ test_clean_refusal_prints_a_way_back_without_the_keys() {
 	assert_eq "$(git hash-object --no-filters -- "${file}")" "$(blob_id "${file}")" "the working copy is the blob git holds"
 }
 
+# Git takes a path in a command as a pattern: "[ab].secret" matches
+# a.secret too, and `git checkout -- '<top>/[ab].secret'` threw away the
+# edits in a.secret. The commands the filter prints for one file must
+# reach that file only.
+test_clean_printed_commands_take_the_path_literally() {
+	local file='[ab].secret' line
+	new_repo repo
+	printf 'A=1\n' >a.secret
+	printf 'B=1\n' >"${file}"
+	git add -- a.secret ":(literal)${file}"
+	git commit -q -m "two secrets"
+	printf 'A=edited\n' >a.secret
+	mkdir -p sub
+
+	# A SOPS document that decrypts with your keys is stored like an edit;
+	# the note says how to get its plaintext into the working tree.
+	printf 'B=2\n' | encrypt_for json "${AGE_PUB_A}" >"${file}"
+	run git add -- ":(literal)${file}"
+	assert_eq "${RC}" "0" "git add of a SOPS document"
+	line="$(printf '%s\n' "${OUT}" | grep 'For the plaintext there: ' | head -1)"
+	line="${line#*For the plaintext there: }"
+	assert_contains "${line}" "git checkout -- " "test fixture: the printed line"
+	(cd sub && eval "${line}")
+	assert_eq "$(cat "${file}")" "B=2" "the file, decrypted"
+	assert_eq "$(cat a.secret)" "A=edited" "a.secret keeps its edits"
+
+	# Without the key: the stored version cannot be decrypted, and the
+	# error prints how to re-encrypt regardless.
+	printf 'B=3\n' >"${file}"
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" git add -- ":(literal)${file}"
+	assert_ne "${RC}" "0" "git add without the key"
+	line="$(printf '%s\n' "${OUT}" | grep 'To re-encrypt regardless: ' | head -1)"
+	line="${line#*To re-encrypt regardless: }"
+	assert_contains "${line}" "git add " "test fixture: the printed line"
+	(export SOPS_AGE_KEY_FILE="${NO_KEY}" && cd sub && eval "${line}")
+	assert_eq "$(git diff --cached --name-only)" "${file}" "what the printed line staged"
+	assert_eq "$(git cat-file blob ":${file}" | sops decrypt --input-type json --output-type binary /dev/stdin)" "B=3" "the staged blob"
+}
+
 # The case the shortcut is for: install.sh ran without the key, and the
 # working copy still holds the ciphertext git holds. It is stored as it
 # is, without the key and without a call to sops (with a KMS key, every

@@ -538,7 +538,7 @@ while IFS= read -r -d '' record; do
 		# the clean filter (which reuses the identical blob) and records
 		# fresh stat data, so `git status` is clean again.
 		git -C "${TARGET_ROOT}" update-index -- "${path}" 2>/dev/null ||
-			echo "⚠  Could not refresh index stat for ${path}; run: git add ${path}" >&2
+			echo "⚠  Could not refresh index stat for ${path}; run: git add -- $(sgf_paste_pathspec "${TARGET_ROOT}/${path}")" >&2
 		echo "Re-smudged ${path} (was raw ciphertext from a pre-setup checkout)."
 	else
 		STILL_ENCRYPTED="${STILL_ENCRYPTED}   - ${path}"$'\n'

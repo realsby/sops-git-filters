@@ -278,6 +278,18 @@ test_lib_version_compare() {
 	assert_ne "$(sgf_sops_version)" "" "version of the sops on PATH"
 }
 
+# The paths in the commands a message prints: quoted for a shell, and,
+# where git would take them as a pattern, marked :(literal).
+test_lib_paste_path_and_pathspec() {
+	load_lib
+	assert_eq "$(sgf_paste_path "/r/a b'c.env")" "'/r/a b'\\''c.env'" "a path with a blank and a quote"
+	assert_eq "$(sgf_paste_pathspec "/r/a b'c.env")" "'/r/a b'\\''c.env'" "no wildcard: the path as it is"
+	assert_eq "$(sgf_paste_pathspec '/r/[ab].env')" "':(literal)/r/[ab].env'" "brackets"
+	assert_eq "$(sgf_paste_pathspec '/r/x*.env')" "':(literal)/r/x*.env'" "a star"
+	assert_eq "$(sgf_paste_pathspec '/r/x?.env')" "':(literal)/r/x?.env'" "a question mark"
+	assert_eq "$(sgf_paste_pathspec '/r/x\y.env')" "':(literal)/r/x\\y.env'" "a backslash"
+}
+
 test_lib_store_format() {
 	load_lib
 	mkdir repo

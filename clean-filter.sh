@@ -108,10 +108,12 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 	exit 1
 }
 
-# The file as the commands this filter suggests name it: the full path in
-# single quotes, so a line can be pasted as it is, from any directory of
-# the working tree, whatever characters the name holds.
-PASTE_PATH="'$(printf '%s' "${PROJECT_ROOT}/${FILENAME}" | sed "s/'/'\\\\''/g")'"
+# The file as the commands this filter suggests name it (lib.sh): the
+# full path in single quotes, so a line can be pasted as it is, from any
+# directory of the working tree. PASTE_SPEC is for the git commands: git
+# takes their paths as patterns, and "[ab].env" would reach a.env too.
+PASTE_PATH="$(sgf_paste_path "${PROJECT_ROOT}/${FILENAME}")"
+PASTE_SPEC="$(sgf_paste_pathspec "${PROJECT_ROOT}/${FILENAME}")"
 
 # Run from the copy under .git/ while the checkout holds a newer version?
 # Then say that install.sh has to run again (one line, see lib.sh).
@@ -246,7 +248,7 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 			echo "       To get back the version git holds, as ciphertext (no key needed):" >&2
 			echo "         git cat-file blob ${STORED_ID} > ${PASTE_PATH}" >&2
 			echo "       or decrypted (needs your keys):" >&2
-			echo "         rm ${PASTE_PATH} && git checkout -- ${PASTE_PATH}" >&2
+			echo "         rm ${PASTE_PATH} && git checkout -- ${PASTE_SPEC}" >&2
 		fi
 		# SOPS_FILTER_FORCE_REENCRYPT is no way out here: re-encrypting
 		# needs the plaintext, and that needs this decrypt.
@@ -256,7 +258,7 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 	INPUT="${SGF_CONTENT}"
 	INPUT_WAS_CIPHERTEXT=1
 	echo "sops clean filter: it decrypts with your keys; its content is stored like any edit (recipients from .sops.yaml)." >&2
-	echo "  The working copy keeps that ciphertext. For the plaintext there: rm ${PASTE_PATH} && git checkout -- ${PASTE_PATH}" >&2
+	echo "  The working copy keeps that ciphertext. For the plaintext there: rm ${PASTE_PATH} && git checkout -- ${PASTE_SPEC}" >&2
 elif sgf_is_sops_doc "${OTHER_FORMAT}" "${INPUT}"; then
 	echo "ERROR: the working copy of ${FILENAME} is a SOPS document in the ${OTHER_FORMAT} format," >&2
 	echo "       but .sops-filter.conf says ${STORE_FORMAT}. Refusing to encrypt ciphertext again." >&2
@@ -432,7 +434,7 @@ if ! SGF_CAPTURED=$(printf '%s' "${EXISTING_ENCRYPTED}" | sops decrypt \
 	echo "       Or are you not one of its recipients? The rule for it in .sops.yaml may not list your key:" >&2
 	echo "       you can encrypt for keys you do not hold, not decrypt. Then have a recipient add the" >&2
 	echo "       file, or commit what is staged (not with -a):  SOPS_FILTER_FORCE_REENCRYPT=1 git commit" >&2
-	echo "       To re-encrypt regardless: SOPS_FILTER_FORCE_REENCRYPT=1 git add ${PASTE_PATH}" >&2
+	echo "       To re-encrypt regardless: SOPS_FILTER_FORCE_REENCRYPT=1 git add -- ${PASTE_SPEC}" >&2
 	exit 1
 fi
 EXISTING_DECRYPTED="${SGF_CONTENT}"
