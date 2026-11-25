@@ -368,22 +368,34 @@ test_guard_blocks_a_filter_macro_in_core_attributesfile() {
 	run "${TOOL}/encryption-guard.sh"
 	assert_eq "${RC}" "1" "guard exit status with a macro that unsets filter"
 	assert_contains "${OUT}" "global-attributes:2: [attr]binary -diff -merge -text -filter" "guard names the file and the line"
+}
 
-	# On Windows git gives the guard a network path as it was configured,
-	# "\\server\share\...". The runner's own disk, through its admin
-	# share, stands in for a server.
+# On Windows git gives the guard a network path as it was configured,
+# "\\server\share\...". The machine's own disk, through its
+# administrative share, stands in for a server. Reading that share takes
+# an administrator, and a machine may turn it off: without it the test
+# skips, which the Windows CI job does not allow. Elsewhere the same file
+# is named with two leading slashes, which must count as absolute too.
+test_guard_blocks_a_filter_macro_in_core_attributesfile_on_a_network_path() {
+	new_repo repo
+	printf '.env filter=sops diff=sops binary\n' >.gitattributes
+	git add .gitattributes
+	printf 'A=1\n' >.env
+	git add .env
+	printf '[attr]binary -diff -merge -text -filter\n' >../global-attributes
+	local path
 	case "${OSTYPE:-}" in
 	msys* | cygwin*)
-		local unc
-		unc="$(cygpath -w "${PWD}/../global-attributes")"
-		unc="\\\\localhost\\${unc:0:1}\$${unc:2}"
-		[[ -r "${unc}" ]] || fail "test fixture: cannot read ${unc}"
-		git config core.attributesFile "${unc}"
-		run "${TOOL}/encryption-guard.sh"
-		assert_eq "${RC}" "1" "guard exit status with the macro in ${unc}"
-		assert_contains "${OUT}" "global-attributes:2: [attr]binary -diff -merge -text -filter" "guard names the file on the share and the line"
+		path="$(cygpath -w "${PWD}/../global-attributes")"
+		path="\\\\localhost\\${path:0:1}\$${path:2}"
+		[[ -r "${path}" ]] || skip "cannot read ${path}: the administrative share needs an administrator"
 		;;
+	*) path="/${PWD}/../global-attributes" ;;
 	esac
+	git config core.attributesFile "${path}"
+	run "${TOOL}/encryption-guard.sh"
+	assert_eq "${RC}" "1" "guard exit status with the macro in ${path}"
+	assert_contains "${OUT}" "global-attributes:1: [attr]binary -diff -merge -text -filter" "guard names the file and the line"
 }
 
 # Lines that cannot change the filter attribute of a path do not block,
