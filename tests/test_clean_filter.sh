@@ -1258,6 +1258,8 @@ test_clean_cache_two_commands_at_once() {
 test_clean_cache_without_a_sha256_tool() {
 	local bin entries
 	needs_cache
+	# path_without links every command on PATH
+	needs_symlinks
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env

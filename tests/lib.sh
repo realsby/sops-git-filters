@@ -181,9 +181,13 @@ path_with_only() {
 # path_without <dir> <command...> : link every command on PATH into <dir>
 # except the ones named, and print its path. As PATH it is the same PATH
 # without those commands (the first of each name wins, as for PATH).
+# It skips the test where ln -s makes no symlink: Git Bash on Windows
+# would copy every file of every directory on PATH, C:\Windows\System32
+# too, and fill the disk.
 path_without() {
 	local dir="$1" entry IFS=:
 	shift
+	symlinks_work || skip "this system makes no symbolic links (ln -s), and a copy of PATH is too big"
 	mkdir -p "${dir}"
 	for entry in ${PATH}; do
 		[[ -d "${entry}" ]] || continue
