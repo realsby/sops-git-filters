@@ -7,9 +7,8 @@
 #         - id: sops-encryption-guard
 #         - id: sops-file-permissions
 #
-# Note: the guard is the SECOND line of defense. The first (the
-# clean/smudge filters) still needs install.sh run once per clone —
-# see README.md.
+# The guard is the SECOND line of defense. The first, the clean/smudge
+# filters, still needs install.sh run once per clone (see README.md).
 - id: sops-encryption-guard
   name: Verify SOPS-managed files are staged encrypted
   entry: encryption-guard.sh
@@ -26,7 +25,7 @@
 # or `default_install_hook_types: [pre-commit, post-checkout, post-merge,
 # post-rewrite, post-commit]` in .pre-commit-config.yaml. pre-commit has
 # no post-applypatch stage, so `git am` is not covered this way. Running
-# both is harmless — the script is idempotent.
+# both is harmless: the script is idempotent.
 - id: sops-file-permissions
   name: Tighten permissions on SOPS-managed files (0600)
   entry: harden-permissions.sh
