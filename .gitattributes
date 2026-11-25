@@ -1,0 +1,6 @@
+# The scripts keep LF line endings in every checkout. With
+# core.autocrlf=true, the default of Git for Windows, git would write
+# them with CRLF, and bash cannot run them ("env: bash\r"). This covers
+# a submodule and the clone pre-commit makes; a vendored copy needs the
+# same line next to the scripts (README, installation option B).
+*.sh text eol=lf

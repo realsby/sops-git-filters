@@ -119,6 +119,8 @@ Read the [release notes](https://github.com/realsby/sops-git-filters/releases) f
 
 Copy every `*.sh` file (`clean-filter.sh`, `smudge-filter.sh`, `install.sh`, `encryption-guard.sh`, `harden-permissions.sh`, `merge-driver.sh`, `rekey.sh`, `preflight.sh`, and `lib.sh`, which the others load) into your repo (e.g. `utilities/sops-git-filters/`), keep them executable, run `install.sh`. You own updates, and after each one `install.sh` has to run again in every clone.
 
+Copy [`.gitattributes`](.gitattributes) into the same directory too. It holds one rule, `*.sh text eol=lf`, and an attributes file in a directory applies to the files below it. Without it, a clone made with `core.autocrlf=true` (the default of Git for Windows) gets the scripts with CRLF line endings, and bash cannot run them: `env: bash\r: No such file or directory`, from `install.sh`, and from the guard as a pre-commit hook, which then stops every commit. A clone that already has them with CRLF gets LF once they are written again: delete the `*.sh` files and run `git checkout -- utilities/sops-git-filters/`. The submodule (A) and the clone the pre-commit framework makes (C) read the file from this repository and need nothing.
+
 ### C. Guard only, via pre-commit remote
 
 If you only want the commit-time guard (e.g. filters are managed some other way):
@@ -495,7 +497,7 @@ Needs `git`, `sops` and `age-keygen` on PATH. Every test builds a throwaway repo
 
 Two tests drive the [pre-commit](https://pre-commit.com) framework (or `prek`) and are skipped when neither is on PATH. `SGF_HOOK_RUNNER=prek` picks the one to use, and `SGF_NO_SKIP=1` turns a skipped test into a failure. A selection that matches no test fails too.
 
-CI (`.github/workflows/tests.yml`) runs shellcheck and the suite on Linux and macOS, with the oldest `sops` that `install.sh` accepts and with a current one. It downloads `sops`, `age`, `prek` and shellcheck from their GitHub releases and checks each file against a SHA-256 pinned in the repository (`tests/ci-install-tools.sh`) before using it. The two hook tests run there with that `prek`, and `SGF_NO_SKIP=1` is set: a test that skips itself fails the job.
+CI (`.github/workflows/tests.yml`) runs shellcheck and the suite on Linux and macOS, with the oldest `sops` that `install.sh` accepts and with a current one. It downloads `sops`, `age`, `prek` and shellcheck from their GitHub releases and checks each file against a SHA-256 pinned in the repository (`tests/ci-install-tools.sh`) before using it. The two hook tests run there with that `prek`, and `SGF_NO_SKIP=1` is set: a test that skips itself fails the job. One more job sets `core.autocrlf=true`, adds this repository as a submodule of a new repository, runs `install.sh` from it and commits a secret with the guard as the pre-commit hook: it fails when a script is checked out with CRLF line endings.
 
 ## License
 
