@@ -110,7 +110,9 @@ Git cannot tell whether a SOPS-managed file changed without running the clean fi
 
 ## Requirements
 
-- `git` ≥ 2.18, `bash` ≥ 3.2 (macOS stock bash is fine). The git minimum comes from reading the scripts, not from a test run: the newest git feature they use is `git config --type=path` (2.18); the `attr:` pathspec and `git rev-parse --absolute-git-dir` need 2.13, and `git add --renormalize`, which the messages tell you to run, 2.16. CI runs the git of its Ubuntu and macOS runner images, a current release, and no older one.
+- `git` ≥ 2.18, `bash` ≥ 3.2 (macOS stock bash is fine). The newest git feature the scripts use is `git config --type=path` (2.18); the `attr:` pathspec and `git rev-parse --absolute-git-dir` need 2.13, and `git add --renormalize`, which the messages tell you to run, 2.16. CI runs the tests with git 2.18 and with the current git of its Ubuntu, macOS and Windows runners. Two things need a newer git:
+  - **The merge driver** (`merge=sops`, see [Merging secrets](#merging-secrets)) needs git 2.34 for `git merge`, `rebase`, `cherry-pick` and `revert`, and git 2.37 for `git stash pop` and `apply`. Older git merges with its "recursive" strategy, which runs the clean filter again on the file the driver merged. Encryption is randomized, so that gives other ciphertext than the driver's, and git stops: `add_cacheinfo failed to refresh for path '.env'; merge aborting`. The merged plaintext is then in the working tree, uncommitted, and no merge is in progress; `git checkout -- <file>` gets your version back. From those versions on git merges with the "ort" strategy, which does not check the file again.
+  - **The permission hook after `git cherry-pick` and `git revert`** runs from git 2.25 on. Older git runs no hook after them, and the file keeps your umask mode until the next checkout, merge or commit.
 - [`sops`](https://github.com/getsops/sops) ≥ 3.11.0 on PATH. `install.sh` refuses older versions: up to 3.10.2, `sops` stores the whole file in clear when the matching `.sops.yaml` rule uses `encrypted_regex`, `unencrypted_regex`, `encrypted_suffix` or `unencrypted_suffix`. Tested up to 3.13.3. The checks accept only the metadata fields `sops` writes up to that release: if a later `sops` adds a field, its documents are refused (never let through) and the message names the field. Update this tool then.
 - A SOPS key backend: [age](https://github.com/FiloSottile/age) (simplest), or any KMS SOPS supports
 
@@ -323,7 +325,7 @@ With the [pre-commit framework](https://pre-commit.com), using the submodule pat
       stages: [pre-commit]
 ```
 
-Or as a plain git hook: `ln -s ../../utilities/sops-git-filters/encryption-guard.sh .git/hooks/pre-commit`.
+Or as a plain git hook: `ln -s ../../utilities/sops-git-filters/encryption-guard.sh .git/hooks/pre-commit`. On Windows, `ln -s` in Git Bash copies the file unless symbolic links are turned on, and the copy does not find `lib.sh`, so every commit stops. Write a hook that runs the guard instead (git runs it from the top of the working tree): `printf '#!/bin/sh\nexec utilities/sops-git-filters/encryption-guard.sh\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
 
 ## Merging secrets
 
@@ -335,7 +337,7 @@ Git merges what it stores, and for a SOPS-managed file that is ciphertext. Every
 .env   filter=sops diff=sops merge=sops -text
 ```
 
-`install.sh` registers the driver (`merge.sops.driver`), so existing clones must run it once more.
+`install.sh` registers the driver (`merge.sops.driver`), so existing clones must run it once more. It needs git 2.34 (`git stash pop`: 2.37); with an older git the merge stops, see [Requirements](#requirements).
 
 - **Changes to different lines** merge by themselves.
 - **A real conflict, json format:** the working copy gets the usual `<<<<<<<` `=======` `>>>>>>>` markers, in plaintext. Edit the file, `git add` it, continue. Git never sees the marked-up plaintext: what it stores during the conflict is encrypted like everything else.
@@ -432,6 +434,11 @@ What you must still do:
 - **One filter name.** Everything is registered under the `sops` filter/diff driver; per-path different formats aren't supported (one `SOPS_STORE_FORMAT` per repo).
 - **`git add -p` stages a managed file whole.** Git shows the ciphertext, not your plaintext edit, and cannot stage part of the file. Stage the whole file with `git add`.
 - **Mode 0600 does not come back after every command.** Git runs no hook after `git stash`, `git stash pop`, `git reset --hard` and `git sparse-checkout add`. A secret that one of them writes again has your umask mode (usually `0644`) until the next commit, checkout or merge, or until you run `harden-permissions.sh`. A new secret has the umask mode until its first commit.
+- **Windows: no file modes, no symbolic links, and `path_regex` sees backslashes.** The scripts run in Git Bash, the bash of Git for Windows, and CI runs the tests there. Where Windows differs:
+  - NTFS keeps no Unix file modes. `chmod 600` changes nothing, so `harden-permissions.sh` and the hooks cannot make a secret private there; `install.sh` says so. Who can read a decrypted secret is up to the NTFS permissions of its folder: keep the clone in a folder only you can read. Your user profile (`C:\Users\<you>`) is one; a folder made at `C:\src` is not, every user of the machine can read it.
+  - `ln -s` copies the file instead of linking it, unless symbolic links are turned on. The README's symlink for the guard does not work there; use the hook script that [The pre-commit guard](#the-pre-commit-guard) shows.
+  - `sops` matches a `path_regex` of `.sops.yaml` against the path with backslashes, `prod\deploy.env`: a rule `^prod/` matches nothing, and the file gets the keys of the next rule that matches, a catch-all one too. Write the separator as `[/\\]`, `^prod[/\\]`, which matches on every system.
+  - A file name with `:`, `\`, `*`, `?`, `"`, `<`, `>`, `|` or a control character cannot exist on NTFS, and git for Windows refuses it.
 - **A secret with uncommitted changes costs key-service calls, the first time git looks at it.** Git runs the clean filter again whenever it compares the file: twice for one `git diff`, up to once for one `git status` (measured with git 2.54). The first run after an edit decrypts the stored version and encrypts the new one; later runs give the same answer for 10 minutes without `sops` ([What the clean filter remembers](#what-the-clean-filter-remembers)). `git diff` still decrypts the stored version for the text it shows, and so does any command that shows a SOPS-managed file in clear.
 - **A commit can take its own secret out of the guard's view.** The guard checks the paths that the `.gitattributes` of the commit marks `filter=sops` (and blocks while a local attribute file could override them, see [The pre-commit guard](#the-pre-commit-guard)). A commit that stages `.env -filter` in `.gitattributes` together with a plaintext `.env` passes it: in that commit the path is not SOPS-managed, and git did what the attributes say. Review changes to `.gitattributes` as you review changes to `.sops.yaml` (CODEOWNERS, a required review).
 
@@ -538,9 +545,17 @@ tests/run.sh guard      # only the tests whose name contains "guard"
 
 Needs `git`, `sops` and `age-keygen` on PATH. Every test builds a throwaway repository with a throwaway age key. The runner restarts itself in an empty environment, so it reads nothing from your own git, sops or AWS configuration, and it never touches the network. `SGF_TOOL_DIR=<other checkout> tests/run.sh` runs the same tests against the scripts of another checkout, which is how a fix is shown to fail before and pass after.
 
-Two tests drive the [pre-commit](https://pre-commit.com) framework (or `prek`) and are skipped when neither is on PATH. `SGF_HOOK_RUNNER=prek` picks the one to use, and `SGF_NO_SKIP=1` turns a skipped test into a failure. A selection that matches no test fails too.
+Two tests drive the [pre-commit](https://pre-commit.com) framework (or `prek`) and are skipped when neither is on PATH. `SGF_HOOK_RUNNER=prek` picks the one to use, and `SGF_NO_SKIP=1` turns a skipped test into a failure, except for the tests that `SGF_ALLOW_SKIP` names (test names, separated by spaces). A selection that matches no test fails too. A test of something the system at hand lacks skips itself: a git feature newer than that git, Unix file modes, symbolic links, a file name the file system cannot hold.
 
 CI (`.github/workflows/tests.yml`) runs shellcheck and the suite on Linux and macOS, with the oldest `sops` that `install.sh` accepts and with a current one. It downloads `sops`, `age`, `prek` and shellcheck from their GitHub releases and checks each file against a SHA-256 pinned in the repository (`tests/ci-install-tools.sh`) before using it. The two hook tests run there with that `prek`, and `SGF_NO_SKIP=1` is set: a test that skips itself fails the job. One more job sets `core.autocrlf=true`, adds this repository as a submodule of a new repository, runs `install.sh` from it and commits a secret with the guard as the pre-commit hook: it fails when a script is checked out with CRLF line endings.
+
+Three more jobs run the suite where the scripts meet other tools. They are not required checks.
+
+- **Windows**, in Git Bash, with the Windows builds of `git`, `sops`, `age` and `prek`. The tests of what NTFS does not have skip themselves (file modes, symbolic links, file names with `:` and the like, see [Limitations](#limitations)).
+- **Alpine Linux**, where `awk`, `sed`, `grep`, `find` and the rest are busybox. The job checks that `awk` is busybox's.
+- **git 2.18**, the oldest git the scripts support: the git package of Alpine 3.8, with bash 4.4 and busybox 1.28. The job checks the version. The tests of what needs a newer git skip themselves (see [Requirements](#requirements)).
+
+In the Windows and git 2.18 jobs `SGF_ALLOW_SKIP` names the tests that may skip there, one by one: any other test that skips itself still fails the job.
 
 ## Code review by Greptile
 
