@@ -148,6 +148,40 @@ jobs:
       SOPS_VERSION: "3.13.3"
       SGF_NO_SKIP: "1"
       SGF_HOOK_RUNNER: prek
+      # The tests of what NTFS through Git Bash cannot have skip
+      # themselves, and may here: Unix file modes (chmod 600 changes
+      # nothing; a file of mode 000 is readable), symbolic links (ln -s
+      # copies), file names with : \ * ? " | or a control character.
+      SGF_ALLOW_SKIP: >-
+        test_perms_install_and_checkout_leave_0600
+        test_perms_executable_secret_keeps_its_execute_bit
+        test_perms_file_mode_comes_from_the_conf
+        test_perms_refused_mode_still_hardens_through_the_hook
+        test_perms_hook_ignores_pathspec_settings_of_the_caller
+        test_perms_awkward_names_symlinks_and_executables
+        test_perms_says_when_the_file_system_keeps_no_modes
+        test_hooks_keep_0600_after_everyday_commands
+        test_hooks_keep_0600_after_cherry_pick_and_revert
+        test_hooks_line_for_a_shared_directory_acts_in_one_repository_only
+        test_guard_fails_closed_when_info_attributes_is_unreadable
+        test_guard_ignores_symlinks
+        test_guard_works_as_a_symlinked_hook
+        test_layout_install_refuses_its_own_checkout_through_a_symlink
+        test_layout_install_through_a_symlinked_path
+        test_install_does_not_write_through_a_link
+        test_hooks_are_not_written_through_a_symlink
+        test_hooks_directory_symlinked_out_of_the_repository_is_shared
+        test_lib_through_symlink
+        test_lib_version_of_reads_a_bounded_piece_of_a_regular_file
+        test_copy_says_when_the_checkout_is_newer
+        test_clean_path_that_looks_like_an_index_stage
+        test_clean_printed_commands_keep_a_trailing_newline
+        test_guard_checks_files_named_like_an_index_stage
+        test_guard_checks_every_stage_of_an_unmerged_path
+        test_guard_names_plaintext_files_with_awkward_names
+        test_guard_tells_intent_to_add_from_staged_under_awkward_names
+        test_install_and_preflight_ignore_pathspec_settings_of_the_caller
+        test_names_awkward_file_names_round_trip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
