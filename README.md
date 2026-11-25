@@ -172,7 +172,28 @@ creation_rules:
 .env.example   !filter !diff !merge !text
 ```
 
-A pattern without a slash matches at every depth. The wildcards also cover `.env.local`, `.env.production` and `prod.env`: a name that a hand-written list misses is committed in plaintext without a word, and that is the mistake to rule out. Their price is the last line, which takes a template without secrets out again (it must come after the others; `!` and not `-`, because `-diff` would make git treat the file as binary). `-text` keeps git from converting line endings, see [`core.autocrlf`](#storage-formats-json-vs-dotenv) below. A template you forget to list is stored encrypted, which is harmless. The rule in `.sops.yaml` must match the same names.
+A pattern without a slash matches at every depth. The wildcards also cover `.env.local`, `.env.production` and `prod.env`: a name that a hand-written list misses is committed in plaintext without a word, and the wildcards rule that out for the usual names of a dotenv file (not for every copy, see below). Their price is the last line, which takes a template without secrets out again (it must come after the others; `!` and not `-`, because `-diff` would make git treat the file as binary). `-text` keeps git from converting line endings, see [`core.autocrlf`](#storage-formats-json-vs-dotenv) below. A template you forget to list is stored encrypted, which is harmless. The rule in `.sops.yaml` must match the same names.
+
+The wildcards still miss copies that editors, tools and people make under other names. None of these matches the four lines, so `git add -A` stages them in plaintext, and the guard lets them through: it checks only the paths that have `filter=sops`.
+
+- `.env~` (a backup that Emacs or Vim writes) and `#.env#` (an Emacs auto-save file)
+- copies made by hand: `.env-2026-11-24`, `.env_backup`, `env`, `env.production.txt`
+- what `git mergetool` writes next to `.env.production` and `prod.env`: `.env_LOCAL_1234.production` and its `_REMOTE_`, `_BASE_` and `_BACKUP_` siblings, and the backup `prod.env.orig` (see [Merging secrets](#merging-secrets))
+
+(`.env.bak`, `.env.orig` and `.env.swp` match `.env.*` and go through the filter; a Vim swap file then fails `git add`, as it holds NUL bytes.) Keep the editor and merge-tool files out of git in `.gitignore`, and give a copy you keep a name the patterns cover (`.env.2026-11-24`, not `.env-2026-11-24`):
+
+```
+*~
+\#*#
+*.orig
+*.swp
+*_LOCAL_*
+*_REMOTE_*
+*_BASE_*
+*_BACKUP_*
+```
+
+The backslash is needed: a line that starts with `#` is a comment.
 
 `merge=sops` is optional but you want it as soon as two branches can change the same secret: see [Merging secrets](#merging-secrets).
 
