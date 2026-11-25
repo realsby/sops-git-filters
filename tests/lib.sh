@@ -275,6 +275,23 @@ needs_file_modes() {
 	file_modes_work || skip "this file system keeps no Unix file modes (chmod 600 changes nothing)"
 }
 
+# needs_cache : skip the rest of the test where the clean filter keeps
+# no cache: sgf_cache_open (lib.sh) refuses a directory that others can
+# open, and where the file system keeps no Unix modes (Windows) every
+# directory looks open.
+needs_cache() {
+	local probe ok=0
+	probe="$(mktemp -d)"
+	(
+		export LC_ALL=C
+		# shellcheck source=lib.sh
+		. "${SGF_TOOL_DIR}/lib.sh"
+		sgf_cache_open "${probe}"
+	) >/dev/null 2>&1 && ok=1
+	rm -rf "${probe}"
+	[[ "${ok}" -eq 1 ]] || skip "the clean filter keeps no cache here: its directory cannot be closed to others (no Unix file modes)"
+}
+
 # assert_mode <file> <mode> <what> : the mode of <file>, where the file
 # system keeps modes. Where it keeps none there is no mode to check: the
 # tests of harden-permissions.sh skip themselves there, and a test of
@@ -326,7 +343,7 @@ file_system_takes() {
 	dir="$(mktemp -d)"
 	git init -q "${dir}"
 	for name in "$@"; do
-		if (cd "${dir}" && printf 'x\n' >"./${name}") 2>/dev/null &&
+		if (cd "${dir}" && mkdir -p "$(dirname "./${name}")" && printf 'x\n' >"./${name}") 2>/dev/null &&
 			[[ "$(git -C "${dir}" ls-files -o -z -- ":(literal)${name}" 2>/dev/null | tr '\0' '/')" == "${name}/" ]]; then
 			TAKEN+=("${name}")
 		else
@@ -356,6 +373,18 @@ index_takes() {
 		fi
 	done
 	rm -rf "${dir}"
+}
+
+# names_taken <name...> : the names both the file system and the index
+# take (file_system_takes, index_takes), in TAKEN, the others in REFUSED
+names_taken() {
+	local refused=()
+	file_system_takes "$@"
+	[[ ${#REFUSED[@]} -eq 0 ]] || refused=("${REFUSED[@]}")
+	if [[ ${#TAKEN[@]} -gt 0 ]]; then
+		index_takes "${TAKEN[@]}"
+	fi
+	[[ ${#refused[@]} -eq 0 ]] || REFUSED+=("${refused[@]}")
 }
 
 # needs_file_name <name> : skip the rest of the test where the file

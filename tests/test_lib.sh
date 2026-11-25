@@ -624,6 +624,9 @@ test_lib_hmac_sha256_matches_rfc_4231() {
 # and closed to the group and others. (A directory of another user can
 # only be had from the system: the root directory stands in for it.)
 test_lib_cache_private() {
+	# chmod is the test: where the file system keeps no modes (Windows)
+	# there is nothing to test.
+	needs_file_modes
 	load_lib
 	mkdir -m 700 own
 	is sgf_private own
@@ -649,6 +652,7 @@ test_lib_cache_private() {
 # Entries older than SGF_CACHE_TTL are not given and are removed; so are
 # temporary files left behind. More than SGF_CACHE_MAX entries: all go.
 test_lib_cache_sweeps_old_and_surplus_entries() {
+	needs_cache
 	load_lib
 	local check=0123456789abcdef0123456789abcdef oid=0123456789012345678901234567890123456789 i n
 	mkdir -p common

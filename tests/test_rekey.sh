@@ -243,7 +243,7 @@ test_rekey_reads_the_attributes_of_the_index() {
 # only, written to the object store; prints its object id
 sops_blob_for_a() {
 	printf '%s\n' "$1" |
-		sops encrypt --age "${AGE_PUB_A}" --input-type binary --output-type json --filename-override any.secret /dev/stdin |
+		sops encrypt --age "${AGE_PUB_A}" --input-type binary --output-type json --filename-override any.secret |
 		git hash-object -w --stdin
 }
 
@@ -270,6 +270,11 @@ test_rekey_handles_awkward_names() {
 		'"starts with a quote.secret'
 		'sub dir/"quoted" dir/x.secret'
 	)
+	# rekey.sh writes a copy of each file: the names the file system and
+	# git take here (not on Windows: : \ * ? " and control characters);
+	# the others are named in a skip at the end.
+	names_taken "${names[@]}"
+	names=("${TAKEN[@]}")
 	local name i=0
 	for name in "${names[@]}"; do
 		i=$((i + 1))
@@ -287,6 +292,7 @@ test_rekey_handles_awkward_names() {
 		assert_contains "${OUT}" "re-keyed  ${name}"$'\n' "rekey.sh names [${name}]"
 		assert_eq "$(git cat-file blob ":0:${name}" | decrypt_as_b)" "PW=${i}" "key B decrypts the staged blob of [${name}]"
 	done
+	skip_if_refused
 }
 
 # A path in a conflict is not re-keyed: each of its stages is reported,

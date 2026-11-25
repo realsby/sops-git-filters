@@ -904,6 +904,7 @@ edit_same_size() {
 # stores it.
 test_clean_cache_counts_sops_calls() {
 	local format mode id
+	needs_cache
 	counting_sops
 	for format in json dotenv; do
 		for mode in 1 0; do
@@ -964,9 +965,9 @@ test_clean_cache_counts_sops_calls() {
 # plain_of_stored_blob [format]   (blob on stdin) : decrypt it
 plain_of_stored_blob() {
 	if [[ "${1:-json}" == "dotenv" ]]; then
-		sops decrypt --input-type dotenv --output-type dotenv /dev/stdin
+		sops decrypt --input-type dotenv --output-type dotenv
 	else
-		sops decrypt --input-type json --output-type binary /dev/stdin
+		sops decrypt --input-type json --output-type binary
 	fi
 }
 
@@ -974,6 +975,7 @@ plain_of_stored_blob() {
 # files of mode 0600. Not the plaintext, not a plain hash of it.
 test_clean_cache_holds_no_plaintext() {
 	local dir file secret='hunter2-S3cr3t' sum
+	needs_cache
 	new_repo repo
 	printf 'A=1\n' >.env
 	git add .env
@@ -1006,6 +1008,7 @@ test_clean_cache_holds_no_plaintext() {
 # one is not given, and the forced one is not remembered.
 test_clean_cache_is_bypassed_by_force_reencrypt() {
 	local id entries
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1029,6 +1032,7 @@ test_clean_cache_is_bypassed_by_force_reencrypt() {
 # recipients it names, and says which keys that adds (audit A-15); the
 # run after it gives that encryption again, with the same line.
 test_clean_cache_follows_a_change_of_sops_yaml() {
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1069,6 +1073,7 @@ STUB
 # a blob for the recipients of the new ones.
 test_clean_cache_keeps_no_encryption_for_rules_changed_while_sops_ran() {
 	local entries
+	needs_cache
 	rewriting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1123,6 +1128,7 @@ rewrite_entries() {
 # document is not used. The filter then works as without it.
 test_clean_cache_ignores_entries_it_cannot_trust() {
 	local plain_id now
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1179,6 +1185,7 @@ test_clean_cache_ignores_entries_it_cannot_trust() {
 # nothing is written there); the filter still works.
 test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink() {
 	local dir what
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
@@ -1214,6 +1221,7 @@ test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink() {
 # they leave behind is a cache the next run can use.
 test_clean_cache_two_commands_at_once() {
 	local round status1 status2 pid1 pid2
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=00\n' >.env
@@ -1249,6 +1257,7 @@ test_clean_cache_two_commands_at_once() {
 # cache: the filter works as before, and remembers nothing.
 test_clean_cache_without_a_sha256_tool() {
 	local bin entries
+	needs_cache
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
