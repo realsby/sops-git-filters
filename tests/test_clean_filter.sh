@@ -602,6 +602,38 @@ test_clean_force_reencrypt_gives_a_new_blob() {
 	assert_eq "$(plain_of_stored .env)" "A=1" "plaintext"
 }
 
+# SOPS_FILTER_FORCE_REENCRYPT reaches every run of the filter in the
+# command, not only the file meant (audit S9). What the README says:
+# on git add <file> and on a plain git commit only what is meant is
+# stored; on git commit -a every managed file git checks again is.
+test_clean_force_reencrypt_reaches_every_file_git_checks() {
+	new_repo repo
+	printf 'A=1\n' >.env
+	printf 'B=1\n' >b.secret
+	git add .env b.secret
+	git commit -q -m "two secrets"
+	local b_id
+	b_id="$(blob_id b.secret)"
+
+	printf 'A=2\n' >.env
+	touch b.secret
+	run env SOPS_FILTER_FORCE_REENCRYPT=1 git add .env
+	assert_eq "${RC}" "0" "forced git add of one file"
+	assert_eq "$(blob_id b.secret)" "${b_id}" "the other file after the forced git add"
+	touch b.secret
+	run env SOPS_FILTER_FORCE_REENCRYPT=1 git commit -q -m "A=2"
+	assert_eq "${RC}" "0" "forced plain git commit"
+	assert_eq "$(git rev-parse HEAD:b.secret)" "${b_id}" "the other file after a forced plain git commit"
+	assert_eq "$(git status --porcelain 2>/dev/null)" "" "git status after the commit"
+
+	printf 'A=3\n' >.env
+	touch b.secret
+	run env SOPS_FILTER_FORCE_REENCRYPT=1 git commit -q -am "A=3"
+	assert_eq "${RC}" "0" "forced git commit -a"
+	assert_ne "$(git rev-parse HEAD:b.secret)" "${b_id}" "git commit -a re-encrypted the other file"
+	assert_eq "$(plain_of_stored b.secret)" "B=1" "its plaintext is the same"
+}
+
 # A storage-format change re-encrypts every file. That needs an explicit step.
 test_clean_format_change_needs_the_override() {
 	new_repo repo

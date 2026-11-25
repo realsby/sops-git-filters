@@ -28,15 +28,19 @@
 # ║  with sops' own error. It does NOT re-encrypt blindly: that      ║
 # ║  showed unchanged secrets as modified and committed them again.  ║
 # ║  SOPS_FILTER_FORCE_REENCRYPT=1 skips the comparison on purpose   ║
-# ║  (storage-format change, fresh data keys).                       ║
+# ║  (storage-format change, fresh data keys). It acts on every run  ║
+# ║  of the filter in the command it is set on, not only on the file ║
+# ║  you mean: set it on `git add <file>` and commit without it. On  ║
+# ║  `git commit -a` it re-encrypts every managed file git checks    ║
+# ║  again, and unchanged secrets get new ciphertext.                ║
 # ║                                                                  ║
 # ║  The filter is also idempotent: input that is the ciphertext     ║
 # ║  git holds (a working copy that was never decrypted, also with   ║
 # ║  the CRLF line endings core.autocrlf adds) is stored unchanged,  ║
-# ║  never encrypted a second time. Any other SOPS                   ║
-# ║  document must decrypt with your keys first; its plaintext is    ║
-# ║  then handled like any edit. One that does not decrypt (another  ║
-# ║  project's keys, a forged one) is refused.                       ║
+# ║  never encrypted a second time. Any other SOPS document must     ║
+# ║  decrypt with your keys first; its plaintext is then handled     ║
+# ║  like any edit. One that does not decrypt (another project's     ║
+# ║  keys, a forged one) is refused.                                 ║
 # ║                                                                  ║
 # ║  Failure policy: this filter FAILS HARD. If sops is missing or   ║
 # ║  .sops.yaml is absent, it exits non-zero and (combined with      ║
@@ -373,6 +377,11 @@ EXISTING_ENCRYPTED="${EXISTING_ENCRYPTED%x}"
 # ── Asked to re-encrypt no matter what ────
 # For a storage-format change, or to get fresh data keys:
 #   SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- <files>
+# The variable reaches every run of this filter in the git command it is
+# set on, and git runs it for each managed file it checks again (one whose
+# timestamp changed or cannot be trusted), not only for the file named
+# (audit S9). With git add <file> only that file is staged; with
+# git commit -a, every file checked again is staged re-encrypted.
 if [[ "${SOPS_FILTER_FORCE_REENCRYPT:-}" == "1" ]]; then
 	echo "sops clean filter: SOPS_FILTER_FORCE_REENCRYPT=1, re-encrypting ${FILENAME}" >&2
 	KEYS_BEFORE="${EXISTING_ENCRYPTED}"
