@@ -986,9 +986,11 @@ test_clean_cache_holds_no_plaintext() {
 	git add .env
 	dir="$(cache_dir)"
 	[[ -f "${dir}/key" ]] || fail "test fixture: no key in ${dir}"
-	assert_eq "$(mode_of "${dir}")" "700" "mode of the cache directory"
+	# Where the file system keeps Unix modes (not on Windows, where Git
+	# Bash makes them up and the NTFS permissions of the folder decide).
+	assert_mode "${dir}" "700" "mode of the cache directory"
 	for file in "${dir}"/*; do
-		assert_eq "$(mode_of "${file}")" "600" "mode of ${file##*/}"
+		assert_mode "${file}" "600" "mode of ${file##*/}"
 	done
 	assert_eq "$(grep -rl "${secret}" "${dir}" || true)" "" "files that hold the plaintext"
 	# Not a plain SHA-256 of it either, in any form a tool prints.
@@ -1186,6 +1188,8 @@ test_clean_cache_ignores_entries_it_cannot_trust() {
 test_clean_cache_is_not_used_when_its_directory_is_open_or_a_symlink() {
 	local dir what
 	needs_cache
+	# chmod is the test (on Windows it changes nothing)
+	needs_file_modes
 	counting_sops
 	new_repo repo
 	printf 'A=1\n' >.env
