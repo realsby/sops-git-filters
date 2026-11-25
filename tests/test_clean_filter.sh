@@ -288,6 +288,44 @@ test_clean_refuses_a_forged_sops_document() {
 	done
 }
 
+# Without the keys, a working copy that holds ciphertext git no longer
+# holds (a git reset in a clone where install.sh could not decrypt) stops
+# git status. "rm f && git checkout -- f" needs the keys (the checkout
+# decrypts); the refusal must also print a way back that works without
+# them, ready to paste, from any directory, for a path with a space and
+# a quote in it.
+test_clean_refusal_prints_a_way_back_without_the_keys() {
+	local file="a b'c.secret" line rc
+	new_repo origin
+	printf 'A=1\n' >"${file}"
+	git add "${file}"
+	git commit -q -m "A=1"
+	printf 'A=2\n' >"${file}"
+	git add "${file}"
+	git commit -q -m "A=2"
+	cd ..
+	fresh_clone origin clone
+	run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+	export SOPS_AGE_KEY_FILE="${NO_KEY}"
+	git reset -q HEAD~1 2>/dev/null || true
+
+	touch "${file}"
+	run git status --porcelain
+	assert_ne "${RC}" "0" "git status without the keys"
+	assert_contains "${OUT}" "does not decrypt with your keys" "filter message"
+	assert_contains "${OUT}" "needs your keys" "the checkout line says it needs the keys"
+	line="$(printf '%s\n' "${OUT}" | grep 'git cat-file blob' | head -1)"
+	assert_ne "${line}" "" "a git cat-file line"
+	line="git cat-file blob${line#*git cat-file blob}"
+
+	mkdir -p sub
+	(cd sub && eval "${line}")
+	rc=0
+	git status --porcelain >/dev/null 2>&1 || rc=$?
+	assert_eq "${rc}" "0" "git status after the printed command"
+	assert_eq "$(git hash-object --no-filters -- "${file}")" "$(blob_id "${file}")" "the working copy is the blob git holds"
+}
+
 # The case the shortcut is for: install.sh ran without the key, and the
 # working copy still holds the ciphertext git holds. It is stored as it
 # is, without the key and without a call to sops (with a KMS key, every
@@ -329,6 +367,68 @@ STUB
 	done
 }
 
+# has_cr <file> : true when the file holds a carriage return
+has_cr() {
+	[[ "$(tr -d '\r' <"$1" | wc -c)" -ne "$(wc -c <"$1")" ]]
+}
+
+# The same with core.autocrlf=true and no -text on the path: the working
+# copy is the stored blob with CRLF line endings, not byte for byte the
+# blob git holds. It must still be taken for it, without the key and
+# without a call to sops (before, json failed without the key and dotenv
+# even with it: sops cannot parse a dotenv document with CRLF).
+test_clean_stores_the_held_ciphertext_with_crlf_line_endings() {
+	local format id out rc
+	stub fakebin sops <<'STUB'
+printf '%s\n' "$*" >>"${SOPS_CALLS}"
+exec "${REAL}" "$@"
+STUB
+	for format in json dotenv; do
+		new_repo "origin-${format}" "${format}"
+		printf 'A=1\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+		cd ..
+		fresh_clone "origin-${format}" "clone-${format}"
+		git config core.autocrlf true
+		rm .env
+		git checkout -- .env
+		has_cr .env || fail "test fixture: the working copy has no CR (${format})"
+		run env SOPS_AGE_KEY_FILE="${NO_KEY}" "${TOOL}/install.sh"
+		id="$(blob_id .env)"
+
+		: >../calls
+		touch .env
+		rc=0
+		out="$(env SOPS_AGE_KEY_FILE="${NO_KEY}" SOPS_CALLS="${PWD}/../calls" PATH="${PWD}/../fakebin:${PATH}" \
+			git status --porcelain 2>/dev/null)" || rc=$?
+		assert_eq "${rc}" "0" "git status without the key (${format})"
+		assert_eq "${out}" "" "git status --porcelain without the key (${format})"
+		touch .env
+		run env SOPS_AGE_KEY_FILE="${NO_KEY}" SOPS_CALLS="${PWD}/../calls" PATH="${PWD}/../fakebin:${PATH}" \
+			git add -A
+		assert_eq "${RC}" "0" "git add -A without the key (${format})"
+		assert_eq "$(blob_id .env)" "${id}" "blob of .env (${format})"
+		assert_not_contains "$(cat ../calls)" "decrypt" "calls to sops (${format})"
+
+		# With the key too.
+		touch .env
+		rc=0
+		out="$(git status --porcelain 2>/dev/null)" || rc=$?
+		assert_eq "${rc}" "0" "git status with the key (${format})"
+		assert_eq "${out}" "" "git status --porcelain with the key (${format})"
+
+		# A copy of a foreign document with CRLF line endings is still refused.
+		printf 'A=from-another-project\n' | encrypt_for "${format}" "${AGE_PUB_B}" |
+			awk '{ printf "%s\r\n", $0 }' >.env
+		run git add .env
+		assert_ne "${RC}" "0" "git add of a foreign document with CRLF (${format})"
+		assert_contains "${OUT}" "does not decrypt with your keys" "filter message (${format})"
+		assert_eq "$(blob_id .env)" "${id}" "index blob after the foreign copy (${format})"
+		cd ..
+	done
+}
+
 # A SOPS document that is not the version git holds, but that decrypts
 # with the user's keys, is content like any other: its plaintext is
 # compared with the stored version and, when it differs, encrypted for
@@ -336,36 +436,41 @@ STUB
 # keys A and B while .sops.yaml names A only, and an old version taken
 # from history as ciphertext.
 test_clean_reencrypts_a_sops_document_it_can_decrypt() {
-	new_repo repo
-	printf 'A=1\n' >.env
-	git add .env
-	git commit -q -m "add .env"
-	local id
-	id="$(blob_id .env)"
+	local format id
+	for format in json dotenv; do
+		new_repo "${format}" "${format}"
+		printf 'A=1\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+		id="$(blob_id .env)"
 
-	# The same plaintext for other keys: the stored blob is kept.
-	printf 'A=1\n' | encrypt_for json "${AGE_PUB_A},${AGE_PUB_B}" >.env
-	run git add .env
-	assert_eq "${RC}" "0" "git add of the same content for other keys"
-	assert_eq "$(blob_id .env)" "${id}" "the stored blob is reused"
-	assert_eq "$(git status --porcelain)" "" "git status"
+		# The same plaintext for other keys: the stored blob is kept, and the
+		# note says how recipients do change.
+		printf 'A=1\n' | encrypt_for "${format}" "${AGE_PUB_A},${AGE_PUB_B}" >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add of the same content for other keys (${format})"
+		assert_eq "$(blob_id .env)" "${id}" "the stored blob is reused (${format})"
+		assert_contains "${OUT}" "rekey.sh" "the note names rekey.sh (${format})"
+		assert_eq "$(git status --porcelain 2>/dev/null)" "" "git status (${format})"
 
-	# Other content: encrypted for the recipients of .sops.yaml only.
-	printf 'A=2\n' | encrypt_for json "${AGE_PUB_A},${AGE_PUB_B}" >.env
-	run git add .env
-	assert_eq "${RC}" "0" "git add of new content for other keys"
-	assert_eq "$(plain_of_stored .env)" "A=2" "plaintext of the staged blob"
-	assert_contains "$(stored .env)" "${AGE_PUB_A}" "the recipient .sops.yaml names"
-	assert_not_contains "$(stored .env)" "${AGE_PUB_B}" "a recipient .sops.yaml does not name"
-	git commit -q -m "A=2"
+		# Other content: encrypted for the recipients of .sops.yaml only.
+		printf 'A=2\n' | encrypt_for "${format}" "${AGE_PUB_A},${AGE_PUB_B}" >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add of new content for other keys (${format})"
+		assert_eq "$(plain_of_stored .env "${format}")" "A=2" "plaintext of the staged blob (${format})"
+		assert_contains "$(stored .env)" "${AGE_PUB_A}" "the recipient .sops.yaml names (${format})"
+		assert_not_contains "$(stored .env)" "${AGE_PUB_B}" "a recipient .sops.yaml does not name (${format})"
+		git commit -q -m "A=2"
 
-	# An old version, taken from history as ciphertext.
-	git cat-file blob HEAD~1:.env >.env
-	run git add .env
-	assert_eq "${RC}" "0" "git add of an old version"
-	assert_eq "$(plain_of_stored .env)" "A=1" "plaintext of the staged blob"
-	run "${TOOL}/encryption-guard.sh"
-	assert_eq "${RC}" "0" "guard"
+		# An old version, taken from history as ciphertext.
+		git cat-file blob HEAD~1:.env >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add of an old version (${format})"
+		assert_eq "$(plain_of_stored .env "${format}")" "A=1" "plaintext of the staged blob (${format})"
+		run "${TOOL}/encryption-guard.sh"
+		assert_eq "${RC}" "0" "guard (${format})"
+		cd ..
+	done
 }
 
 # Plaintext in the working copy, but the stored version cannot be decrypted

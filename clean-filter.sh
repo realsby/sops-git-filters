@@ -31,8 +31,9 @@
 # ║  (storage-format change, fresh data keys).                       ║
 # ║                                                                  ║
 # ║  The filter is also idempotent: input that is the ciphertext     ║
-# ║  git holds (a working copy that was never decrypted) is stored   ║
-# ║  unchanged, never encrypted a second time. Any other SOPS        ║
+# ║  git holds (a working copy that was never decrypted, also with   ║
+# ║  the CRLF line endings core.autocrlf adds) is stored unchanged,  ║
+# ║  never encrypted a second time. Any other SOPS                   ║
 # ║  document must decrypt with your keys first; its plaintext is    ║
 # ║  then handled like any edit. One that does not decrypt (another  ║
 # ║  project's keys, a forged one) is refused.                       ║
@@ -102,6 +103,11 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 	echo "ERROR: not inside a git repository" >&2
 	exit 1
 }
+
+# The file as the commands this filter suggests name it: the full path in
+# single quotes, so a line can be pasted as it is, from any directory of
+# the working tree, whatever characters the name holds.
+PASTE_PATH="'$(printf '%s' "${PROJECT_ROOT}/${FILENAME}" | sed "s/'/'\\\\''/g")'"
 
 # Run from the copy under .git/ while the checkout holds a newer version?
 # Then say that install.sh has to run again (one line, see lib.sh).
@@ -177,6 +183,10 @@ STORED_ID="$(git rev-parse -q --verify ":${FILENAME}" 2>/dev/null ||
 # stored blob is reused), else encrypted for the recipients .sops.yaml
 # names. Its own recipients are not kept: .sops.yaml alone decides who
 # can read a secret of this repository (see the next sections).
+#
+# INPUT_WAS_CIPHERTEXT is set when the input is such a document and it
+# decrypts.
+INPUT_WAS_CIPHERTEXT=
 if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 	# --stdin: no filter runs (that would be this one again).
 	input_id="$(printf '%s' "${INPUT}" | git hash-object --stdin 2>/dev/null || true)"
@@ -184,6 +194,19 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 		echo "sops clean filter: ${FILENAME} holds the ciphertext git holds (the working copy was never decrypted) — storing it unchanged" >&2
 		printf '%s' "${INPUT}"
 		exit 0
+	fi
+	# The same blob with CRLF line endings: core.autocrlf=true (or eol=crlf)
+	# on a path without -text converts what git checks out, and sops never
+	# writes a CR into a document. Without its CRs the input is the stored
+	# blob, so that blob goes back to git. No sops call here either: sops
+	# cannot parse a dotenv document with CRLF, and json would need the key.
+	if [[ -n "${STORED_ID}" && "${INPUT}" == *$'\r'* ]]; then
+		input_id="$(printf '%s' "${INPUT}" | tr -d '\r' | git hash-object --stdin 2>/dev/null || true)"
+		if [[ -n "${input_id}" && "${input_id}" == "${STORED_ID}" ]]; then
+			echo "sops clean filter: ${FILENAME} holds the ciphertext git holds, with CRLF line endings (the working copy was never decrypted) — storing the blob git holds" >&2
+			git cat-file blob "${STORED_ID}"
+			exit 0
+		fi
 	fi
 
 	echo "sops clean filter: ${FILENAME} is a SOPS document, but not the version git holds — decrypting it to check it" >&2
@@ -205,7 +228,14 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 		echo "       To store its content: decrypt it where its keys are (in its own project) and" >&2
 		echo "       save the plaintext here in its place; git add encrypts it for .sops.yaml." >&2
 		if [[ -n "${STORED_ID}" ]]; then
-			echo "       To get back the version git holds:  rm ${FILENAME} && git checkout -- ${FILENAME}" >&2
+			# The checkout runs the smudge filter, which decrypts: without
+			# the keys it fails and leaves the file deleted. The blob itself
+			# (ciphertext, the way install.sh leaves a file it cannot
+			# decrypt) needs no key.
+			echo "       To get back the version git holds, as ciphertext (no key needed):" >&2
+			echo "         git cat-file blob ${STORED_ID} > ${PASTE_PATH}" >&2
+			echo "       or decrypted (needs your keys):" >&2
+			echo "         rm ${PASTE_PATH} && git checkout -- ${PASTE_PATH}" >&2
 		fi
 		# SOPS_FILTER_FORCE_REENCRYPT is no way out here: re-encrypting
 		# needs the plaintext, and that needs this decrypt.
@@ -213,8 +243,9 @@ if sgf_is_sops_doc "${STORE_FORMAT}" "${INPUT}"; then
 	fi
 	[[ "${SGF_NUL_COUNT}" == "0" ]] || refuse_nul_bytes "the decrypted content of ${FILENAME}"
 	INPUT="${SGF_CONTENT}"
+	INPUT_WAS_CIPHERTEXT=1
 	echo "sops clean filter: it decrypts with your keys; its content is stored like any edit (recipients from .sops.yaml)." >&2
-	echo "  The working copy keeps that ciphertext. For the plaintext there: rm ${FILENAME} && git checkout -- ${FILENAME}" >&2
+	echo "  The working copy keeps that ciphertext. For the plaintext there: rm ${PASTE_PATH} && git checkout -- ${PASTE_PATH}" >&2
 elif sgf_is_sops_doc "${OTHER_FORMAT}" "${INPUT}"; then
 	echo "ERROR: the working copy of ${FILENAME} is a SOPS document in the ${OTHER_FORMAT} format," >&2
 	echo "       but .sops-filter.conf says ${STORE_FORMAT}. Refusing to encrypt ciphertext again." >&2
@@ -343,6 +374,10 @@ if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; the
 	# Same plaintext → same stored blob → no false diff. (This holds for
 	# an empty file too: what counts is that the decryption worked.)
 	echo "sops clean filter: content unchanged, reusing existing encrypted blob for ${FILENAME}" >&2
+	# A copy encrypted for other keys does not bring its recipients along.
+	if [[ -n "${INPUT_WAS_CIPHERTEXT}" ]]; then
+		echo "  Its recipients are not taken over. To change recipients: edit .sops.yaml, run rekey.sh" >&2
+	fi
 	printf '%s' "${EXISTING_ENCRYPTED}"
 else
 	# Content actually changed — encrypt the new version.
