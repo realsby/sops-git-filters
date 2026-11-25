@@ -484,6 +484,14 @@ Two tests drive the [pre-commit](https://pre-commit.com) framework (or `prek`) a
 
 CI (`.github/workflows/tests.yml`) runs shellcheck and the suite on Linux and macOS, with the oldest `sops` that `install.sh` accepts and with a current one. It downloads `sops`, `age`, `prek` and shellcheck from their GitHub releases and checks each file against a SHA-256 pinned in the repository (`tests/ci-install-tools.sh`) before using it. The two hook tests run there with that `prek`, and `SGF_NO_SKIP=1` is set: a test that skips itself fails the job.
 
+## Code review by Greptile
+
+Greptile reviews a pull request only when it is asked: write a comment on the pull request
+that says `@greptileai` (a focus may follow, for example "`@greptileai` check the migration").
+It does not review by itself: `greptile.json` sets `"autoReview": []`, and a repository's file
+wins over the setting in Greptile's dashboard. Ask for a review when a pull request is big,
+complex or critical; a small one does not need it.
+
 ## License
 
 [MIT](LICENSE)
