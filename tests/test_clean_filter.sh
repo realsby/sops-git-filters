@@ -12,6 +12,55 @@ test_clean_accepts_conf_without_store_format() {
 	assert_contains "$(stored .env)" 'ENC[AES256_GCM,data:' "stored blob"
 }
 
+# A change to .sops.yaml decides who can read every secret edited after
+# it, and the re-encryption that puts it into effect used to say nothing
+# but "re-encrypting". The filter names the keys it adds and removes
+# (audit A-15), and says nothing about keys when they stay the same.
+test_clean_names_the_keys_a_reencryption_adds_or_removes() {
+	local format
+	for format in json dotenv; do
+		new_repo "${format}" "${format}"
+		printf 'A=1\n' >.env
+		git add .env
+		git commit -q -m "add .env"
+
+		printf 'A=2\n' >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add with the same keys (${format})"
+		assert_contains "${OUT}" "re-encrypting .env" "the file was re-encrypted (${format})"
+		assert_not_contains "${OUT}" "keys of .env change" "the same keys (${format})"
+
+		write_sops_yaml "${AGE_PUB_B}"
+		git add .sops.yaml .env
+		git commit -q -m "add recipient B"
+		printf 'A=3\n' >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add after recipient B was added (${format})"
+		assert_contains "${OUT}" "added: age ${AGE_PUB_B}" "the added key is named (${format})"
+		assert_not_contains "${OUT}" "removed:" "nothing removed (${format})"
+		git commit -q -m "A=3"
+
+		# shellcheck disable=SC2119  # key A only
+		write_sops_yaml
+		printf 'A=4\n' >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add after recipient B was removed (${format})"
+		assert_contains "${OUT}" "removed: age ${AGE_PUB_B}" "the removed key is named (${format})"
+		assert_not_contains "${OUT}" "added:" "nothing added (${format})"
+		git commit -q -am "A=4, B removed"
+
+		# Key groups: key B in a second group.
+		printf 'creation_rules:\n  - path_regex: .*\n    shamir_threshold: 2\n    key_groups:\n      - age:\n          - %s\n      - age:\n          - %s\n' \
+			"${AGE_PUB_A}" "${AGE_PUB_B}" >.sops.yaml
+		printf 'A=5\n' >.env
+		run git add .env
+		assert_eq "${RC}" "0" "git add after a key group was added (${format})"
+		assert_contains "${OUT}" "added: age ${AGE_PUB_B} (key group 2)" "the key and its group are named (${format})"
+		assert_not_contains "${OUT}" "removed:" "nothing removed by the change to key groups (${format})"
+		cd ..
+	done
+}
+
 # .sops.yaml decides who can decrypt, not variables left in the shell.
 test_clean_ignores_recipient_variables() {
 	new_repo repo

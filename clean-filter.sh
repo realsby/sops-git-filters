@@ -287,6 +287,46 @@ for var in SOPS_AGE_RECIPIENTS SOPS_KMS_ARN SOPS_GCP_KMS_IDS SOPS_AZURE_KEYVAULT
 	fi
 done
 
+# ── Who can read it from now on ────
+# A re-encryption takes the keys from the .sops.yaml of today. A change
+# there (a recipient added in a merged pull request, say) takes effect
+# with the next edit of each secret, and nothing else showed it (audit
+# A-15). When the keys differ from those of the version git holds, one
+# line names the keys added and removed, from the metadata of the two
+# documents (sops stores it in clear: recipients, ARNs, key URLs). No
+# call to sops.
+# KEYS_BEFORE holds the stored document to compare with, in the format
+# KEYS_BEFORE_FORMAT; empty when there is none (a new file, a stored
+# version in clear).
+KEYS_BEFORE=""
+KEYS_BEFORE_FORMAT=""
+say_key_change() { # <new document>
+	local before after
+	[[ -n "${KEYS_BEFORE_FORMAT}" ]] || return 0
+	before="$(printf '%s' "${KEYS_BEFORE}" | sgf_doc_keys "${KEYS_BEFORE_FORMAT}" | sort -u)" || return 0
+	after="$(printf '%s' "$1" | sgf_doc_keys "${STORE_FORMAT}" | sort -u)" || return 0
+	[[ -n "${before}" && -n "${after}" && "${before}" != "${after}" ]] || return 0
+	# The lines are "<key group> TAB <type> <name>" (lib.sh). The group is
+	# named only when a document has more than one.
+	SGF_BEFORE="${before}" SGF_AFTER="${after}" SGF_FILE="${FILENAME}" awk '
+	function group(x) { return substr(x, 1, index(x, "\t") - 1) + 0 }
+	function shown(x) {
+		return substr(x, index(x, "\t") + 1) (groups ? " (key group " group(x) ")" : "")
+	}
+	BEGIN {
+		nb = split(ENVIRON["SGF_BEFORE"], b, "\n")
+		na = split(ENVIRON["SGF_AFTER"], a, "\n")
+		for (i = 1; i <= nb; i++) { old[b[i]] = 1; if (group(b[i]) > 1) groups = 1 }
+		for (i = 1; i <= na; i++) { new[a[i]] = 1; if (group(a[i]) > 1) groups = 1 }
+		for (i = 1; i <= na; i++) if (!(a[i] in old)) added = added (added == "" ? "" : ", ") shown(a[i])
+		for (i = 1; i <= nb; i++) if (!(b[i] in new)) removed = removed (removed == "" ? "" : ", ") shown(b[i])
+		line = "sops clean filter: the keys of " ENVIRON["SGF_FILE"] " change with this version (from .sops.yaml):"
+		if (added != "") line = line " added: " added (removed != "" ? ";" : "")
+		if (removed != "") line = line " removed: " removed
+		print line
+	}' >&2
+}
+
 encrypt_input() {
 	local encrypted why
 	# --filename-override tells SOPS which .sops.yaml creation rule to
@@ -314,6 +354,7 @@ encrypt_input() {
 		echo "       tool knows. Update sops-git-filters." >&2
 		return 1
 	fi
+	say_key_change "${encrypted}"
 	printf '%s' "${encrypted}"
 }
 
@@ -325,19 +366,26 @@ if [[ -z "${STORED_ID}" ]]; then
 	exit 0
 fi
 
+# The stored version (index, else HEAD: see "The version git holds").
+EXISTING_ENCRYPTED=$( (git cat-file -p "${STORED_ID}" 2>/dev/null || true) && printf x)
+EXISTING_ENCRYPTED="${EXISTING_ENCRYPTED%x}"
+
 # ── Asked to re-encrypt no matter what ────
 # For a storage-format change, or to get fresh data keys:
 #   SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize -- <files>
 if [[ "${SOPS_FILTER_FORCE_REENCRYPT:-}" == "1" ]]; then
 	echo "sops clean filter: SOPS_FILTER_FORCE_REENCRYPT=1, re-encrypting ${FILENAME}" >&2
+	KEYS_BEFORE="${EXISTING_ENCRYPTED}"
+	if sgf_is_sops_doc "${STORE_FORMAT}" "${EXISTING_ENCRYPTED}"; then
+		KEYS_BEFORE_FORMAT="${STORE_FORMAT}"
+	elif sgf_is_sops_doc "${OTHER_FORMAT}" "${EXISTING_ENCRYPTED}"; then
+		KEYS_BEFORE_FORMAT="${OTHER_FORMAT}"
+	fi
 	encrypt_input
 	exit 0
 fi
 
 # ── Existing file: compare before re-encrypting ────────
-# The stored version (index, else HEAD: see "The version git holds").
-EXISTING_ENCRYPTED=$( (git cat-file -p "${STORED_ID}" 2>/dev/null || true) && printf x)
-EXISTING_ENCRYPTED="${EXISTING_ENCRYPTED%x}"
 
 # ── The stored version is not a SOPS document in this format ────
 if ! sgf_is_sops_doc "${STORE_FORMAT}" "${EXISTING_ENCRYPTED}"; then
@@ -389,5 +437,7 @@ if [[ "${SGF_NUL_COUNT}" == "0" && "${EXISTING_DECRYPTED}" == "${INPUT}" ]]; the
 else
 	# Content actually changed — encrypt the new version.
 	echo "sops clean filter: content changed, re-encrypting ${FILENAME}" >&2
+	KEYS_BEFORE="${EXISTING_ENCRYPTED}"
+	KEYS_BEFORE_FORMAT="${STORE_FORMAT}"
 	encrypt_input
 fi

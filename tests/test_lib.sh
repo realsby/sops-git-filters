@@ -339,6 +339,49 @@ sops_version=3.13.3"
 	done
 }
 
+# The keys a document names, for the line the clean filter prints when a
+# re-encryption changes them (audit A-15): every kind of key, in key
+# groups too, from json in any layout and from dotenv, the same list.
+test_lib_doc_keys() {
+	load_lib
+	local json dotenv want
+	# One line: sgf_doc_keys must not depend on the layout sops writes.
+	json='{"data": "'"${ENC}"'", "sops": {"key_groups": [{"age": [{"enc": "x", "recipient": "age1aaaa"}], "kms": [{"arn": "arn:aws:kms:eu-central-1:111111111111:key/k1", "role": "", "context": {"Env": "prod"}, "created_at": "t", "enc": "x", "aws_profile": ""}], "gcp_kms": [{"resource_id": "projects/p/locations/global/keyRings/r/cryptoKeys/k", "created_at": "t", "enc": "x"}]}, {"azure_kv": [{"vault_url": "https://v.vault.azure.net", "name": "k", "version": "1", "created_at": "t", "enc": "x"}], "hc_vault": [{"vault_address": "https://vault.example.invalid:8200", "engine_path": "transit", "key_name": "k", "created_at": "t", "enc": "x"}], "pgp": [{"created_at": "t", "enc": "x", "fp": "0123456789ABCDEF"}], "hckms": [{"key_id": "region:id", "created_at": "t", "enc": "x"}], "age": [{"recipient": "age1aaaa", "enc": "x"}]}], "shamir_threshold": 2, "mac": "'"${ENC}"'", "version": "3.13.3"}}'
+	dotenv="A=${ENC}
+sops_key_groups__list_0__map_age__list_0__map_enc=x
+sops_key_groups__list_0__map_age__list_0__map_recipient=age1aaaa
+sops_key_groups__list_0__map_kms__list_0__map_arn=arn:aws:kms:eu-central-1:111111111111:key/k1
+sops_key_groups__list_0__map_kms__list_0__map_context__map_Env=prod
+sops_key_groups__list_0__map_gcp_kms__list_0__map_resource_id=projects/p/locations/global/keyRings/r/cryptoKeys/k
+sops_key_groups__list_1__map_azure_kv__list_0__map_name=k
+sops_key_groups__list_1__map_azure_kv__list_0__map_vault_url=https://v.vault.azure.net
+sops_key_groups__list_1__map_hc_vault__list_0__map_engine_path=transit
+sops_key_groups__list_1__map_hc_vault__list_0__map_key_name=k
+sops_key_groups__list_1__map_hc_vault__list_0__map_vault_address=https://vault.example.invalid:8200
+sops_key_groups__list_1__map_pgp__list_0__map_fp=0123456789ABCDEF
+sops_key_groups__list_1__map_hckms__list_0__map_key_id=region:id
+sops_key_groups__list_1__map_age__list_0__map_recipient=age1aaaa
+sops_mac=${ENC}
+sops_shamir_threshold=2
+sops_version=3.13.3"
+	want=$'1\tage age1aaaa\n1\tgcp_kms projects/p/locations/global/keyRings/r/cryptoKeys/k\n1\tkms arn:aws:kms:eu-central-1:111111111111:key/k1\n2\tage age1aaaa\n2\tazure_kv https://v.vault.azure.net/keys/k\n2\thc_vault https://vault.example.invalid:8200/v1/transit/keys/k\n2\thckms region:id\n2\tpgp 0123456789ABCDEF'
+	is sgf_is_sops_doc json "${json}"
+	is sgf_is_sops_doc dotenv "${dotenv}"$'\n'
+	assert_eq "$(printf '%s\n' "${json}" | sgf_doc_keys json | sort)" "${want}" "keys of a json document"
+	assert_eq "$(printf '%s\n' "${dotenv}" | sgf_doc_keys dotenv | sort)" "${want}" "keys of a dotenv document"
+
+	# Without key_groups: the one group is group 1.
+	assert_eq "$(sops_doc '"age": [{"recipient": "age1bbbb", "enc": "x"}], "mac": "'"${ENC}"'", "version": "3.13.3"' | sgf_doc_keys json)" \
+		$'1\tage age1bbbb' "keys of a json document without key groups"
+	assert_eq "$(printf 'sops_age__list_0__map_recipient=age1bbbb\n' | sgf_doc_keys dotenv)" \
+		$'1\tage age1bbbb' "keys of a dotenv document without key groups"
+	# What is shown is printable: the document can come from anyone.
+	assert_eq "$(printf 'sops_age__list_0__map_recipient=age1\033[2Jx\n' | sgf_doc_keys dotenv)" \
+		$'1\tage age1?[2Jx' "a control character in a recipient"
+	# Not a SOPS document: no list, and a failure.
+	is_not sgf_doc_keys json <<<'{"data": "", "sops": {"age": [{"recipient": "age1", "x": "y"}]}}'
+}
+
 # ── Content with NUL bytes ────
 test_lib_counts_nul_bytes_and_keeps_the_content() {
 	load_lib

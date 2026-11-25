@@ -174,6 +174,28 @@ function meta_keytype(k) {
 function meta_entry(type, k) {
 	return (type ":" k) ~ /^(kms:(arn|role|context|created_at|enc|aws_profile)|gcp_kms:(resource_id|created_at|enc)|hckms:(key_id|created_at|enc)|azure_kv:(vault_url|name|version|created_at|enc)|hc_vault:(vault_address|engine_path|key_name|created_at|enc)|age:(recipient|enc)|pgp:(created_at|enc|fp))$/
 }
+# The key one entry names, from its fields in F: what sops shows for it.
+# A recipient, an ARN, a key URL: public by design, never a secret.
+function key_name(type) {
+	if (type == "age") return F["recipient"]
+	if (type == "kms") return F["arn"]
+	if (type == "gcp_kms") return F["resource_id"]
+	if (type == "azure_kv") return F["vault_url"] "/keys/" F["name"]
+	if (type == "hc_vault") return F["vault_address"] "/v1/" F["engine_path"] "/keys/" F["key_name"]
+	if (type == "pgp") return F["fp"]
+	if (type == "hckms") return F["key_id"]
+	return ""
+}
+# One line per key entry: <group> TAB <type> <name>. Group 1 is the first
+# key group; a document without key_groups has that one group only. The
+# name is cut short and shown in printable ASCII only: a document from
+# someone else can hold anything there.
+function print_key(group, type,    name) {
+	name = key_name(type)
+	gsub(/[^ -~]/, "?", name)
+	if (length(name) > 200) name = substr(name, 1, 200) "..."
+	print group "\t" type " " name
+}
 # A key name is repeated in a message only when it looks like a name.
 function shown(k) {
 	return (k ~ /^[A-Za-z0-9_]+$/ && length(k) <= 40) ? ": " k : ""
@@ -265,6 +287,8 @@ function on_string(s,    kind, st, k) {
 		fail("a string where a list belongs" shown(k)); return
 	} else if (kind == "entry" && k == "context") {
 		fail("\"context\" is not an object"); return
+	} else if (kind == "entry" && keys) {
+		F[k] = s
 	}
 	St[depth] = "e"
 }
@@ -306,8 +330,11 @@ function on_open(c,    kind, st, k) {
 		return
 	}
 	if (st != "v0" && st != "v") { fail("it is not valid JSON"); return }
-	if (c == "{" && kind == "list") push("entry", "k0", Type[depth])
-	else if (c == "{" && kind == "groups") push("group", "k0", "")
+	if (c == "{" && kind == "list") {
+		group = K[depth - 1] == "group" ? ngroups : 1
+		split("", F)
+		push("entry", "k0", Type[depth])
+	} else if (c == "{" && kind == "groups") { ngroups++; push("group", "k0", "") }
 	else fail("a list inside a list")
 }
 
@@ -317,6 +344,7 @@ function on_close(c,    kind, st) {
 	if (c == "}") {
 		if (!is_obj(kind) || (st != "k0" && st != "e")) { fail("it is not valid JSON"); return }
 		if (kind == "doc" && ndoc != 2) { fail("\"data\" and \"sops\" are not both there"); return }
+		if (kind == "entry" && keys) print_key(group, Type[depth])
 	} else if (is_obj(kind) || (st != "v0" && st != "e")) {
 		fail("it is not valid JSON"); return
 	}
@@ -405,7 +433,7 @@ END {
 		if (explain) print why
 		exit 1
 	}
-	if (!explain) print datakind
+	if (!explain && !keys) print datakind
 }
 '
 
@@ -483,6 +511,40 @@ END {
 	if (bad) {
 		if (explain) print why
 		exit 1
+	}
+}
+'
+
+# The keys of a dotenv-format document (sgf_doc_keys): the sops_ lines of
+# key entries, such as
+#   sops_age__list_0__map_recipient=age1...
+#   sops_key_groups__list_1__map_kms__list_0__map_arn=arn:aws:kms:...
+# shellcheck disable=SC2016  # $0 and friends belong to awk
+SGF_AWK_DOTENV_KEYS='
+{ sub(/\r$/, "") }
+substr($0, 1, 5) == "sops_" && (eq = index($0, "=")) {
+	r = substr($0, 6, eq - 6)
+	g = 1
+	if (match(r, /^key_groups__list_[0-9]+__map_/)) {
+		g = substr(r, 18, RLENGTH - 23) + 1
+		r = substr(r, RLENGTH + 1)
+	}
+	p = index(r, "__list_")
+	if (p == 0) next
+	type = substr(r, 1, p - 1)
+	r = substr(r, p + 7)
+	if (!meta_keytype(type) || !match(r, /^[0-9]+__map_/)) next
+	id = g SUBSEP type SUBSEP substr(r, 1, RLENGTH - 6)
+	if (!(id in seen)) { seen[id] = 1; order[++n] = id }
+	V[id, substr(r, RLENGTH + 1)] = substr($0, eq + 1)
+}
+END {
+	nf = split("recipient arn resource_id vault_url name vault_address engine_path key_name fp key_id", field, " ")
+	for (i = 1; i <= n; i++) {
+		split(order[i], part, SUBSEP)
+		split("", F)
+		for (j = 1; j <= nf; j++) F[field[j]] = V[order[i], field[j]]
+		print_key(part[1], part[2])
 	}
 }
 '
@@ -690,6 +752,22 @@ sgf_doc_key_types() {
 		for (i = 1; i <= n; i++) if (order[i] in t) print order[i]
 	}
 	'
+}
+
+# sgf_doc_keys <format>   (SOPS document on stdin)
+# Prints the keys the document was encrypted for, one per line, in the
+# order of the document:  <key group> TAB <type> <name>, for example
+#   1	age age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+#   2	kms arn:aws:kms:eu-central-1:111111111111:key/...
+# Key group 1 is the first one (or the only one: a document without
+# key_groups). It reads the metadata sops stores in clear, nothing else.
+# Fails when a json document is not a SOPS document.
+sgf_doc_keys() {
+	case "$1" in
+	json) awk -v keys=1 "${SGF_AWK_IS_TOKEN}${SGF_AWK_META}${SGF_AWK_JSON}" ;;
+	dotenv) awk "${SGF_AWK_META}${SGF_AWK_DOTENV_KEYS}" ;;
+	*) return 1 ;;
+	esac
 }
 
 # sgf_credential_hint <indent> [key type...]

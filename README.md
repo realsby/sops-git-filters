@@ -80,7 +80,7 @@ Git does not run these scripts from your checkout of the tool. `install.sh` copi
 4. File exists? → decrypt the stored blob, compare plaintexts:
    - cannot decrypt (no key, expired cloud session) → **exit non-zero** with the `sops` error. No blind re-encryption.
    - identical → output the **existing** ciphertext (no new IV → no false diff)
-   - different → re-encrypt
+   - different → re-encrypt, for the keys `.sops.yaml` names now. When they are not those of the stored version, one line names the keys added and removed.
 5. Whatever `sops` returned is checked before git gets it: it must be a SOPS document with every value encrypted. If it is not, **exit non-zero**. (A creation rule with `encrypted_regex` and the like, or an old `sops`, can leave content in clear inside a valid-looking envelope.)
 
 `SOPS_FILTER_FORCE_REENCRYPT=1` skips the comparison in step 4 and always re-encrypts (storage-format change, fresh data keys).
@@ -314,6 +314,8 @@ git diff --cached --stat && git commit
 
 `rekey.sh` copies each SOPS-managed blob from the index into a private directory under `.git/` (ciphertext only), runs `sops updatekeys` on it against your `.sops.yaml`, and stages the result with `git update-index`. The working tree is not touched. It needs decryption access, and it accepts paths to limit the run.
 
+**Review every change to `.sops.yaml`.** It decides who can read every secret edited after it, whether or not anyone runs `rekey.sh`: the next edit of a file re-encrypts it for the keys `.sops.yaml` names then. A one-line change that adds a recipient is easy to wave through. The clean filter prints a line when a re-encryption changes the keys of a file, for example `sops clean filter: the keys of .env change with this version (from .sops.yaml): added: age age1…`, but by then the change is merged. Put `.sops.yaml` under CODEOWNERS or a required review.
+
 **Removing a recipient is not revocation.** `sops updatekeys` keeps the data key, and history keeps the old blobs: whoever was removed could read everything up to now. Rotate the secret values. Editing a value re-encrypts that file with a fresh data key; to do that for files you did not edit, run `SOPS_FILTER_FORCE_REENCRYPT=1 git add --renormalize .`
 
 ## When sops cannot decrypt: preflight and recovery
@@ -368,6 +370,7 @@ What you must still do:
 - **Protect working trees.** Checked-out secrets are plaintext on disk — that's the point. `0600` keeps other local accounts out; full-disk encryption and access control against everything else are on you.
 - **Re-run the tightening where hooks don't reach.** The hooks live in `.git/hooks`, which is not cloned, so a clone that never runs `install.sh` gets neither the filters nor the permissions. Anything that materialises secrets outside git (`sops decrypt > file`, a deploy script, an editor's temp copy) sets its own mode — run `harden-permissions.sh` afterwards or set the mode yourself. Do the same after `git stash`, `git stash pop` and `git reset --hard`: git runs no hook for them.
 - **Mind whose branches you check out while a session is live.** The smudge filter decrypts whatever a checkout brings, and a SOPS document says in its own metadata which key to ask for: an age recipient, a KMS key, a Vault address. `sops` follows that. A blob in a branch from someone else can name a key service you never use, and `sops` contacts it with your credentials. With HashiCorp Vault this was reproduced: `sops decrypt` sent the `X-Vault-Token` header to the address in the blob. With AWS it would be a signed `Decrypt` call for a foreign key ARN (not tested). This tool cannot stop it, because git hands the blob to the filter as part of the checkout. The clean filter does the same outside a checkout: a SOPS document in a managed path that is not the blob git holds (a copy from somewhere else, or one written into the working tree by a script) is decrypted to check it at the next `git status` or `git add`, so `sops` contacts the key service that document names. Read a change to a SOPS-managed file as ciphertext first (`git diff --no-textconv`, or the pull request page: the `sops` metadata with the key names is in clear), and do not check out branches of people you do not trust with a token or session for a key service in your environment.
+- **Review changes to `.sops.yaml`.** It decides who can read every secret edited after it. Put it under CODEOWNERS or a required review; see [Changing recipients](#changing-recipients-re-key).
 - **Client-side hooks are opt-in.** A collaborator who never runs `install.sh`/`pre-commit install` has no filter and no guard; if they create a *new* secret file it lands in plaintext. Mitigate with a server-side/CI check (a grep for `ENC[AES256_GCM` on managed paths is enough).
 - **History is forever.** Anything committed in plaintext *before* adoption stays in history — rewrite history or rotate those secrets.
 - **Rotate on suspicion.** Ciphertext in a public/leaked repo is only as strong as your key custody.
@@ -381,7 +384,7 @@ What you must still do:
 - **Text files only.** File content passes through shell variables, and a shell variable cannot hold a NUL byte. A file with NUL bytes (a keystore, a DER certificate, UTF-16 text) is refused: `git add` fails and says why, instead of storing the file damaged. Store a text form of it (base64, PEM, UTF-8). Fine for `.env`, PEM/OpenSSH keys, YAML, JSON.
 - **Trailing-newline normalization.** Content round-trips exactly, except exotic cases like a file whose last line has no terminating newline *and* SOPS dotenv format (which appends one).
 - **Merges need the driver.** Without `merge=sops` (or at least `merge=binary`) on a path, two branches that both changed that secret cannot be merged; see [Merging secrets](#merging-secrets).
-- **Recipients change only through `rekey.sh`.** Touching and re-adding a file does not re-encrypt it; see [Changing recipients](#changing-recipients-re-key).
+- **Files nobody edits keep their recipients until `rekey.sh`.** Touching and re-adding a file does not re-encrypt it; editing it does, for the keys `.sops.yaml` names then. See [Changing recipients](#changing-recipients-re-key).
 - **One filter name.** Everything is registered under the `sops` filter/diff driver; per-path different formats aren't supported (one `SOPS_STORE_FORMAT` per repo).
 - **`git add -p` stages a managed file whole.** Git shows the ciphertext, not your plaintext edit, and cannot stage part of the file. Stage the whole file with `git add`.
 - **Mode 0600 does not come back after every command.** Git runs no hook after `git stash`, `git stash pop`, `git reset --hard` and `git sparse-checkout add`. A secret that one of them writes again has your umask mode (usually `0644`) until the next commit, checkout or merge, or until you run `harden-permissions.sh`. A new secret has the umask mode until its first commit.
