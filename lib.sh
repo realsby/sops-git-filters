@@ -103,8 +103,17 @@ sgf_ls_managed() {
 #
 # sgf_paste_path <absolute path> : the path, quoted for a shell. For
 # what takes a file name: rm, a redirection.
+#
+# Each ' becomes '\'' (close the quotes, a quoted ', open them again).
+# Done in bash, not in a $(... | sed): a command substitution drops the
+# newlines at the end, and they are part of a name: for ".env.prod" with
+# a newline at its end, `rm '<top>/.env.prod'` would remove another file.
+# The pattern and the replacement are unquoted variables: bash 3.2 keeps
+# the quotes of "$q" in the result of "${1//"$q"/"$r"}", and bash 5.2
+# reads an unquoted & in the replacement as the match (there is none).
 sgf_paste_path() {
-	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+	local q="'" r="'\\''"
+	printf "'%s'" "${1//$q/$r}"
 }
 
 # sgf_paste_pathspec <absolute path> : the same, for a git command that

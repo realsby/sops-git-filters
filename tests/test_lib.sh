@@ -288,6 +288,27 @@ test_lib_paste_path_and_pathspec() {
 	assert_eq "$(sgf_paste_pathspec '/r/x*.env')" "':(literal)/r/x*.env'" "a star"
 	assert_eq "$(sgf_paste_pathspec '/r/x?.env')" "':(literal)/r/x?.env'" "a question mark"
 	assert_eq "$(sgf_paste_pathspec '/r/x\y.env')" "':(literal)/r/x\\y.env'" "a backslash"
+
+	# Pasted, the quoted string is the path again, byte for byte. A
+	# trailing newline is part of the name: dropped, `rm '<path>'` would
+	# name another file (".env.prod" for ".env.prod<newline>").
+	local p x
+	# shellcheck disable=SC1003,SC2016  # the backslashes, $(...) and backticks are meant literally
+	for p in "/r/a b'c.env" "/r/'" "/r/''" "/r/\\'" '/r/x\y' '/r/x\\' \
+		$'/r/.env.prod\n' $'/r/.env.prod\n\n' $'/r/a\nb.env' $'\n' \
+		'-rf' '/r/$(touch pwned)' '/r/`touch pwned`' '/r/$HOME' '/r/*?[x]' \
+		'/r/a&b' $'/r/\xff\'' ''; do
+		x=""
+		eval "x=$(sgf_paste_path "${p}")"
+		assert_eq "${x}" "${p}" "sgf_paste_path, pasted back: $(printf '%q' "${p}")"
+		x=""
+		eval "x=$(sgf_paste_pathspec "${p}")"
+		case "${p}" in
+		*[\*\?\[\\]*) assert_eq "${x}" ":(literal)${p}" "sgf_paste_pathspec, pasted back: $(printf '%q' "${p}")" ;;
+		*) assert_eq "${x}" "${p}" "sgf_paste_pathspec, pasted back: $(printf '%q' "${p}")" ;;
+		esac
+	done
+	[[ ! -e pwned ]] || fail "a name was run as a command"
 }
 
 test_lib_store_format() {

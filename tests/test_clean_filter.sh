@@ -414,6 +414,39 @@ test_clean_printed_commands_take_the_path_literally() {
 	assert_eq "$(git cat-file blob ":${file}" | sops decrypt --input-type json --output-type binary /dev/stdin)" "B=3" "the staged blob"
 }
 
+# A newline at the end of a name is part of it. The quoted path in the
+# commands the filter prints lost it once: for "b.secret<newline>",
+# `rm '<top>/b.secret' && git checkout -- '<top>/b.secret'` threw away
+# the edits in b.secret.
+test_clean_printed_commands_keep_a_trailing_newline() {
+	local file=$'b.secret\n' line
+	new_repo repo
+	# *.secret does not match a name that ends in a newline.
+	printf 'b.secret? filter=sops diff=sops\n' >>.gitattributes
+	git add .gitattributes
+	printf 'B=1\n' >b.secret
+	printf 'N=1\n' >"${file}"
+	git add -- b.secret "${file}"
+	git commit -q -m "two secrets"
+	assert_eq "$(git ls-files -z -- "${file}" | tr '\0' '|')" "${file}|" "test fixture: the name is tracked with its newline"
+	printf 'B=edited\n' >b.secret
+	mkdir -p sub
+
+	printf 'N=2\n' | encrypt_for json "${AGE_PUB_A}" >"${file}"
+	run git add -- "${file}"
+	assert_eq "${RC}" "0" "git add of a SOPS document"
+	# The printed command holds the newline of each of the two paths: it
+	# spans three lines. Their shape is checked before the eval, which
+	# must not run a line of some other message.
+	line="${OUT#*For the plaintext there: }"
+	line="$(printf '%s\n' "${line}" | head -3)"
+	[[ "${line}" == "rm '"*$'\n'"' && git checkout -- '"*$'\n'"'" ]] ||
+		fail "the printed command does not keep the newline of the name: [${line}]"
+	(cd sub && eval "${line}")
+	assert_eq "$(cat "${file}")" "N=2" "the file, decrypted"
+	assert_eq "$(cat b.secret)" "B=edited" "b.secret keeps its edits"
+}
+
 # The case the shortcut is for: install.sh ran without the key, and the
 # working copy still holds the ciphertext git holds. It is stored as it
 # is, without the key and without a call to sops (with a KMS key, every
