@@ -250,7 +250,7 @@ sgf_is_absolute() {
 	case "${OSTYPE:-}" in
 	msys* | cygwin* | win*)
 		case "$1" in
-		[A-Za-z]:[/\\]* | '\\'*) return 0 ;;
+		[A-Za-z]:[/\\]* | \\\\*) return 0 ;;
 		esac
 		;;
 	esac
